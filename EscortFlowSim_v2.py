@@ -50,9 +50,7 @@ parser.add_argument("-O", "--output_cells", nargs='+',
                     help="List of output locations, can be built from ranges in PBSCom format. e.g., 0-4-2 0  can be used to express cells (0,0),(0,2),(0,4)",
                     default=['0', '0'])
 parser.add_argument("-e", "--escorts_num", help="Number of escorts", type=int, default=8)
-parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
-                    help='Select queue management strategy fifo (default) or spt - closest load with most requests'
-                         , default='fifo')
+
 parser.add_argument("-f", "--csv", help="File name of the result csv file", default="sim_escort_flow.csv")
 parser.add_argument("--gamma", type=float, help="Weight of the movements in the objective function (default 0.01)",
                     default=0.01)
@@ -89,6 +87,10 @@ parser.add_argument("-M", "--max_balls_in_air", type=int,
                     help="Maximum number of loads that are retried concurrently, the rest are queued (default 5)",
                     default=5)
 parser.add_argument("-B", "--block_length", type=int, help="Number of requests in each simulation block (default 50)", default=50)
+parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
+                    help='Select queue management strategy when there are to many open requests to hande (more than '
+                         'max_balls_in__air fifo (default) or spt - closest load with most requests'
+                         , default='fifo')
 parser.add_argument("-w", "--warmup_arrivals", type=int,
                     help="Number of first loads to ignore when estimating mean lead time (default 10)", default=10)
 
