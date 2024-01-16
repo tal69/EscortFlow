@@ -1,5 +1,7 @@
 # -------------------------------------------------------------------------------
 # Name:        EscortFlowSim
+#              THIS IS AN OLD VERSION IN WHICH NEW REQUESTS ARE IGNORED UNTIL THE NEXT EXECUTION PERIOD
+#              EVEN IF THEIR RELATED LOADS ARE MOVING
 # Purpose:     Simulate dynamic PBS system with parallel retrival using our rolling horizon framework for
 #              the escort flow ILP model, SBM/SLM  (formerly BM/LM-NBM),  multi-loads,
 #              continue retrival mode

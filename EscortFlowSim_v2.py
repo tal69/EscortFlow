@@ -5,6 +5,7 @@
 #              the escort flow ILP model, SBM/SLM  (formerly BM/LM-NBM),  multi-loads,
 #              continue retrival mode
 #              Poisson arrival of requests
+#              Works only with SBM regime. Adding SLM should be simple but I never test it
 #
 # Author:      Tal Raviv,  talraviv@tau.ac.il
 #

@@ -525,7 +525,7 @@ def OneStep(Lx, Ly, O, _A, _E, BM, retrieval_method='continue', tabu_set=set([])
     return A, E, moves
 
 
-"""  This function apply One repeatedly to create a solution for a static problem """
+"""  This function applies OneStep repeatedly to create a solution for a static problem """
 
 
 def SimpleHeuristic(Lx, Ly, O, A, E, BM, verbose=False):

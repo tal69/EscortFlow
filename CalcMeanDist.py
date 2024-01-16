@@ -1,5 +1,5 @@
 """
-Calculate the mean distance to the closest output cell
+Calculate the mean distance to the closest output cell - VERY SIMPLE
 """
 
 import argparse
