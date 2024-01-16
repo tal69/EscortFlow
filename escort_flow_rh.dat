@@ -1,0 +1,17 @@
+file_export = "";
+time_limit = 10;
+distance_penalty=1;
+time_penalty=1;
+gamma=0.010000;
+Lx=13;
+Ly=6;
+T=15;
+T_int=5;
+T_exec=5;
+E={<0 4> <3 2> <4 2> <6 1> <7 0> <9 0> <11 1> <12 1> <12 4> <12 5> };
+A={<4 1> <6 0> };
+O={<6 0> };
+retrieval_mode = "leave";
+warm_start = 0;
+init_solA = {};
+init_solE = {};
