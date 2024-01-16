@@ -92,7 +92,10 @@ parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
                          'max_balls_in__air fifo (default) or spt - closest load with most requests'
                          , default='fifo')
 parser.add_argument("-w", "--warmup_arrivals", type=int,
-                    help="Number of first loads to ignore when estimating mean lead time (default 10)", default=10)
+                    help="Number "
+                         ""
+                         ""
+                         "of first loads to ignore when estimating mean lead time (default 10)", default=10)
 
 args = parser.parse_args()
 result_csv_file = args.csv
