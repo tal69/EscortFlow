@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------
-# Name:        EscortFlowSim_v2, second try, request are added immediately
+# Name:        EscortFlowSim_v2, second try, request are added and handled immediately
 #
 # Purpose:     Simulate dynamic PBS system with parallel retrival using our rolling horizon framework for
 #              the escort flow ILP model, SBM/SLM  (formerly BM/LM-NBM),  multi-loads,
@@ -76,6 +76,9 @@ parser.add_argument("-E", "--exec_horizon", type=int,
 parser.add_argument("-t", "--time_limit", type=int, help="Time limit for CPLEX calls (default 10 sec.)", default=10)
 parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
+parser.add_argument("-r", "--real_time", action="store_true",
+                    help="Apply solution is as the calculation is instantaneous. The actual computation time is "
+                         "completely ignored. With -E 1 this should give the best lead time. But it is not realistic ")
 parser.add_argument("-L", "--log", action="store_true",
                     help="Write report after each iteration into log file (sim_log<time>.txt), overwrite previous report")
 parser.add_argument("-R", "--request_rate", type=float, help="Request arrival rate (default 0.1 request/time step)",
@@ -160,7 +163,6 @@ np.random.seed(args.seed)
 random.seed(args.seed + 1)
 
 E = random.sample(Locations, args.escorts_num)
-#A = []
 A_orig, E_orig = [], copy.copy(E)  # save for script file
 moves = [[] for _ in range((args.simulation_length + 1000))]
 cpu_time = 0
@@ -253,22 +255,22 @@ while True:
             f.close()
         curr_t += 1
         idle_takt += 1
-        continue
-
+        # if curr_t < args.simulation_length:
+        #     continue
     # solve next execution horizon based on requests that where available at curt_t- execution_horizon
-    if curr_t >= next_execution_time:
+    elif curr_t >= next_execution_time:
         E = set(Locations) - set(load_loc.values())
         # locations of target loads
         target_loads = set([])  # target loads
         if args.queue_management == 'fifo':
             for r in open_requests:
-                if arrivals[r] <= curr_t-args.exec_horizon:
+                if arrivals[r] <= curr_t - (1 - args.real_time) * args.exec_horizon:
                     target_loads.add(req2load[r])
                 if len(target_loads) >= args.max_balls_in_air:
                     break
         else: # spt
             for r in open_requests:
-                if arrivals[r] <= curr_t-args.exec_horizon:
+                if arrivals[r] <= curr_t - (1 - args.real_time) * args.exec_horizon:
                     target_loads.add(req2load[r])
             target_loads = sorted(target_loads, key=lambda q: dist[load_loc[q][0], load_loc[q][1]] / len(requests_on_load[q]))[:args.max_balls_in_air]
 
@@ -368,7 +370,6 @@ while True:
                     mvs = f.readlines()
                     f.close()
                     moves[curr_t:(curr_t+args.exec_horizon)] = eval(mvs[-1])
-
 
     if moves[curr_t]:
         for (loc1, loc2) in moves[curr_t]:
