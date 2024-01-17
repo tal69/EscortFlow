@@ -217,7 +217,7 @@ class PathAnimation:
             if  mv[0] == mv[1]:
                 self.cnvs.itemconfig(Load_handle[-1], fill='red')
 
-        # Movoment annimation
+        # Movement animation
         start_time = time.time()
         last_time = start_time
 

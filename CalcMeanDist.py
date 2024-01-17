@@ -34,3 +34,5 @@ for x in range(Lx):
         total += min_val
 
 print(f"Mean distance to output cell: {total/(Lx*Ly)}")
+
+# print 10 random numbers between 1 and 17
