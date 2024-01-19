@@ -97,10 +97,7 @@ parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
                          'max_balls_in__air fifo (default) or spt - closest load with most requests'
                          , default='fifo')
 parser.add_argument("-w", "--warmup_arrivals", type=int,
-                    help="Number "
-                         ""
-                         ""
-                         "of first loads to ignore when estimating mean lead time (default 10)", default=10)
+                    help="Number of first loads to ignore when estimating mean lead time (default 10)", default=10)
 
 args = parser.parse_args()
 result_csv_file = args.csv
@@ -393,14 +390,21 @@ while True:
             if pbs[loc[0], loc[1]] != 0:
                 leaving_load = pbs[loc[0], loc[1]]
                 for req in requests_on_load[leaving_load]:
-                    total_lead_time += (curr_t  - arrivals[req])
-                    departures[req] = curr_t
+                    departures[req] = curr_t + 1
+                    total_lead_time += (departures[req] - arrivals[req])
+
                     open_requests.remove(req)
                     if args.log:
                         f = open(sim_log_file, "a")
                         f.write(
-                            f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load}\n")
+                            f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
                         f.close()
+                        #  For QA
+                        if departures[req] - arrivals[req] < orig_distance[req]:
+                            print("Panic: lead time is smaller than distance")
+                            exit(1)
+
+
                 requests_on_load[leaving_load] = []
 
     if curr_t > args.simulation_length and not open_requests:
