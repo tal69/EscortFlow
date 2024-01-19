@@ -28,11 +28,9 @@ total = 0
 
 for x in range(Lx):
     for y in range(Ly):
-        min_val = Lx+Ly
+        min_val = Lx + Ly
         for o in O:
-            min_val = min(min_val, abs(o[0]-x) + abs(o[1]-y))
+            min_val = min(min_val, abs(o[0] - x) + abs(o[1] - y))
         total += min_val
 
-print(f"Mean distance to output cell: {total/(Lx*Ly)}")
-
-# print 10 random numbers between 1 and 17
+print(f"Mean distance to output cell: {total / (Lx * Ly)}")

@@ -22,8 +22,9 @@
 #              31/12/2023 Record lead time at each block,   apply heuristic if ilp gap is above some threshold (default 0.3)
 #              13/1/2023 (v2), accept the requests while performing the solution, so requests that are
 #                         arrive at the output cells accidentally are removed immediately.
-#                         for this end we have to create a forecast of the state of the system at the begining
+#                         for this end we have to create a forecast of the state of the system at the beginning
 #                         of each execution horizon.
+#              18/1/2023 Keep record of the distance of the requests from the output cells upon their arrival
 #
 # Copyright:   (c) Tal Raviv 2023, 2024
 # Licence:     Free but please let me know that you are using it
@@ -202,13 +203,15 @@ for t in range(args.simulation_length):
 number_of_requests = len(arrivals)
 
 departures = np.zeros(number_of_requests, dtype=int)
+orig_distance = np.zeros(number_of_requests, dtype=int)  # the distance of the request from the output cell upon arrival
+
 
 f = open(result_csv_file, 'a')
 if args.header_line:
     f.write(
         f"\ndate, version, Queue Management, Lx x Ly, #IOs, # Escorts, IOs, Request rate, gamma, "
         f"distance_penalty, time_penalty, seed , T fractional, T integer, T execution, cpu time_limit, max balls in air, max opt gap, "
-        f"T sim, Warmup loads, T actual, Total lead time, # loads entered, mean lead time,  95% C.I, #load movements, total CPU time, "
+        f"T sim, Warmup loads, T actual, Total lead time, # loads entered, mean lead time,  95% C.I,mean excess time, 95% C.I, #load movements, total CPU time, "
         f"Sim iterations, Idle takts, Non optimal iter, max gap, Heuristic solution, Steady state block, blocks,..\n")
 f.close()  # we want to open and close the file anyway just to make sure that the file is available for writing.
 
@@ -234,6 +237,7 @@ while True:
     while req_count < number_of_requests and arrivals[req_count] <= curr_t:
         open_requests.append(req_count)
         requests_on_load[req2load[req_count]].append(req_count)
+        orig_distance[req_count] = dist[load_loc[req2load[req_count]][0], load_loc[req2load[req_count]][1]]
         if args.log:
             f = open(sim_log_file, "a")
             f.write(
@@ -435,7 +439,9 @@ if args.warmup_arrivals < number_of_requests-1:
     half_ci = 1.96 * lead_time_std / (number_of_requests - args.warmup_arrivals) ** 0.5
 else:
     total_lead_time = 0  # just to indicate that we don't have statistics
+    lead_time_mean = 0
     half_ci = 0
+    lead_time_std = 0
 # evaluate steady state -  by comparing lead time of last block of requests with the previous blocks
 steady_state_block = 0
 if number_of_requests > 2*args.block_length:
@@ -445,13 +451,20 @@ if number_of_requests > 2*args.block_length:
         curr_block_leadtime = np.mean(departures[(-(i+1)*args.block_length):-i*args.block_length] - arrivals[(-(i+1)*args.block_length):-i*args.block_length])
         if last_block_lead_time - curr_block_leadtime < (1.96 * args.block_length**0.5 )*lead_time_std:
             steady_state_block = num_of_blocks - i
+else:
+    num_of_blocks = 0
+    last_block_lead_time = 0
 
+# Calculate mean excess time
+excess_time = departures[args.warmup_arrivals:] - arrivals[args.warmup_arrivals:] - orig_distance[args.warmup_arrivals:]
+mean_excess_time = np.mean(excess_time)
+std_excess_time = np.std(excess_time, ddof=1)
+half_ci_excess_time = 1.96 * std_excess_time / (number_of_requests-args.warmup_arrivals) ** 0.5
 
 # just for debugging
 if min(departures - arrivals) < 0 and args.log:
     print("Error: some arrivals occurs after departure")
     print(f"{np.where(departures - arrivals < 0)}")
-
     f = open(sim_log_file, "a")
     f.write("Error: some arrivals occurs after departure\n")
     f.write(f"{np.where(departures - arrivals < 0)}\n")
@@ -463,7 +476,7 @@ f.write(
     f"{tuple_opl(O)},{args.request_rate}, {gamma}, {args.distance_penalty}, {args.time_penalty},{args.seed},"
     f" {args.fractional_horizon}, {args.integer_horizon}, {args.exec_horizon},{time_limit}, {args.max_balls_in_air}, {args.max_opt_gap}, "
     f"{args.simulation_length}, {args.warmup_arrivals}, {curr_t}, {total_lead_time},{number_of_requests}, "
-    f"{lead_time_mean:.3f}, {half_ci:.3f}, {NumberOfMovements},{cpu_time:.2f}, {sim_iter}, {idle_takt}, {non_optimal}, "
+    f"{lead_time_mean:.3f}, {half_ci:.3f}, {mean_excess_time:.3f}, {half_ci_excess_time:.3f}, {NumberOfMovements},{cpu_time:.2f}, {sim_iter}, {idle_takt}, {non_optimal}, "
     f"{max_gap:.4f}, {heuristic_sol}, {steady_state_block}")
 
 if number_of_requests > 2*args.block_length:
