@@ -77,8 +77,8 @@ parser.add_argument("-E", "--exec_horizon", type=int,
 parser.add_argument("-t", "--time_limit", type=int, help="Time limit for CPLEX calls (default 10 sec.)", default=10)
 parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
-parser.add_argument("-r", "--real_time", action="store_true",
-                    help="Apply solution is as the calculation is instantaneous. The actual computation time is "
+parser.add_argument("-m", "--offline", action="store_true",
+                    help="The actual computation time is "
                          "completely ignored. With -E 1 this should give the best lead time. But it is not realistic ")
 parser.add_argument("-L", "--log", action="store_true",
                     help="Write report after each iteration into log file (sim_log<time>.txt), overwrite previous report")
@@ -206,7 +206,7 @@ orig_distance = np.zeros(number_of_requests, dtype=int)  # the distance of the r
 f = open(result_csv_file, 'a')
 if args.header_line:
     f.write(
-        f"\ndate, version, Queue Management, Lx x Ly, #IOs, # Escorts, IOs, Request rate, gamma, "
+        f"\ndate, version, Solution mode, Queue Management, Lx x Ly, #IOs, # Escorts, IOs, Request rate, gamma, "
         f"distance_penalty, time_penalty, seed , T fractional, T integer, T execution, cpu time_limit, max balls in air, max opt gap, "
         f"T sim, Warmup loads, T actual, Total lead time, # loads entered, mean lead time,  95% C.I,mean excess time, 95% C.I, #load movements, total CPU time, "
         f"Sim iterations, Idle takts, Non optimal iter, max gap, Heuristic solution, Steady state block, blocks,..\n")
@@ -265,13 +265,13 @@ while True:
         target_loads = set([])  # target loads
         if args.queue_management == 'fifo':
             for r in open_requests:
-                if arrivals[r] <= curr_t - (1 - args.real_time) * args.exec_horizon:
+                if arrivals[r] <= curr_t - (1 - args.offline) * args.exec_horizon:
                     target_loads.add(req2load[r])
                 if len(target_loads) >= args.max_balls_in_air:
                     break
         else: # spt
             for r in open_requests:
-                if arrivals[r] <= curr_t - (1 - args.real_time) * args.exec_horizon:
+                if arrivals[r] <= curr_t - (1 - args.offline) * args.exec_horizon:
                     target_loads.add(req2load[r])
             target_loads = sorted(target_loads, key=lambda q: dist[load_loc[q][0], load_loc[q][1]] / len(requests_on_load[q]))[:args.max_balls_in_air]
 
@@ -476,7 +476,7 @@ if min(departures - arrivals) < 0 and args.log:
 
 f = open(result_csv_file, 'a')
 f.write(
-    f"{time.ctime()},v2, {args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
+    f"{time.ctime()},v2, {'offline' if args.offline else 'real-time'},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
     f"{tuple_opl(O)},{args.request_rate}, {gamma}, {args.distance_penalty}, {args.time_penalty},{args.seed},"
     f" {args.fractional_horizon}, {args.integer_horizon}, {args.exec_horizon},{time_limit}, {args.max_balls_in_air}, {args.max_opt_gap}, "
     f"{args.simulation_length}, {args.warmup_arrivals}, {curr_t}, {total_lead_time},{number_of_requests}, "
