@@ -49,7 +49,7 @@ range Yr = 0..Ly-1;
 {Loc} locations = {};
 
 {Loc} E = ...; // set of initial escort  initial locations
-{Loc} R = ...;  // Set of retrived item initial locations
+{Loc} R = ...;  // Set of retrieved item initial locations
 {Loc} B = locations diff E diff R;  // initial location of the blocking loads
 {Loc} O = ...;  // Output points locations
 
@@ -80,7 +80,7 @@ dvar int+ z;
 
 
 dexpr float NumberOfMovements = (sum(m in moves, t in Tr, i in 1..2 )  m.cost  *x[m,t,i])/gamma;
-dexpr float FlowTime = sum(l in O, t in Tr) t* q[l,t];  
+dexpr float flowtime = sum(l in O, t in Tr) t* q[l,t];  
 
 
 
@@ -88,10 +88,15 @@ minimize alpha* z + sum(m in moves, t in Tr, i in 1..2 )  m.cost  *x[m,t,i] + be
 
 subject to{
   // (2) in the paper
-  // Flow conservation at nodes for retrived loads (commodity 1)
+  // Flow conservation at nodes for retrieved loads (commodity 1)
   forall ( l in locations, t in 1..T) sum( m in moves : m.dest_x == l.x && m.dest_y == l.y) x[m,t-1,1]  == 
   	 sum( m in moves : m.orig_x == l.x && m.orig_y == l.y) x[m,t,1] +
   	 sum(l1 in O :l1 == l ) q[l1,t];
+
+//A loadsd cannot enter an output point immediately after one is retrieved
+		forall (  l in O, t in Tr)
+		sum(k in 1..2, m in moves : m.dest_x == l.x && m.dest_y == l.y && (m.orig_x != l.x || m.orig_y != l.y))
+		x[m,t,k] <= 1- q[l,t];
   	
  //Flow conservation at nodes for blocking loads (commodity 2)
   forall ( l in locations, t in 1..T) sum( m in moves : m.dest_x == l.x && m.dest_y == l.y) x[m,t-1,2]  == 

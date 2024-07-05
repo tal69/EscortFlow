@@ -59,7 +59,7 @@ parser.add_argument("-k", "--k_prime", type=int,
                     help="k' value for the dp based heuristic (provide only if you provided dp_file)", default=0)
 parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
-parser.add_argument("-b", "--bm", action="store_true", help="Block movement regime (otherwise NBM, aka LM)")
+parser.add_argument("-b", "--bm", action="store_true", help="Block movement regime (otherwise NBM, aka LM)")  # consider changing bm to be default because this what we have in the paper
 parser.add_argument("--bm_external", action="store_true",
                     help="Block movement regime with external network file created once")
 
@@ -83,7 +83,7 @@ escorts_range = str2range(args.escorts_range)
 dp_file = args.dp_file
 k_prime = args.k_prime
 
-if load_num == 1 and min(escorts_range) < k_prime:
+if load_num == 1 and min(escorts_range) < k_prime and k_prime > 0:
     print(f"Warning: minimal number of escorts {min(escorts_range)} must be greater then k'={k_prime}")
     exit(1)
 

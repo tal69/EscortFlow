@@ -4,7 +4,7 @@
 #
 # Author:      Tal Raviv,  talraviv@tau.ac.il
 #
-# Created:     23/08/2020, updated 18/9/2020, 15/3/2023, 10/12/2023
+# Created:     23/08/2020, updated 18/9/2020, 15/3/2023, 10/12/2023, 18/2/2024
 # Copyright:   (c) Tal Raviv 2020, 2023
 # Licence:     Free but please let me know that you are using it
 # -------------------------------------------------------------------------------
@@ -35,7 +35,7 @@ parser.add_argument('-m', '--retrieval_mode', choices=['stay', 'leave', 'continu
                     help='Select a retrieval mode. Default is stay. Also note that for stay mode the number '
                          'of output cells must be greater or equal the number target loads  (ONLY LEAVE IS SUPPORTED FOR NOW)',
                     default='leave')
-parser.add_argument("--csv", help="File name of the result csv file", default="res_load_flow.csv")
+parser.add_argument("-f","--csv", help="File name of the result csv file", default="res_load_flow.csv")
 parser.add_argument("--alpha", type=float, help="Weight of the makespan in the objective function (default 0.0)",
                     default=0)
 parser.add_argument("--beta", type=float, help="Weight of the flowtime in the objective function (default 1.0)",
