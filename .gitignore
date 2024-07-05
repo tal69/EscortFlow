@@ -2,4 +2,6 @@
 *.dat
 *.csv
 *.p
-.idea
+.idea/*
+test.py
+TestScript_v2.py
