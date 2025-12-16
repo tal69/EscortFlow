@@ -74,13 +74,13 @@ execute {
 }
 
 
-dvar boolean xA[movesA,Tr];  // flow of target loads
-dvar boolean xE[movesE,Tr];  // flow of escorts
+dvar float+ xA[movesA,Tr];  // flow of target loads
+dvar float+ xE[movesE,Tr];  // flow of escorts
 
 
 dvar float+ z;  // makespan if alpha> 0
 
-dvar int+ q[O];  // auxilary to faciltate cuts 
+dvar float+ q[O];  // auxiliary to facilitate cuts
 
 
 dexpr float NumberOfMovements = (sum(m in movesE, t in Tr ) (abs(m.orig_x-m.dest_x)+ abs(m.orig_y-m.dest_y))*  xE[m,t]);

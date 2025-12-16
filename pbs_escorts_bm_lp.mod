@@ -33,17 +33,8 @@ tuple Loc {
    key int orig_y;
    key int dest_x;
    key int dest_y;
+   float cost;
 }
-
- // Read network dat file
-{Loc} locations = ...; // L in the paper
-{Loc} NA[locations] = ...;
-{Loc} NE[locations] = ...;
-{Move} movesA = ...;
-{Move} movesE = ...;
-{Move} CellCover[locations] = ...;
-{Move} MoveCover[movesA] = ...;  // Continue with the creation of these sets
-
 
 
 int Lx = ...;
@@ -54,6 +45,10 @@ range Tr = 0..T;
 range Xr = 0..Lx-1;
 range Yr = 0..Ly-1;
 
+{Move} movesA = {};
+{Move} movesE = {};
+
+{Loc} locations = {}; // L in the paper
 
 {Loc} E = ...; // set of initial escort  initial locations
 {Loc} A = ...;  // Set of retrived item initial locations
@@ -63,6 +58,74 @@ range Yr = 0..Ly-1;
 string retrieval_mode = ...;  // after reterival load may  'stay', 'leave', or 'continue'
 
 int loads_to_retreive = card(A diff O);
+
+execute {
+  for (var x in Xr) for (var y in Yr) locations.add(x,y);
+}   
+
+{Loc} NA[locations];
+{Loc} NE[locations];
+
+
+
+execute  {
+	  for (var l in locations) {
+			NA[l].add(l);
+			movesA.add(l.x,l.y,l.x,l.y, 0);  // stay still 
+			if (l.x< Lx-1) {
+			 	NA[l].add(l.x+1,l.y);
+			 	movesA.add(l.x,l.y,l.x+1,l.y, gamma); // right		 
+			}
+			if (l.y< Ly-1)  {
+			  	NA[l].add(l.x,l.y+1); 
+			  	movesA.add(l.x,l.y,l.x,l.y+1, gamma);  // up
+			}
+			if(l.x>0){  
+			 	NA[l].add(l.x-1,l.y);
+			 	movesA.add(l.x,l.y,l.x-1,l.y, gamma);  // left 
+			}	 
+		    if(l.y>0) { 
+		      	NA[l].add(l.x,l.y-1)
+		      	movesA.add(l.x,l.y,l.x,l.y-1, gamma);  //down
+		   }
+		   for (var x in Xr) {
+		     movesE.add(l.x,l.y,x,l.y, Math.abs(l.x-x));
+			 NE[l].add(x,l.y);
+			 			   	
+		   }
+		   
+		   for (var y in Yr) { 
+			   	if (y != l.y)  {
+				     movesE.add(l.x,l.y,l.x,y, Math.abs(l.y-y));
+					 NE[l].add(l.x,y);
+	 			}				   	
+		   }     
+	  }
+	  
+}
+
+{Move} CellCover[locations];
+{Move} MoveCover[movesA];  // Continue with the creation of these sets
+
+execute {
+  for (var m in movesE) {
+    if (m.orig_y == m.dest_y)  {// horizontal movement including idle
+    	for (var x = Math.min(m.orig_x, m.dest_x); x <= Math.max(m.orig_x, m.dest_x); x++)  CellCover[locations.find(x, m.orig_y)].add(m);
+    	for (x = m.orig_x; x < m.dest_x; x++) MoveCover[movesA.find(x+1, m.orig_y, x, m.orig_y)].add(m);  // right movement	
+    	for (x = m.orig_x; x > m.dest_x; x--) MoveCover[movesA.find(x-1, m.orig_y, x, m.orig_y)].add(m);  // left movement	
+    	
+  	}    
+    if (m.orig_y != m.dest_y)  // vertical movement
+    	for (var y = Math.min(m.orig_y, m.dest_y); y <= Math.max(m.orig_y, m.dest_y); y++)  CellCover[locations.find(m.orig_x,y)].add(m);
+    	for (y = m.orig_y; y < m.dest_y; y++) MoveCover[movesA.find(m.orig_x, y+1, m.orig_x, y)].add(m);  // up movement	
+    	for (y = m.orig_y; y > m.dest_y; y--) MoveCover[movesA.find(m.orig_x, y-1, m.orig_x, y)].add(m);  // down movement	
+    	
+    
+  }    
+    
+    
+  
+}
 
 
 // Commodity 1 is target loads, and 2 is escorts 
@@ -74,16 +137,16 @@ execute {
 }
 
 
-dvar boolean xA[movesA,Tr];  // flow of target loads
-dvar boolean xE[movesE,Tr];  // flow of escorts
+dvar float+ xA[movesA,Tr];  // flow of target loads
+dvar float+ xE[movesE,Tr];  // flow of target loads
 
 
 dvar float+ z;  // makespan if alpha> 0
 
-dvar int+ q[O];  // auxilary to faciltate cuts 
+dvar float+ q[O];  // auxiliary to facilitate cuts
 
 
-dexpr float NumberOfMovements = (sum(m in movesE, t in Tr ) (abs(m.orig_x-m.dest_x)+ abs(m.orig_y-m.dest_y))*  xE[m,t]);
+dexpr float NumberOfMovements = (sum(m in movesE, t in Tr )  m.cost*xE[m,t]);
 dexpr float FlowTime = sum(l2 in O)  sum(l1 in NA[l2] : l2 != l1) sum(t in 1..T) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y>,t];  
 dexpr float CalcMakespan = max(l2 in O, l1 in NA[l2], t in Tr : l2 != l1) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y>,t];  
 
@@ -101,7 +164,7 @@ tuple tInitSol {
   int k;
 }
 
-// *****  Warmstart for single retrieval-stay problems
+// *****  Warms tart for single retrieval-stay problems
 {tInitSol} init_sol = ...;
 execute {
     if (Opl.card(A)==1 & Opl.card(init_sol) > 0) { 
@@ -111,9 +174,8 @@ execute {
 }
 
 
-minimize alpha*z + gamma*sum(m in movesE, t in Tr) (abs(m.orig_x-m.dest_x)+ abs(m.orig_y-m.dest_y))* xE[m,t] + beta* sum(l in O) q[l];
+minimize alpha*z + gamma*sum(m in movesE, t in Tr) m.cost*xE[m,t] + beta* sum(l in O) q[l];
 
-//(Math.abs(m.orig_x-m.dest_x)+ Math.abs(m.orig_y-m.dest_y))
 
 subject to
 {
@@ -123,13 +185,13 @@ subject to
 
   
   	 		 
-  if (retrieval_mode == "stay") {
+  if (retrieval_mode == "stay") {  // not in the paper
     // Flow conservation at nodes for escorts 
-          escort_flow_conservation_syay: forall ( l1 in locations, t in 1..T)     
+          escort_flow_conservation_stay1: forall ( l1 in locations, t in 1..T)
   	 		sum(l2 in NE[l1]) xE[<l2.x, l2.y, l1.x, l1.y>,t-1] == sum(l2 in NE[l1]) xE[<l1.x, l1.y, l2.x, l2.y>,t];
     
     	 // (2) Flow conservation at nodes for loads 
-  		load_flow_conservation_stay: forall ( l1 in locations, t in 1..T)   
+  		load_flow_conservation_stay2: forall ( l1 in locations, t in 1..T)
   	 		sum( l2 in NA[l1]) xA[<l2.x, l2.y, l1.x, l1.y>,t-1] == sum(l2 in NA[l1]) xA[<l1.x, l1.y, l2.x, l2.y>,t]; 	 	
   }  
   
@@ -144,9 +206,7 @@ subject to
   	 	sum(l2 in NA[l1]) xA[<l1.x, l1.y, l2.x, l2.y>,t];
   }  
   
-  if (retrieval_mode == "leave") {  // described in the text at the end of Section 3.1  
-  
-  
+  if (retrieval_mode == "leave") {  // described in the text at the end of Section 3.1
   		flow_conservation_leave1: forall (t in 1..T, l1 in O) xA[<l1.x, l1.y, l1.x, l1.y>,t] == 
   	 		sum(l2 in NA[l1]: l2 != l1) xA[<l2.x, l2.y, l1.x, l1.y>,t-1] ;
   	 	

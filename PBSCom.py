@@ -214,9 +214,6 @@ def GeneretaeRandomInstance(seed, Locations, num_escorts, num_load=1):
     # This should have beem the default for random.sample but there is a bug
     random.seed(seed)
 
-    # Not working correctly
-    # ez = random.sample(Locations,num_escorts+num_load)
-    # return  sorted(ez[:num_load]),  sorted(ez[num_load:])
 
     ez = random.sample(Locations, len(Locations))
     return sorted(ez[:num_load]), sorted(ez[num_load:(num_load + num_escorts)])

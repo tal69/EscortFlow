@@ -74,9 +74,9 @@ execute {
 }
 
 
-dvar boolean x[moves,Tr,1..2];  // flow on movement arcs
-dvar boolean q[O,Tr];  // flow on sink arcs
-dvar int+ z;
+dvar float+ x[moves,Tr,1..2];  // flow on movement arcs
+dvar float+ q[O,Tr];  // flow on sink arcs
+dvar float+ z;
 
 
 dexpr float NumberOfMovements = (sum(m in moves, t in Tr, i in 1..2 )  m.cost  *x[m,t,i])/gamma;

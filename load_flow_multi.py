@@ -55,7 +55,8 @@ parser.add_argument("--dp_file",
                     help="Dynamic programming file for upper bound and warm start (only relevant for single target load for now)", default="")
 parser.add_argument("-k", "--k_prime", type=int,
                     help="k' value for the dp based heuristic (provide only if you provided dp_file)", default=0)
-
+parser.add_argument("--lp", action="store_true",
+                    help="Run lp relaxation work only with bm movement regime (default False)")
 
 
 args = parser.parse_args()
@@ -110,7 +111,7 @@ Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
 
 f = open(result_csv_file, 'a')
 f.write(
-    "\ndate, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed, makespan, flowtime, #load movements, obj, LB, CPU timee\n")
+    "\ndate, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed, makespan, flowtime, #load movements, obj, LB, CPU timee\n")
 f.close()
 
 for escort_num in escorts_range:
@@ -130,10 +131,7 @@ for escort_num in escorts_range:
             T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
             if args.bm:
                 T = int(T * .8)
-
-
         f = open("pbs_load_flow.dat", "w")
-
         f.write('file_export = "%s";\n' % file_export)
         f.write(f'file_res = "{result_csv_file}";\n')
         f.write('time_limit = %d;\n' % time_limit)
@@ -151,11 +149,16 @@ for escort_num in escorts_range:
 
         f = open(result_csv_file, 'a')
         f.write(
-            f"{time.ctime()},{Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, {tuple_opl(E)}, {tuple_opl(R)}, {alpha},{beta},{gamma},{args.k_prime},{rep}")
+            f"{time.ctime()},{'BM' if args.bm else 'LM'}, {'LP' if args.lp else 'ILP'},"
+            f"{args.retrieval_mode},{Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
+            f"{tuple_opl(E)}, {tuple_opl(R)}, {alpha},{beta},{gamma},{args.k_prime},{rep}")
         f.close()
 
         try:
-            subprocess.run(["oplrun", "pbs_load_flow_multi.mod", "pbs_load_flow.dat"], check=True)
+            if args.lp:
+                subprocess.run(["oplrun", "pbs_load_flow_multi_lp.mod", "pbs_load_flow.dat"], check=True)
+            else:
+                subprocess.run(["oplrun", "pbs_load_flow_multi.mod", "pbs_load_flow.dat"], check=True)
             f = open(result_csv_file, 'a')
             f.write("\n")
             f.close()

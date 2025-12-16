@@ -62,6 +62,8 @@ parser.add_argument("-a", "--export_animation", action="store_true",
 parser.add_argument("-b", "--bm", action="store_true", help="Block movement regime (otherwise NBM, aka LM)")  # consider changing bm to be default because this what we have in the paper
 parser.add_argument("--bm_external", action="store_true",
                     help="Block movement regime with external network file created once")
+parser.add_argument("--lp", action="store_true",
+                    help="Run lp relaxation work only with bm movement regime (default False)")
 
 args = parser.parse_args()
 result_csv_file = args.csv
@@ -119,7 +121,7 @@ Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
 
 f = open(result_csv_file, 'a')
 f.write(
-    f"\ndate, Moves, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, seed, T, dp-{k_prime}' makespan, dp-{k_prime}' movements , ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Cplex Status\n")
+    f"\ndate, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, seed, T, dp-{k_prime}' makespan, dp-{k_prime}' movements , ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Cplex Status\n")
 f.close()
 
 if dp_file:
@@ -307,7 +309,8 @@ for escort_num in escorts_range:
 
         f = open(result_csv_file, 'a')
         f.write(
-            f"{time.ctime()},{'BM' if args.bm else 'LM'}{'2' if args.bm_external else ''}, {args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
+            f"{time.ctime()},{'BM' if args.bm else 'LM'}{'-Ext' if args.bm_external else ''}, {'LP' if args.lp else 'ILP'},"
+            f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
             f"{tuple_opl(E)}, {tuple_opl(R)}, {alpha},{beta},{gamma},{rep}, {T}, {len(moves)}, "
             f"{sum([len(x) for x in moves])}")
         f.close()
@@ -315,9 +318,15 @@ for escort_num in escorts_range:
         try:
             if args.bm:
                 if args.bm_external:  # external network file to speed up model creation - not working
-                    subprocess.run(["oplrun", "pbs_escorts_bm_ext.mod", "network_bm.dat", dat_file], check=True)
+                    if args.lp:
+                        subprocess.run(["oplrun", "pbs_escorts_bm_ext_lp.mod", "network_bm.dat", dat_file], check=True)
+                    else:
+                        subprocess.run(["oplrun", "pbs_escorts_bm_ext.mod", "network_bm.dat", dat_file], check=True)
                 else:
-                    subprocess.run(["oplrun", "pbs_escorts_bm.mod", dat_file], check=True)
+                    if args.lp:
+                        subprocess.run(["oplrun", "pbs_escorts_bm_lp.mod", dat_file], check=True)
+                    else:
+                        subprocess.run(["oplrun", "pbs_escorts_bm.mod", dat_file], check=True)
             else:
                 subprocess.run(["oplrun", "pbs_escorts_lm.mod", dat_file], check=True)
         except:
