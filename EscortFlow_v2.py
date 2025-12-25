@@ -65,9 +65,13 @@ parser.add_argument("--bm_external", action="store_true",
 parser.add_argument("--lp", action="store_true",
                     help="Run lp relaxation work only with bm movement regime (default False)")
 
+parser.add_argument("--print_sol", action="store_true",
+                    help="print non zero variables in the solution (default False)")
+
+
 args = parser.parse_args()
 result_csv_file = args.csv
-file_export = "out.txt" if args.export_animation else ""
+file_export = "out.txt" if args.export_animation or args.print_sol else ""
 
 dat_file = "escorts_flow3.dat"
 
