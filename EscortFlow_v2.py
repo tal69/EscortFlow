@@ -65,13 +65,11 @@ parser.add_argument("--bm_external", action="store_true",
 parser.add_argument("--lp", action="store_true",
                     help="Run lp relaxation work only with bm movement regime (default False)")
 
-parser.add_argument("--print_sol", action="store_true",
-                    help="print non zero variables in the solution (default False)")
 
 
 args = parser.parse_args()
 result_csv_file = args.csv
-file_export = "out.txt" if args.export_animation or args.print_sol else ""
+file_export = "out.txt" if args.export_animations else ""
 
 dat_file = "escorts_flow3.dat"
 
@@ -321,7 +319,7 @@ for escort_num in escorts_range:
 
         try:
             if args.bm:
-                if args.bm_external:  # external network file to speed up model creation - not working
+                if args.bm_external:  # external network file to speed up model creation
                     if args.lp:
                         subprocess.run(["oplrun", "pbs_escorts_bm_ext_lp.mod", "network_bm.dat", dat_file], check=True)
                     else:
