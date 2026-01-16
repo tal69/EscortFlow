@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------
-# Name:        EscortFlowSim_v2, second try, request are added and handled immediately
+# Name:        EscortFlowSim_v3, second try, request are added and handled immediately
 #
 # Purpose:     Simulate dynamic PBS system with parallel retrival using our rolling horizon framework for
 #              the escort flow ILP model, SBM/SLM  (formerly BM/LM-NBM),  multi-loads,
@@ -25,9 +25,10 @@
 #                         for this end we have to create a forecast of the state of the system at the beginning
 #                         of each execution horizon.
 #              18/1/2023 Keep record of the distance of the requests from the output cells upon their arrival
-#              14/1/2025 Option to run the full model
+#              14/1/2026 Option to run the full model a
+#              15/1/2026 (v3) back to a version without warm start (cleaner). Also limits number of threads to eight to fix mac sudio bug
 #
-# Copyright:   (c) Tal Raviv 2023, 2024
+# Copyright:   (c) Tal Raviv 2023, 2024, 2026
 # Licence:     Free but please let me know that you are using it
 # Depends on   PBSCom.py, escort_flow_lm_rh.mod, escort_flow_bm_rh.mod, SimpleHeuristic.py
 #              Assumes oplrun is installed and on the path
@@ -100,6 +101,11 @@ parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
                          , default='fifo')
 parser.add_argument("-w", "--warmup_arrivals", type=int,
                     help="Number of first loads to ignore when estimating mean lead time (default 10)", default=10)
+
+parser.add_argument("--num_threads", type=int,
+                    help="Number of threads to be used by the MIP solver - larger is not always better (default 8)", default=8)
+
+
 
 args = parser.parse_args()
 result_csv_file = args.csv
@@ -208,7 +214,7 @@ orig_distance = np.zeros(number_of_requests, dtype=int)  # the distance of the r
 f = open(result_csv_file, 'a')
 if args.header_line:
     f.write(
-        f"\ndate, version, Solution mode, Queue Management, Lx x Ly, #IOs, # Escorts, IOs, Request rate, gamma, "
+        f"\ndate, version, number_threads, Solution mode, Queue Management, Lx x Ly, #IOs, # Escorts, IOs, Request rate, gamma, "
         f"distance_penalty, time_penalty, seed , T fractional, T integer, T execution, cpu time_limit, max balls in air, max opt gap, "
         f"T sim, Warmup loads, T actual, Total lead time, # loads entered, mean lead time,  95% C.I,mean excess time, 95% C.I, #load movements, total CPU time, "
         f"Sim iterations, Idle takts, Non optimal iter, max gap, Heuristic solution, Steady state block, blocks,..\n")
@@ -285,6 +291,7 @@ while True:
             f = open(dat_file, "w")
             f.write('file_export = "%s";\n' % file_export)
             f.write('time_limit = %d;\n' % time_limit)
+            f.write('num_threads = %d;\n' % args.num_threads)
             f.write(f'distance_penalty={args.distance_penalty};\n')
             f.write(f'time_penalty={args.time_penalty};\n')
             f.write('gamma=%f;\n' % gamma)
@@ -297,13 +304,10 @@ while True:
             f.write('A=%s;\n' % tuple_opl(A))
             f.write('O=%s;\n' % tuple_opl(O))
             f.write(f'retrieval_mode = "continue";\n')
-            f.write(f'warm_start = 0;\n')
-            f.write('init_solA = {};\n')
-            f.write('init_solE = {};\n')
             f.close()
 
             try:
-                subprocess.run(["oplrun", "escort_flow_bm_rh.mod", dat_file], check=True)
+                subprocess.run(["oplrun", "escort_flow_bm_rh_v3.mod", dat_file], check=True)
             except:
                 print("Panic: Could not solve the model")
                 exit(1)
@@ -435,7 +439,7 @@ if args.export_animation:
     pickle.dump((Lx, Ly, O, E_orig, A_orig, moves),
                 # remove empty moves  periods at the end
                 open(
-                    f"script_sim_v2_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{args.simulation_length}.p",
+                    f"script_sim_v3_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{args.simulation_length}.p",
                     "wb"))
 
 arrivals = np.array(arrivals, dtype=int)
@@ -478,7 +482,7 @@ if min(departures - arrivals) < 0 and args.log:
 
 f = open(result_csv_file, 'a')
 f.write(
-    f"{time.ctime()},v2, {'offline' if args.offline else 'real-time'},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
+    f"{time.ctime()},v3, {args.num_threads}, {'offline' if args.offline else 'real-time'},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
     f"{tuple_opl(O)},{args.request_rate}, {gamma}, {args.distance_penalty}, {args.time_penalty},{args.seed},"
     f" {args.fractional_horizon}, {args.integer_horizon}, {args.exec_horizon},{time_limit}, {args.max_balls_in_air}, {args.max_opt_gap}, "
     f"{args.simulation_length}, {args.warmup_arrivals}, {curr_t}, {total_lead_time},{number_of_requests}, "

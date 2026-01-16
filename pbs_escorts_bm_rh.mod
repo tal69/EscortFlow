@@ -1,8 +1,9 @@
 /*********************************************
  * OPL 22.11 Model
  * Author: Tal Raviv
- * Creation Date: Aug 4, 2020,  Updated March 16, 2023, December 2023
+ * Creation Date: Aug 4, 2020,  Updated March 16, 2023, December 2023, Jan 2026
  * The escort flow model (multi-loads, block movements, stay/leave/continue)
+ * FUll model that produces output for the rolling horizon simulation
  *********************************************/
 
 
@@ -19,7 +20,7 @@ execute {cplex.tilim = time_limit;
 string file_export = ...;
 string file_res = ...;
 
-float alpha = ...; // C_max weight - can be zero
+float alpha = ...; // must be 0 now
 float beta = ...; // flowtime weight - can be zero
 float gamma = ...; // movement weight  (assumed > 0)
 
@@ -140,9 +141,6 @@ execute {
 dvar boolean xA[movesA,Tr];  // flow of target loads
 dvar boolean xE[movesE,Tr];  // flow of target loads
 
-
-dvar float+ z;  // makespan if alpha> 0
-
 dvar int+ q[O];  // auxiliary to facilitate cuts
 
 
@@ -174,7 +172,7 @@ execute {
 }
 
 
-minimize alpha*z + gamma*sum(m in movesE, t in Tr) m.cost*xE[m,t] + beta* sum(l in O) q[l];
+minimize  gamma*sum(m in movesE, t in Tr) m.cost*xE[m,t] + beta* sum(l in O) q[l];
 
 
 subject to
@@ -256,17 +254,7 @@ subject to
   all_arrive: sum(l2 in O, l1 in NA[l2] : l2 != l1) sum(t in Tr) xA[<l1.x, l1.y, l2.x, l2.y>,t] == loads_to_retreive;	
   
     
-  // (10) in the paper - assign makespan to z
- 
- 	
-	if (alpha > 0)   
-	{
-	  if (retrieval_mode == "stay" || card(A)==1) forall(l2 in O, l1 in NA[l2]: l1 != l2 ) sum(t in Tr) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y> ,t] + 1<= z;
-	  else forall(l2 in O, l1 in NA[l2],t in Tr: l1 != l2 )  t* xA[<l1.x, l1.y, l2.x, l2.y> ,t] + 1<= z;
-	}			
-	else z== 0; // just to supress the warning (z has never been used)
-
-// Integrality cut 
+// Integrality cut
 forall(l2 in O ) sum(t in Tr, l1 in NA[l2]: l1 != l2) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y> ,t] == q[l2]; 
 
 // Seems not to help it - perhapse it will with very hard instances
@@ -328,12 +316,8 @@ main {
 		   
 	} // if	file_export != ""
 	
-	if (thisOplModel.alpha > 0) { 
-		f_res.write(",", thisOplModel.z);
-	} 	
-	else {
-		f_res.write(",", thisOplModel.CalcMakespan);
-	}
+
+	f_res.write(",", thisOplModel.CalcMakespan);
 	
 	f_res.write( ",", thisOplModel.FlowTime, ",", thisOplModel.NumberOfMovements,",", 
 	cplex.getObjValue(), ",",cplex.getBestObjValue(),",",CpuTime, ",",cplex.getCplexStatus() );

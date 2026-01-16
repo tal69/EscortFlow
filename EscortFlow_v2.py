@@ -10,6 +10,7 @@
 #              5/12/2023 Added animation export file and argparse parameters
 #              8/12/2023 Added block movement support (running pbs_escorts_bm.mod)
 #              9/12/2023 added using DP heuristic to create upper bound for BM with a single load (without warm-start for now)
+#              12/2025   added --lp switch to allow solving the lp relaxation of te model
 # Copyright:   (c) Tal Raviv 2020, 2023
 # Licence:     Free but please let me know that you are using it
 # Depends on   PBSCom.py, PBS_DPHeuristic_lm.py, pbs_escorts3.mod, , pbs_escorts_bm.mod
@@ -69,7 +70,7 @@ parser.add_argument("--lp", action="store_true",
 
 args = parser.parse_args()
 result_csv_file = args.csv
-file_export = "out.txt" if args.export_animations else ""
+file_export = "out.txt" if args.export_animation else ""
 
 dat_file = "escorts_flow3.dat"
 

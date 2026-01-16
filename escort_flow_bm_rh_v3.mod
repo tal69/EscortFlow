@@ -6,14 +6,20 @@
  * Lighter model with neighborhood sets 
  * 
  * 11/2023 Rolling horizon version with penalty for load location and no arrival constraint
- * 13/12/2023 bm version 
+ * 13/12/2023 bm version
+ * 15/1/2026 back to a version without warm start (that does not seems to help)
  *********************************************/
 
 float temp;
 
 float time_limit = ...;
+int num_threads = ...;
 
-execute {cplex.tilim = time_limit;
+execute {
+		cplex.tilim = time_limit;  // set time limit
+		//cplex.auxRootThreads = -1;   // workaround for rare 22.1 root-thread hang
+		cplex.threads = num_threads;    // Limit the number to avoid too much overhead (good values are 4-16).
+
 		var before = new Date();
 		temp = before.getTime();} 
 
@@ -50,7 +56,7 @@ range Yr = 0..Ly-1;
 {Loc} locations = {}; // L in the paper
 
 {Loc} E = ...; // set of initial escort  initial locations
-{Loc} A = ...;  // Set of retrived item initial locations
+{Loc} A = ...;  // Set of retrieved item initial locations
 {Loc} O = ...;  // Output points locations  - NOT SURE WE NEED THIS
 {Loc} not_O = locations diff O;
 //{Loc} A_not_O = A diff O;
@@ -174,56 +180,6 @@ dexpr float flowtime_rh = sum(l2 in O, l1 in NA[l2]: l1 != l2) sum( t in 0..(T_e
 
 
 
-
-// ******  Initialize MipStart (advanced solution from heuristic) ********
-
-int warm_start = ...;
-
-//int xA_val[movesA,0..T_int];
-int xE_val[movesE,0..T_int];
-int xE_val0[movesE,0..T_int];
-//int xA_val0[movesA,0..T_int];
-
-tuple tInitSol {
-  int x1;
-  int y1;
-  int x2;
-  int y2;
-  int t;
-}
-
-
-// *****  Warmstart for single retrieval-stay problems
-{tInitSol} init_solA = ...;
-{tInitSol} init_solE = ...;
-
-
-execute {
-    if (warm_start == 1) { 
-	 	//for (var a in init_solA)  xA_val[movesA.get(a.x1,a.y1,a.x2,a.y2)][a.t] = 1;
-	 	for (var a in init_solE)  xE_val[movesE.get(a.x1,a.y1,a.x2,a.y2)][a.t] = 1;
-	 	
-	 	
-	    //cplex.addMIPStart(xA_int, xA_val);
-	    cplex.addMIPStart(xE_int, xE_val);	  
-  	}    
-  	
-  	for (e in E) {
-  	  for(var t = 0; t<= T_int; t++) {
-  	     xE_val0[movesE.get(e.x,e.y,e.x,e.y)][t] = 1;
-  	  }
-  	}
-  	
-//  	for (e in A) {
-//  	  for(var t = 0; t<= T_int; t++) {
-//  	     xA_val0[movesA.get(e.x,e.y,e.x,e.y)][t] = 1;
-//  	  }
-//  	}
-//  	cplex.addMIPStart(xA_int, xA_val0);
-	cplex.addMIPStart(xE_int, xE_val0);	  
-  	
-}
- 
  
 minimize sum(m in movesE, t in Tr) m.cost*xE[m,t] + sum(m in movesA, t in Tr)  p[<m.dest_x, m.dest_y>] * xA[m,t]; 
 
@@ -231,14 +187,12 @@ minimize sum(m in movesE, t in Tr) m.cost*xE[m,t] + sum(m in movesA, t in Tr)  p
 subject to
 {
   
-  //debug: forall( m in moves, t in Tr, k in 1..2) x[m,t,k] == x_val[m,t,k];
-  
+
   // Partial LP relaxation
   forall ( m in movesA, t in 0..T_int) xA_int[m,t] == xA[m,t];
   forall ( m in movesE, t in 0..T_int) xE_int[m,t] == xE[m,t];
 
- 
- 
+
   // Flow conservation at nodes for retrieved loads (both commodities)
   if (retrieval_mode == "stay") {
     	 // (2) in the paper
@@ -392,29 +346,7 @@ main {
 		   
 	} // if	file_export != ""
 	
-	if (thisOplModel.warm_start == 1)  {  //  **** for warm starting next horizon ****
-			f = new IloOplOutputFile("warm_start.dat");
-			f.write("init_solA = {");
-			for (var t=thisOplModel.T_exec ;t < thisOplModel.T_exec+ thisOplModel.T_int; t++) {
-			  	f.writeln("  ");
-				for (m in thisOplModel.movesA) if (thisOplModel.xA[thisOplModel.movesA.find(m)][t] > 0.99) {
-				  f.write("<",m.orig_x," ",m.orig_y," ",m.dest_x," ",m.dest_y," ",t-thisOplModel.T_exec,"> ");
-				}
- 			}			 
- 			f.writeln("};");
- 			
- 			
-			f.write("init_solE = {");
-			for (var t=thisOplModel.T_exec ;t < thisOplModel.T_exec+ thisOplModel.T_int; t++) {
-			  	f.writeln("  ");
-				for (m in thisOplModel.movesE) if (thisOplModel.xE[thisOplModel.movesE.find(m)][t] > 0.99) {
-				  f.write("<",m.orig_x," ",m.orig_y," ",m.dest_x," ",m.dest_y," ",t-thisOplModel.T_exec,"> ");
-				}
- 			}			 
- 			f.writeln("};");
- 			
-			f.close()
-	}
+
 	
   }  
   else { // could not find a feasible solution
