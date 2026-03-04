@@ -597,7 +597,7 @@ if __name__ == '__main__':
     parser.add_argument("-O", "--output_cells", nargs='+', type=int, help="List of output locations", default=[0, 0])
     parser.add_argument("-e", "--escorts_range", help="Range of number of escorts  3, 3-10, or 1-30-3", default="5")
     parser.add_argument("-r", "--reps_range", help="Replication range (seed range) 1, 1-10, or 1-30-3", default="1")
-    parser.add_argument("-l", "--load_num", type=int, help="Number of target loads (default 1)", default=1)
+    parser.add_argument("-l", "--load_num_curr_t", type=int, help="Number of target loads (default 1)", default=1)
     parser.add_argument('-m', '--retrieval_mode', choices=['stay', 'leave', 'continue'],
                         help='Select a retrieval mode. Default is stay. Also note that for stay mode the number '
                              'of output cells must be greater or equal the number target loads', default='leave')
@@ -624,7 +624,7 @@ if __name__ == '__main__':
                     print(f"Error: escort ({x},{y}) not in range (0-{args.Lx - 1}) x (0-{args.Ly - 1})")
                     exit(1)
 
-    if len(O) < args.load_num and args.retrieval_mode == "stay":
+    if len(O) < args.load_num_curr_t and args.retrieval_mode == "stay":
         print(
             f"Panic: In 'stay' settings number of output cells ({len(O)}) can not be smaller than the number of target loads ({load_num})")
         exit(1)
@@ -638,9 +638,9 @@ if __name__ == '__main__':
     for escort_num in escorts_range:
         for rep in reps_range:
             random.seed(rep)
-            A, E = GeneretaeRandomInstance(rep, Locations, escort_num, args.load_num)
+            A, E = GeneretaeRandomInstance(rep, Locations, escort_num, args.load_num_curr_t)
             moves = SimpleHeuristic(args.Lx, args.Ly, np.array(O), np.array(A), np.array(E), args.bm, True)
             if args.export_animation:
                 pickle.dump((args.Lx, args.Ly, O, E, A, moves), open(
                     f"script_simple_{'BM' if args.bm else 'LM'}_{args.retrieval_mode}_{args.Lx}_{args.Ly}_"
-                    f"{escort_num}_{args.load_num}_{rep}.p", "wb"))
+                    f"{escort_num}_{args.load_num_curr_t}_{rep}.p", "wb"))

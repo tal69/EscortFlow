@@ -45,9 +45,7 @@ tuple Loc {
 int Lx = ...;
 int Ly = ...;
 int T  = ...;   // total number of periods in the model, including fractional
-int T_int = ...;  //  total number of periods represented by boolean variables
 int T_exec = ...; // Execution horizon, the state of the system at the end of this period is the output
-// T > T_int > T_exec
 
 range Tr = 0..T;
 range Xr = 0..Lx-1;
@@ -72,12 +70,12 @@ execute {
 
 float p[locations];  // location penalty
 
-execute {  // calculate location penalty
-  for (var l in locations) p[l] = time_penalty + (Lx+Ly+1)*distance_penalty;  // initialize with large numbers
+execute {  // calculate location penlaty 
+  for (var l in locations) p[l] = (Lx+Ly+1)*(distance_penalty+ distance_penalty);
   
   for (var i in O) for (var l in locations) {
     var d = Math.abs(i.x-l.x) + Math.abs(i.y-l.y);
-    if ((time_penalty + distance_penalty*d) < p[l] ) p[l] = time_penalty+ distance_penalty*d;
+    if ((time_penalty + distance_penalty*d) < p[l] ) p[l] = distance_penalty+ distance_penalty*d;
     if(d==0) {
       if (retrieval_mode == 'leave')  {p[l] = gamma} else {p[l] = 0};  // make it leave
   }     
@@ -99,19 +97,19 @@ execute  {
 			movesA.add(l.x,l.y,l.x,l.y, 0);  // stay still 
 			if (l.x< Lx-1) {
 			 	NA[l].add(l.x+1,l.y);
-			 	movesA.add(l.x,l.y,l.x+1,l.y, 0); // right
+			 	movesA.add(l.x,l.y,l.x+1,l.y, gamma); // right		 
 			}
 			if (l.y< Ly-1)  {
 			  	NA[l].add(l.x,l.y+1); 
-			  	movesA.add(l.x,l.y,l.x,l.y+1, 0);  // up
+			  	movesA.add(l.x,l.y,l.x,l.y+1, gamma);  // up
 			}
 			if(l.x>0){  
 			 	NA[l].add(l.x-1,l.y);
-			 	movesA.add(l.x,l.y,l.x-1,l.y, 0);  // left
+			 	movesA.add(l.x,l.y,l.x-1,l.y, gamma);  // left 
 			}	 
 		    if(l.y>0) { 
 		      	NA[l].add(l.x,l.y-1)
-		      	movesA.add(l.x,l.y,l.x,l.y-1, 0);  //down
+		      	movesA.add(l.x,l.y,l.x,l.y-1, gamma);  //down
 		   }
 		   for (var x in Xr) {
 		     movesE.add(l.x,l.y,x,l.y, Math.abs(l.x-x));
@@ -167,48 +165,25 @@ execute {
   
 }
 
-dvar float xE[movesE,Tr] in 0..1;  // flow on escort movement arcs 
-dvar float xA[movesA,Tr] in 0..1;  // flow on target load movement 
+dvar boolean xE[movesE,Tr] in 0..1;  // flow on escort movement arcs
+dvar boolean xA[movesA,Tr] in 0..1;  // flow on target load movement
+dvar int+ q[O];  // time where items arriving each output
 
-dvar boolean xE_int[movesE, 0..T_int];
-dvar boolean xA_int[movesA, 0..T_int];
 
-dexpr float NumberOfMovements = (sum(m in movesE, t in 0..(T_exec-1) )  m.cost*xE[m,t]);   // may be wrong calculation because cost is not 0 or 1
-
+dexpr float NumberOfMovements = (sum(m in movesE, t in 0..(T_exec-1) )  m.cost*xE[m,t]);
 dexpr float makespan_rh = max(t in 0..(T_exec-1),l1 in not_O, l2 in NA[l1]) (t+1)*xA[<l1.x, l1.y, l2.x, l2.y>,t];
-dexpr float flowtime_rh = sum(l2 in O, l1 in NA[l2]: l1 != l2) sum( t in 0..(T_exec-1)) (t+1)*xA[<l1.x, l1.y, l2.x, l2.y>,t];   
+dexpr float flowtime_rh = sum(l2 in O, l1 in NA[l2]: l1 != l2) sum( t in 0..(T_exec-1)) (t+1)*xA[<l1.x, l1.y, l2.x, l2.y>,t];
 
-
-
- 
-minimize gamma*sum(m in movesE, t in Tr) m.cost*xE[m,t] + sum(m in movesA, t in Tr)  p[<m.dest_x, m.dest_y>] * xA[m,t];
-
+minimize  sum(l in O) q[l] + gamma*sum(m in movesE, t in Tr) m.cost*xE[m,t] ;
 
 subject to
 {
   
 
-  // Partial LP relaxation
-  forall ( m in movesA, t in 0..T_int) xA_int[m,t] == xA[m,t];
-  forall ( m in movesE, t in 0..T_int) xE_int[m,t] == xE[m,t];
-
-
   // Flow conservation at nodes for retrieved loads (both commodities)
-  if (retrieval_mode == "stay") {
-    	 // (2) in the paper
-  		flow_conservation_stay_A: forall ( l1 in locations, t in 1..T)   
-  	 	sum( l2 in NA[l1]) xA[<l2.x, l2.y, l1.x, l1.y>,t-1]  == 
-  	 	sum(l2 in NA[l1]) xA[<l1.x, l1.y, l2.x, l2.y>,t];
-  	 	
-  	 	flow_conservation_stay_E: forall ( l1 in locations, t in 1..T)   
-  	 	sum( l2 in NE[l1]) xE[<l2.x, l2.y, l1.x, l1.y>,t-1]  == 
-  	 	sum(l2 in NE[l1]) xE[<l1.x, l1.y, l2.x, l2.y>,t];
-  	 	
-  	 	
-  	 	
-}  
+
   
-  if (retrieval_mode == "continue") {  // described in the text at the end of Section 3.1
+  if (retrieval_mode == "continue") {  // The only option for our rolling horizon model for now
   		flow_conservation_cont1: forall ( l1 in locations, t in 1..T) 
   	 	sum( l2 in NE[l1]) xE[<l2.x, l2.y, l1.x, l1.y>,t-1]  == 
   	 	sum(l2 in NE[l1]) xE[<l1.x, l1.y, l2.x, l2.y>,t];
@@ -218,24 +193,7 @@ subject to
   	 	sum(l2 in NA[l1]) xA[<l1.x, l1.y, l2.x, l2.y>,t];
   }  
   
-  if (retrieval_mode == "leave") {  // described in the text at the end of Section 3.1  equations (12)-(14)
-    	
-    	
-    	flow_conservation_leave1: forall (t in 1..T, l1 in O) xA[<l1.x, l1.y, l1.x, l1.y>,t] == 
-  	 		sum(l2 in NA[l1]: l2 != l1) xA[<l2.x, l2.y, l1.x, l1.y>,t-1] ;
-  	 	
-  	 	flow_conservation_leave2: forall (l1 in O, t in 1..T)   
-  	 	xA[<l1.x, l1.y, l1.x, l1.y>,t-1] + sum( l2 in NE[l1]) xE[<l2.x, l2.y, l1.x, l1.y>,t-1]  ==  
-  	 		sum(l2 in NE[l1]) xE[<l1.x, l1.y, l2.x, l2.y>,t];
-  	 	
-  	 	flow_conservation_leave3: forall ( l1 in locations diff O, t in 1..T)   
-  	 		sum( l2 in NA[l1]) xA[<l2.x, l2.y, l1.x, l1.y>,t-1]  == sum(l2 in NA[l1]) xA[<l1.x, l1.y, l2.x, l2.y>,t];
-  	 	
-  	 	flow_conservation_leave4: forall ( l1 in locations diff O, t in 1..T)   
-  	 		sum( l2 in NE[l1]) xE[<l2.x, l2.y, l1.x, l1.y>,t-1]  == sum(l2 in NE[l1]) xE[<l1.x, l1.y, l2.x, l2.y>,t];
-  	 		
-  }
-  
+
   // (3) in the paper - target loads never leaves the output cell
   target_load_never_leaves: forall (t in Tr, l1 in O) sum(l2 in NA[l1]: l1 != l2) xA[<l1.x, l1.y, l2.x, l2.y>,t] == 0;
     
@@ -262,6 +220,13 @@ subject to
 	
   //  target load movements enforced
   forall(l in locations, t in Tr) 1 - xA[<l.x, l.y, l.x, l.y>, t] >= sum(m in CellCover[l]) xE[m,t];
+
+ // (9) in the paper - all target loads arrive at output cells
+  all_arrive: sum(l2 in O, l1 in NA[l2] : l2 != l1) sum(t in Tr) xA[<l1.x, l1.y, l2.x, l2.y>,t] == loads_to_retreive;
+
+
+// Integrality cut
+forall(l2 in O ) sum(t in Tr, l1 in NA[l2]: l1 != l2) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y> ,t] == q[l2];
 	
  }
 
@@ -281,7 +246,7 @@ main {
 	 			f.write("(", m.orig_x ,",",m.orig_y,"),")
 	    	}
 	   }    
-	   f.writeln("]"); // Line 0
+	   f.writeln("]");
 	   
 	  
 	   f.write("[");
@@ -290,15 +255,15 @@ main {
 	 			f.write("(", m.orig_x ,",",m.orig_y,"),")
 	    	}
 	   }    
-	   f.writeln("]");  // Line 1
-	   f.writeln(cplex.getCplexStatus()); // Line 2
-	   f.writeln(CpuTime); // Line 3
-	   f.writeln(thisOplModel.makespan_rh);  // Line 4
-	   f.writeln(thisOplModel.flowtime_rh); // Line 5
-	   f.writeln(thisOplModel.NumberOfMovements); // Line 6
+	   f.writeln("]");
+	   f.writeln(cplex.getCplexStatus());
+	   f.writeln(CpuTime);
+	   f.writeln(thisOplModel.makespan_rh);
+	   f.writeln(thisOplModel.flowtime_rh);
+	   f.writeln(thisOplModel.NumberOfMovements);
 	  
-	   f.writeln(cplex.getObjValue()); // Line 7
-	   f.writeln(cplex.getBestObjValue()); // Line 8
+	   f.writeln(cplex.getObjValue());
+	   f.writeln(cplex.getBestObjValue());
 	   f.close()
 	   	
      
