@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------
-# Name:        EscortFlowSim_v3
+# Name:        EscortFlowSim_v4
 #
 # Purpose:     Simulate dynamic PBS system with parallel retrival using our rolling horizon framework for
 #              the escort flow ILP model, SBM/SLM  (formerly BM/LM-NBM),  multi-loads,
@@ -29,6 +29,7 @@
 #              26/1/2026 Option to run full static model at offline rolling horizon, report about actual_max_balls
 #              2/3/2026  Stop if get stuck
 #              4/3/2026  Collect real waiting times data
+#              6/3/2026  v4 - applying a new heuristic from the file OneStepHeuristic.py
 #
 # Copyright:   (c) Tal Raviv 2023, 2024, 2026
 # Licence:     Free but please let me know that you are using it
@@ -45,7 +46,7 @@ import time
 import numpy as np
 import argparse
 
-import SimpleHeuristic
+import OneStepHeuristic
 from PBSCom import *
 
 parser = argparse.ArgumentParser()
@@ -94,7 +95,7 @@ parser.add_argument("-L", "--log", action="store_true",
 parser.add_argument("-R", "--request_rate", type=float, help="Request arrival rate (default 0.1 request/time step)",
                     default=0.1)
 parser.add_argument("-o", "--max_opt_gap", type=float, help="Maximum optimality gap to use ILP solution, otherwise use heuristic solution (default 0.4)",
-                    default=0.4)
+                    default=1)
 parser.add_argument("--seed", type=int, help="random seed (default 0)", default=0)
 parser.add_argument("-H", "--header_line", action="store_true", help="Print header line in result csv file")
 parser.add_argument("-F", "--full_model", action="store_true", help="run the full model instead of the surrogate model)")
@@ -173,7 +174,7 @@ random.seed(args.seed + 1)
 
 E = random.sample(Locations, args.escorts_num)
 A_orig, E_orig = [], copy.copy(E)  # save for script file
-moves = [[] for _ in range((args.simulation_length + 1000))]
+moves = [[] for _ in range((args.simulation_length + 2500))]
 cpu_time = 0
 total_lead_time = 0
 non_optimal = 0
@@ -242,8 +243,8 @@ while True:
         f = open(sim_log_file, "a")
         f.write(f"Time: {curr_t}: \n")
 
-        if curr_t > args.simulation_length + 250:
-            f.write("Panic: stop because get stop for more than 250 takts after the time limit\n")
+        if curr_t > args.simulation_length + 2500:
+            f.write("Panic: stop because get stuck for more than 2500 takts after the time limit\n")
             exit(1)
         f.close()
 
@@ -330,7 +331,7 @@ while True:
             actual_max_balls = max(actual_max_balls, len(A))
 
             try:
-                if args.static:
+                if args.static:   # using the same model as v3 so I didn't change the names
                     subprocess.run(["oplrun", "escort_flow_bm_rh_static_v3.mod", dat_file], check=True)
                 else:
                     subprocess.run(["oplrun", "escort_flow_bm_rh_v3.mod", dat_file], check=True)
@@ -359,37 +360,22 @@ while True:
                 if cplex_status not in [1, 11, 101, 102, 127] or ilp_gap > args.max_opt_gap or (
                         old_A != [] and set(A) == set(old_A) and set(E) == set(old_E)):
 
-                    #print(f"Logical expr3:  {old_A != [] and set(A) == set(old_A) and set(E) == set(old_E)}")
                     print("Could not solve model or solution obtained for the model is no-move - running greedy heuristic")
                     if args.log:
                         f = open(sim_log_file, "a")
                         f.write("Could not solve model or solution obtained for the model is no-move - running greedy heuristic\n")
 
-                    A_arr, E_arr, O_arr = np.array(old_A), np.array(list(old_E)), np.array(O)
-
                     for i in range(args.exec_horizon):
-                        old_Aa, old_Ea = copy.copy(A_arr), copy.copy(E_arr)  # # just for debugging and QA
-                        A_arr, E_arr, one_step_move = SimpleHeuristic.OneStep(Lx, Ly, O_arr, A_arr, E_arr, True)
+                        A, E, one_step_move = OneStepHeuristic.OneStep(Lx, Ly, set(O), set(old_A), set(old_E))
                         moves[curr_t+i] = one_step_move
                         NumberOfMovements += len(one_step_move)
 
-                        # Just for debugging and QA
-                        if not SimpleHeuristic.test_step(Lx, Ly, old_Aa, old_Ea, A_arr, E_arr, one_step_move):
-                            print("Panic: Could not solve the model even with heuristic - must be a bug")
-                            if args.log:
-                                f = open(sim_log_file, "a")
-                                f.write("Panic: Could not solve the model even with heuristic - must be a bug")
-                                f.close()
-                            exit(1)
-
-                    A = list(map(tuple, A_arr))
-                    E = list(map(tuple, E_arr))
                     heuristic_sol += 1
 
                     if args.log:
                         f = open(sim_log_file, "a")
                         f.write(
-                            f"      iteration {sim_iter}, status:{cplex_status} Cplex failed - ====== applying simple heuristic")
+                            f"      iteration {sim_iter}, status:{cplex_status} Cplex failed - ====== applying greedy heuristic")
                         f.write(f"      old_E = {old_E}, old_A = {old_A}, open_requests = {open_requests}\n")
                         f.write(f"      E = {E}, A = {A}\n")
                         f.close()
@@ -412,7 +398,7 @@ while True:
 
                         f.write(
                             f"\tfinish running cplex, iteration {sim_iter}, cplex status:{cplex_status} LB={lb_rh}, ob={obj_rh} "
-                            f"flowtime={len(A) * args.exec_horizon + flowtime_rh}, "
+                            f"flowtime={len(A) * args.exec_horizon + flowtime_rh}, open requests: {open_requests}\n"
                             f"{'****** ' if cpu_time_iter >= time_limit else ''} cpu_time={cpu_time_iter:.2f} "
                             f"Gap={100 * (obj_rh - lb_rh) / max(obj_rh, 1):.2f}%\n")
                         f.write(f"State after: E = {E}, A = {A}\n")
@@ -443,6 +429,7 @@ while True:
                 for req in requests_on_load[leaving_load]:
                     departures[req] = curr_t + 1
                     total_lead_time += (departures[req] - arrivals[req])
+                    start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
 
                     open_requests.remove(req)
                     if args.log:
@@ -488,7 +475,7 @@ if args.export_animation:
     pickle.dump((Lx, Ly, O, E_orig, A_orig, moves),
                 # remove empty moves  periods at the end
                 open(
-                    f"script_sim_v3_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{args.simulation_length}.p",
+                    f"script_sim_v4_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{args.simulation_length}.p",
                     "wb"))
 
 arrivals = np.array(arrivals, dtype=int)
@@ -543,6 +530,10 @@ if min(departures - arrivals) < 0 and args.log:
     f.write(f"{np.where(departures - arrivals < 0)}\n")
     f.close()
 
+if max(start_move) == np.iinfo(np.int32).max:
+    print("Error: the start moves time value for some request was not recorede")
+    print(f"{np.where(start_move==np.iinfo(np.int32).max)}")
+
 print(f"start_move={start_move}")
 print(f"arrivals={arrivals}")
 print(f"waiting_times={start_move-arrivals}")
@@ -550,7 +541,7 @@ print(f"waiting_times={start_move-arrivals}")
 
 f = open(result_csv_file, 'a')
 f.write(
-    f"{time.ctime()},v3, {args.num_threads}, {'offline' if args.offline else 'realtime'}-{'static' if args.static else 'surogate'},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
+    f"{time.ctime()},v4, {args.num_threads}, {'offline' if args.offline else 'realtime'}-{'static' if args.static else 'surogate'},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
     f"{tuple_opl(O)},{args.request_rate}, {gamma}, {args.distance_penalty}, {args.time_penalty},{args.seed},"
     f" {args.fractional_horizon}, {args.integer_horizon}, {args.exec_horizon},{time_limit}, {args.max_balls_in_air}, {args.max_opt_gap}, "
     f"{args.simulation_length}, {args.warmup_arrivals}, {curr_t}, {total_lead_time},{number_of_requests}, "

@@ -202,18 +202,19 @@ def tuple_opl(L):
 
     return s + "}"
 
+"""
+Sample locations of retrieved load(s) and escorts for a given location list
+ use
+     Locations =  sorted(set(itertools.product(range(Lx), range(Ly))))
+to create the list of locations first
 
-# Sample locations of retrived load(s) and escorts for a given location list
-# use
-#     Locations =  sorted(set(itertools.product(range(Lx), range(Ly))))
-# to create the list of locations first
-
+Return A, E as list of tuples
+"""
 def GeneretaeRandomInstance(seed, Locations, num_escorts, num_load=1):
     # We take the entire permutation to assure consistancey.
     # I.e., that larger sample with the same seed will have smaller one as subsets
     # This should have beem the default for random.sample but there is a bug
     random.seed(seed)
-
 
     ez = random.sample(Locations, len(Locations))
     return sorted(ez[:num_load]), sorted(ez[num_load:(num_load + num_escorts)])

@@ -14,6 +14,8 @@ import numpy as np
     For now (14/12/23) this heuristic works nicely for single load retrieval problems but tends to deadlock when 
     applied on multiple parallel retrieval 
     
+    OBSOLETE - USE OneStepHeuristic.py
+    
 """
 
 
