@@ -30,6 +30,8 @@
 #              2/3/2026  Stop if get stuck
 #              4/3/2026  Collect real waiting times data
 #              6/3/2026  v4 - applying a new heuristic from the file OneStepHeuristic.py
+#              10/3/2026 applying v2 of one step heuristic
+#              11/3/2026 save detailed results in "raw<time>.p" file
 #
 # Copyright:   (c) Tal Raviv 2023, 2024, 2026
 # Licence:     Free but please let me know that you are using it
@@ -46,7 +48,7 @@ import time
 import numpy as np
 import argparse
 
-import OneStepHeuristic
+import OneStepHeuristic_v2
 from PBSCom import *
 
 parser = argparse.ArgumentParser()
@@ -69,9 +71,11 @@ parser.add_argument("--time_penalty", type=float,
                     default=1)
 parser.add_argument("--num_threads", type=int,
                     help="Number of threads to be used by the MIP solver - larger is not always better (default 8)", default=8)
-parser.add_argument("-S", "--simulation_length", type=int,
-                    help="Number of periods in the not including time it takes to empty the system (default, 100 time steps)",
-                    default=100)
+# parser.add_argument("-S", "--simulation_length", type=int,
+#                     help="Number of periods in the not including time it takes to empty the system (default, 100 time steps)",
+#                     default=100)
+parser.add_argument("-S", "--number_of_blocks", type=int,
+                    help="Number of blocks in the simulation (default 20)", default=20)
 parser.add_argument("-T", "--fractional_horizon", type=int,
                     help="Number of fractional periods in model (default 10)",
                     default=10)
@@ -90,6 +94,9 @@ parser.add_argument("-m", "--offline", action="store_true",
 parser.add_argument( "--static", action="store_true",
                     help="Use the full static model instead of the surogate one. Should be used with --offline and long --time_limit ")
 
+parser.add_argument( "--greedy", action="store_true",
+                    help="Use greedy heuristic only (ignore the --static flag and force --offline)")
+
 parser.add_argument("-L", "--log", action="store_true",
                     help="Write report after each iteration into log file (sim_log<time>.txt), overwrite previous report")
 parser.add_argument("-R", "--request_rate", type=float, help="Request arrival rate (default 0.1 request/time step)",
@@ -102,13 +109,13 @@ parser.add_argument("-F", "--full_model", action="store_true", help="run the ful
 parser.add_argument("-M", "--max_balls_in_air", type=int,
                     help="Maximum number of target loads that are considered concurrently, the rest are queued (default 5)",
                     default=5)
-parser.add_argument("-B", "--block_length", type=int, help="Number of requests in each simulation block (default 50)", default=50)
+parser.add_argument("-B", "--block_length", type=int, help="Number of requests in each simulation block (default 200)", default=200)
 parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
                     help='Select queue management strategy when there are to many open requests to hande (more than '
                          'max_balls_in__air spt (default) or spt - closest load with most requests'
                          , default='spt')
-parser.add_argument("-w", "--warmup_arrivals", type=int,
-                    help="Number of first loads to ignore when estimating mean lead time (default 10)", default=10)
+parser.add_argument("-w", "--warmup_blocks", type=int,
+                    help="Number of first block to ignore when estimating mean lead time (one block)", default=1)
 
 
 args = parser.parse_args()
@@ -120,6 +127,10 @@ gamma = args.gamma  # movement weight
 time_limit = args.time_limit  # Time limit for cplex run (seconds)
 Lx = args.Lx
 Ly = args.Ly
+
+if args.greedy:
+    args.offline = True
+    args.max_balls_in_air = Lx*Ly
 
 if len(args.output_cells) % 2:
     print(f"Error: output cell coordinate list must be of even length - {args.output_cells}")
@@ -162,19 +173,22 @@ while B_new:
                     B_new.add((x1, y1))
 
 if args.log:
-    sim_log_file = f"sim_log{time.strftime('%H%M%S', time.localtime())}.txt"
+    sim_log_file = f"sim_log{time.strftime('%Y-%m%-d_%H%M%S', time.localtime())}.txt"
     f = open(sim_log_file, "w")
     f.write(f"{args}\n")
     f.write("Start simulation logging ...\n")
     f.close()
 
+pickle_file_name = f"raw{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}.p"
 curr_t = 0
 np.random.seed(args.seed)
 random.seed(args.seed + 1)
 
 E = random.sample(Locations, args.escorts_num)
 A_orig, E_orig = [], copy.copy(E)  # save for script file
-moves = [[] for _ in range((args.simulation_length + 2500))]
+number_of_requests = args.block_length * args.number_of_blocks
+max_simulation_length = (int(number_of_requests/args.request_rate)+ 2500)
+moves = [[] for _ in range((int(number_of_requests/args.request_rate)+ 2500))]
 cpu_time = 0
 total_lead_time = 0
 non_optimal = 0
@@ -205,12 +219,18 @@ enter_via_cell = []  # for the animation
 load_queue = []  # loads waiting to be handled when there is enough capacity
 
 # create all arrivals in advance (for variability reduction)
-for t in range(args.simulation_length):
+count = 0
+t = 0
+while count < number_of_requests:
     load_num_curr_t = np.random.poisson(args.request_rate)
+    if count + load_num_curr_t > number_of_requests:
+        load_num_curr_t = number_of_requests - count
     for i in range(load_num_curr_t):
         arrivals.append(t)
         req2load.append(random.randint(1, number_of_loads))
-number_of_requests = len(arrivals)
+    count += load_num_curr_t
+    t += 1
+
 
 departures = np.zeros(number_of_requests, dtype=np.int32)
 start_move = np.full(number_of_requests, np.iinfo(np.int32).max, dtype=np.int32) # Time the request start to be considered to allow calculation of waiting times
@@ -222,9 +242,9 @@ if args.header_line:
     f.write(
         f"\ndate, version, number_threads, Solution mode, Queue Management, Lx x Ly, #IOs, # Escorts, IOs, Request rate, gamma, "
         f"distance_penalty, time_penalty, seed , T fractional, T integer, T execution, cpu time_limit, max balls in air, max opt gap, "
-        f"T sim, Warmup loads, T actual, Total lead time, # loads entered, mean lead time,  95% C.I,mean excess time, 95% C.I, "
+        f"Number of requests, Warmup blocks, T actual, Total lead time, # loads entered, mean lead time,  95% C.I,mean excess time, 95% C.I, "
         f"Mean waiting time, 95% CI Waiting time,  #load movements, total CPU time, "
-        f"Sim iterations, Idle takts, Non optimal iter, max gap, Actual Max balls, Heuristic solution, Steady state block, blocks,..\n")
+        f"Sim iterations, Idle takts, Non optimal iter, max gap, Actual Max balls, Heuristic solution, lag1 autocorr, log file name, pickle file name, blocks,..\n")
 f.close()  # we want to open and close the file anyway just to make sure that the file is available for writing.
 
 req_count = 0
@@ -243,8 +263,8 @@ while True:
         f = open(sim_log_file, "a")
         f.write(f"Time: {curr_t}: \n")
 
-        if curr_t > args.simulation_length + 2500:
-            f.write("Panic: stop because get stuck for more than 2500 takts after the time limit\n")
+        if curr_t > max_simulation_length:
+            f.write(f"Panic: stop because get stuck for more than {max_simulation_length} taktst\n")
             exit(1)
         f.close()
 
@@ -306,93 +326,62 @@ while True:
 
         A = set([load_loc[ll] for ll in target_loads])
 
-        if set(A) - set(O):  # run optimization only if we have target loads outside output cells
-            next_execution_time = curr_t + args.exec_horizon
-            sim_iter += 1
-            f = open(dat_file, "w")
-            f.write('file_export = "%s";\n' % file_export)
-            f.write('time_limit = %d;\n' % time_limit)
-            f.write('num_threads = %d;\n' % args.num_threads)
-            f.write(f'distance_penalty={args.distance_penalty};\n')
-            f.write(f'time_penalty={args.time_penalty};\n')
-            f.write('gamma=%f;\n' % gamma)
-            f.write('Lx=%d;\n' % Lx)
-            f.write('Ly=%d;\n' % Ly)
-            f.write(f'T={args.fractional_horizon};\n')
-            f.write(f'T_exec={args.exec_horizon};\n')
-            if not args.static:
-                f.write(f'T_int={args.integer_horizon};\n')
-            f.write('E=%s;\n' % tuple_opl(E))
-            f.write('A=%s;\n' % tuple_opl(A))
-            f.write('O=%s;\n' % tuple_opl(O))
-            f.write(f'retrieval_mode = "continue";\n')
-            f.close()
+        if set(A) - set(O):
+            # run optimization only if we have target loads outside output cells
 
+            old_A, old_E = copy.copy(A), copy.copy(E)
             actual_max_balls = max(actual_max_balls, len(A))
 
-            try:
-                if args.static:   # using the same model as v3 so I didn't change the names
-                    subprocess.run(["oplrun", "escort_flow_bm_rh_static_v3.mod", dat_file], check=True)
-                else:
-                    subprocess.run(["oplrun", "escort_flow_bm_rh_v3.mod", dat_file], check=True)
-            except:
-                print("Panic: Could not solve the model")
-                if args.log:
-                    f = open(sim_log_file, "a")
-                    f.write("Panic: Could not solve the model")
-                    f.close()
-                exit(1)
-            else:
-                old_A, old_E = copy.copy(A), copy.copy(E)
-
-                f = open("end_of_exec_horizon.txt", "r")
-                s = f.readlines()
+            if not args.greedy:
+                next_execution_time = curr_t + args.exec_horizon
+                sim_iter += 1
+                f = open(dat_file, "w")
+                f.write('file_export = "%s";\n' % file_export)
+                f.write('time_limit = %d;\n' % time_limit)
+                f.write('num_threads = %d;\n' % args.num_threads)
+                f.write(f'distance_penalty={args.distance_penalty};\n')
+                f.write(f'time_penalty={args.time_penalty};\n')
+                f.write('gamma=%f;\n' % gamma)
+                f.write('Lx=%d;\n' % Lx)
+                f.write('Ly=%d;\n' % Ly)
+                f.write(f'T={args.fractional_horizon};\n')
+                f.write(f'T_exec={args.exec_horizon};\n')
+                if not args.static:
+                    f.write(f'T_int={args.integer_horizon};\n')
+                f.write('E=%s;\n' % tuple_opl(E))
+                f.write('A=%s;\n' % tuple_opl(A))
+                f.write('O=%s;\n' % tuple_opl(O))
+                f.write(f'retrieval_mode = "continue";\n')
                 f.close()
-                A, E = eval(s[0]), eval(s[1])
-                cplex_status, cpu_time_iter = int(s[2]), float(s[3])
-                obj_rh, lb_rh = float(s[7]), float(s[8])
-                if obj_rh != 0:
-                    ilp_gap = (obj_rh - lb_rh) / obj_rh
-                else:
-                    ilp_gap = 1
-                cpu_time += cpu_time_iter
 
-                if cplex_status not in [1, 11, 101, 102, 127] or ilp_gap > args.max_opt_gap or (
-                        old_A != [] and set(A) == set(old_A) and set(E) == set(old_E)):
-
-                    print("Could not solve model or solution obtained for the model is no-move - running greedy heuristic")
+                try:
+                    if args.static:   # using the same model as v3 so I didn't change the names
+                        subprocess.run(["oplrun", "escort_flow_bm_rh_static_v3.mod", dat_file], check=True)
+                    else:
+                        subprocess.run(["oplrun", "escort_flow_bm_rh_v3.mod", dat_file], check=True)
+                except:
+                    print("Panic: Could not solve the model")
                     if args.log:
                         f = open(sim_log_file, "a")
-                        f.write("Could not solve model or solution obtained for the model is no-move - running greedy heuristic\n")
-
-                    for i in range(args.exec_horizon):
-                        A, E, one_step_move = OneStepHeuristic.OneStep(Lx, Ly, set(O), set(old_A), set(old_E))
-                        moves[curr_t+i] = one_step_move
-                        NumberOfMovements += len(one_step_move)
-
-                    heuristic_sol += 1
-
-                    if args.log:
-                        f = open(sim_log_file, "a")
-                        f.write(
-                            f"      iteration {sim_iter}, status:{cplex_status} Cplex failed - ====== applying greedy heuristic")
-                        f.write(f"      old_E = {old_E}, old_A = {old_A}, open_requests = {open_requests}\n")
-                        f.write(f"      E = {E}, A = {A}\n")
+                        f.write("Panic: Could not solve the model")
                         f.close()
-
-                    # print(f"obf_rh={obj_rh}    lb_rh={lb_rh}, oldA={old_A}    A={A}   old_E={old_E}  E={E}")
-                    # exit(1)
+                    exit(1)
                 else:
-                    makespan_rh, flowtime_rh, NumberOfMovements_rh = round(float(s[4])), round(float(s[5])), round(float(s[6]))
-                    # we use round(float(s[4])) and not int(s[4]) because in some rare cases it is non integer but very close, e.g., 4.999999999998
-                    # In such a case int(s[4]) will produce an error
+                    f = open("end_of_exec_horizon.txt", "r")
+                    s = f.readlines()
+                    f.close()
+                    A, E = eval(s[0]), eval(s[1])
+                    cplex_status, cpu_time_iter = int(s[2]), float(s[3])
+                    obj_rh, lb_rh = float(s[7]), float(s[8])
+                    if obj_rh != 0:
+                        ilp_gap = (obj_rh - lb_rh) / obj_rh
+                    else:
+                        ilp_gap = 1
+                    cpu_time += cpu_time_iter
 
-                    if cpu_time_iter > time_limit:
-                        non_optimal += 1
+                    makespan_rh, flowtime_rh, NumberOfMovements_rh = round(float(s[4])), round(float(s[5])), round(
+                        float(s[6]))
 
-                    # total_lead_time += (len(A) * args.exec_horizon + flowtime_rh)
-                    NumberOfMovements += NumberOfMovements_rh
-                    max_gap = max(max_gap, ilp_gap)
                     if args.log:
                         f = open(sim_log_file, "a")
 
@@ -401,61 +390,104 @@ while True:
                             f"flowtime={len(A) * args.exec_horizon + flowtime_rh}, open requests: {open_requests}\n"
                             f"{'****** ' if cpu_time_iter >= time_limit else ''} cpu_time={cpu_time_iter:.2f} "
                             f"Gap={100 * (obj_rh - lb_rh) / max(obj_rh, 1):.2f}%\n")
-                        f.write(f"State after: E = {E}, A = {A}\n")
-
                         f.close()
-                    f = open(file_export)
-                    mvs = f.readlines()
-                    f.close()
-                    moves[curr_t:(curr_t+args.exec_horizon)] = eval(mvs[-1])
 
-    if moves[curr_t]:
-        for (loc1, loc2) in moves[curr_t]:
-            if loc1 != loc2:  # can happen because of changing color in animation
-                load_loc[pbs[loc1[0], loc1[1]]] = loc2
+
+            if args.greedy or cplex_status not in [1, 11, 101, 102, 127] or ilp_gap > args.max_opt_gap or (
+                    old_A != [] and set(A) == set(old_A) and set(E) == set(old_E)):
+
+                print("Did not solve ILP model because greedy= true or solution obtained for the model is infeasible or trivial\n running *** greedy *** heuristic")
+                if args.log:
+                    f = open(sim_log_file, "a")
+                    f.write("Did not solve ILP model because greedy= true or solution obtained for the model is infeasible or trivial\n Running *** greedy *** heuristic\n")
+
+                A, E = old_A, old_E  # no need to copy
+                for i in range(args.exec_horizon):
+                    A, E, one_step_move = OneStepHeuristic_v2.OneStep(Lx, Ly, set(O), set(A), set(E))
+                    moves[curr_t+i] = one_step_move
+                    NumberOfMovements += len(one_step_move)
+
+                A,E = list(A), list(E)
+                heuristic_sol += 1
+
                 if args.log:
                     f = open(sim_log_file, "a")
                     f.write(
-                        f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
+                        f"      iteration {sim_iter}")
+                    f.write(f"      old_E = {old_E}, old_A = {old_A}, open_requests = {open_requests}\n")
+                    f.write(f"      E = {E}, A = {A}\n")
                     f.close()
 
-        pbs = np.zeros((Lx, Ly), dtype=int)
-        for l, loc in load_loc.items():
-            pbs[loc[0], loc[1]] = l
+                # print(f"obf_rh={obj_rh}    lb_rh={lb_rh}, oldA={old_A}    A={A}   old_E={old_E}  E={E}")
+                # exit(1)
+            else:
 
-        for loc in O:
-            if pbs[loc[0], loc[1]] != 0:
-                leaving_load = pbs[loc[0], loc[1]]
-                for req in requests_on_load[leaving_load]:
-                    departures[req] = curr_t + 1
-                    total_lead_time += (departures[req] - arrivals[req])
-                    start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
+                # we use round(float(s[4])) and not int(s[4]) because in some rare cases it is non integer but very close, e.g., 4.999999999998
+                # In such a case int(s[4]) will produce an error
 
-                    open_requests.remove(req)
+                if cpu_time_iter >= time_limit:
+                    non_optimal += 1
+
+                # total_lead_time += (len(A) * args.exec_horizon + flowtime_rh)
+                NumberOfMovements += NumberOfMovements_rh
+                max_gap = max(max_gap, ilp_gap)
+                if args.log:
+                    f = open(sim_log_file, "a")
+                    f.write(f"State after: E = {E}, A = {A}\n")
+
+                    f.close()
+                f = open(file_export)
+                mvs = f.readlines()
+                f.close()
+                moves[curr_t:(curr_t+args.exec_horizon)] = eval(mvs[-1])
+
+        if moves[curr_t]:
+            for (loc1, loc2) in moves[curr_t]:
+                if loc1 != loc2:  # can happen because of changing color in animation
+                    load_loc[pbs[loc1[0], loc1[1]]] = loc2
                     if args.log:
                         f = open(sim_log_file, "a")
                         f.write(
-                            f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
+                            f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
                         f.close()
-                        #  For QA
-                        if departures[req] - arrivals[req] < orig_distance[req]:
-                            print("Panic: lead time is smaller than distance")
-                            if args.log:
-                                f = open(sim_log_file, "a")
-                                f.write("Panic: lead time is smaller than distance")
-                                f.close()
-                            exit(1)
+
+            pbs = np.zeros((Lx, Ly), dtype=int)
+            for l, loc in load_loc.items():
+                pbs[loc[0], loc[1]] = l
+
+            for loc in O:
+                if pbs[loc[0], loc[1]] != 0:
+                    leaving_load = pbs[loc[0], loc[1]]
+                    for req in requests_on_load[leaving_load]:
+                        departures[req] = curr_t + 1
+                        total_lead_time += (departures[req] - arrivals[req])
+                        start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
+
+                        open_requests.remove(req)
+                        if args.log:
+                            f = open(sim_log_file, "a")
+                            f.write(
+                                f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
+                            f.close()
+                            #  For QA
+                            if departures[req] - arrivals[req] < orig_distance[req]:
+                                print("Panic: lead time is smaller than distance")
+                                if args.log:
+                                    f = open(sim_log_file, "a")
+                                    f.write("Panic: lead time is smaller than distance")
+                                    f.close()
+                                exit(1)
 
 
-                requests_on_load[leaving_load] = []
+                    requests_on_load[leaving_load] = []
 
-    if curr_t > args.simulation_length and not open_requests:
-        print(f"Simulation end")
-        print(f"Total lead time: {total_lead_time}")
-        print(f"Mean lead time: {total_lead_time / req_count:.2f}  (including warmup period)")
-        break
+        if curr_t > arrivals[-1] and not open_requests:
+            print(f"Simulation end")
+            print(f"Total lead time: {total_lead_time}")
+            print(f"Mean lead time: {total_lead_time / req_count:.2f}  (including warmup period)")
+            break
 
-    if idle_takt > args.simulation_length:
+    if idle_takt > max_simulation_length:
         print("Error: simulation got stuck on idle state. Stopping and reporting results for debugging only")
         if args.log:
             f = open(sim_log_file, "a")
@@ -478,48 +510,36 @@ if args.export_animation:
                     f"script_sim_v4_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{args.simulation_length}.p",
                     "wb"))
 
-arrivals = np.array(arrivals, dtype=int)
-if args.warmup_arrivals < number_of_requests-1:
-    lead_time_mean = np.mean(departures[args.warmup_arrivals:] - arrivals[args.warmup_arrivals:])
-    waiting_time_mean = np.mean(start_move[args.warmup_arrivals:]-arrivals[args.warmup_arrivals:])
-    if len(departures[args.warmup_arrivals:]) > 1:
-        lead_time_std = np.std(departures[args.warmup_arrivals:] - arrivals[args.warmup_arrivals:], ddof=1)
-        half_ci = 1.96 * lead_time_std / (number_of_requests - args.warmup_arrivals) ** 0.5
-        waiting_time_std = np.std(start_move[args.warmup_arrivals:] - arrivals[args.warmup_arrivals:])
-        half_ci_waiting_time = 1.96 * waiting_time_std / (number_of_requests - args.warmup_arrivals) ** 0.5
-    else:
-        half_ci = np.inf
-        half_ci_waiting_time = np.inf
+arrivals = np.array(arrivals, dtype=int) # convert to np vector
+warmup_arrivals = args.warmup_blocks * args.block_length
+lead_times = departures - arrivals
+waiting_times = start_move-arrivals
+excess_times = departures- arrivals - orig_distance
+blocks_after_warmup = args.number_of_blocks - args.warmup_blocks
+lead_time_blocks = lead_times.reshape(args.number_of_blocks, args.block_length).mean(axis=1)   # shape (n,)
+waiting_time_blocks = waiting_times.reshape(args.number_of_blocks, args.block_length).mean(axis=1)  # shape (n,)
+excess_time_blocks = excess_times.reshape(args.number_of_blocks, args.block_length).mean(axis=1)  # shape (n,)
+if blocks_after_warmup > 1:
+    lead_time_mean = lead_time_blocks[args.warmup_blocks:].mean()
+    half_ci_lead_time = 1.96 * lead_time_blocks[args.warmup_blocks:].std(ddof=1)/ np.sqrt(blocks_after_warmup)
+    waiting_time_mean = waiting_time_blocks[args.warmup_blocks:].mean()
+    half_ci_waiting_time = 1.96*waiting_time_blocks[args.warmup_blocks:].std(ddof=1)/ np.sqrt(blocks_after_warmup)
+    excess_time_mean = excess_time_blocks[args.warmup_blocks:].mean()
+    half_ci_excess_time = 1.96*excess_time_blocks[args.warmup_blocks:].std(ddof=1)/ np.sqrt(blocks_after_warmup)
+
+    lag1_autocorr = np.corrcoef(lead_time_blocks[args.warmup_blocks:-1], lead_time_blocks[args.warmup_blocks+1:])[0, 1]
 else:
+    print("Sample to small for mean and CI calculation")
+    half_ci_lead_time = np.inf
+    half_ci_waiting_time = np.inf
+    half_ci_excess_time = np.inf
     total_lead_time = 0  # just to indicate that we don't have statistics
     lead_time_mean = 0
     waiting_time_mean = 0
-    half_ci = 0
-    lead_time_std = 0
-    half_ci_waiting_time = 0
+    excess_time_mean = 0
 
-
-# evaluate steady state -  by comparing lead time of last block of requests with the previous blocks
-steady_state_block = 0
-if number_of_requests > 2*args.block_length:
-    num_of_blocks = number_of_requests // args.block_length
-    last_block_lead_time = np.mean(departures[-args.block_length:] - arrivals[-args.block_length:])
-    for i in range(1, num_of_blocks):
-        curr_block_leadtime = np.mean(departures[(-(i+1)*args.block_length):-i*args.block_length] - arrivals[(-(i+1)*args.block_length):-i*args.block_length])
-        if last_block_lead_time - curr_block_leadtime < (1.96 * args.block_length**0.5 )*lead_time_std:
-            steady_state_block = num_of_blocks - i
-else:
-    num_of_blocks = 0
-    last_block_lead_time = 0
-
-# Calculate mean excess time
-excess_time = departures[args.warmup_arrivals:] - arrivals[args.warmup_arrivals:] - orig_distance[args.warmup_arrivals:]
-mean_excess_time = np.mean(excess_time)
-if len(excess_time) > 1:
-    std_excess_time = np.std(excess_time, ddof=1)
-    half_ci_excess_time = 1.96 * std_excess_time / (number_of_requests-args.warmup_arrivals) ** 0.5
-else:
-    half_ci_excess_time = np.inf
+# todo: check auto correlation and steady state
+steady_state_block = 1
 
 # just for debugging
 if min(departures - arrivals) < 0 and args.log:
@@ -538,19 +558,31 @@ print(f"start_move={start_move}")
 print(f"arrivals={arrivals}")
 print(f"waiting_times={start_move-arrivals}")
 
+if args.greedy:
+    alg_name = "Greedy"
+else:
+    if args.offline:
+        alg_name = "offline-"
+    else:
+        alg_name = "realtime-"
+    if args.static:
+        alg_name += "static"
+    else:
+        alg_name += "surrogate"
 
 f = open(result_csv_file, 'a')
 f.write(
-    f"{time.ctime()},v4, {args.num_threads}, {'offline' if args.offline else 'realtime'}-{'static' if args.static else 'surogate'},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
+    f"{time.ctime()},v4, {args.num_threads}, {alg_name},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
     f"{tuple_opl(O)},{args.request_rate}, {gamma}, {args.distance_penalty}, {args.time_penalty},{args.seed},"
     f" {args.fractional_horizon}, {args.integer_horizon}, {args.exec_horizon},{time_limit}, {args.max_balls_in_air}, {args.max_opt_gap}, "
-    f"{args.simulation_length}, {args.warmup_arrivals}, {curr_t}, {total_lead_time},{number_of_requests}, "
-    f"{lead_time_mean:.3f}, {half_ci:.3f}, {mean_excess_time:.3f}, {half_ci_excess_time:.3f}, {waiting_time_mean:.3f}, {half_ci_waiting_time:.3f}, {NumberOfMovements},{cpu_time:.2f}, {sim_iter}, {idle_takt}, {non_optimal}, "
-    f"{max_gap:.4f}, {actual_max_balls},  {heuristic_sol}, {steady_state_block}")
+    f"{number_of_requests}, {args.warmup_blocks}, {curr_t}, {total_lead_time},{number_of_requests}, "
+    f"{lead_time_mean:.3f}, {half_ci_lead_time:.3f}, {excess_time_mean:.3f}, {half_ci_excess_time:.3f}, {waiting_time_mean:.3f}, {half_ci_waiting_time:.3f}, {NumberOfMovements},{cpu_time:.2f}, {sim_iter}, {idle_takt}, {non_optimal}, "
+    f"{max_gap:.4f}, {actual_max_balls},  {heuristic_sol}, {lag1_autocorr:.3f}, {sim_log_file}, {pickle_file_name}")
 
 if number_of_requests > 2*args.block_length:
-    for i in range(num_of_blocks-1, 0, -1):
-        f.write(f" ,{np.mean(departures[(-(i+1)*args.block_length):-i*args.block_length] - arrivals[(-(i+1)*args.block_length):-i*args.block_length])}")
-    f.write(f" ,{last_block_lead_time}")
+    for i in range(args.number_of_blocks):
+        f.write(f" ,{lead_time_blocks[i]}")
 f.write("\n")
 f.close()
+
+pickle.dump((Lx, Ly, O, E_orig,arrivals, departures, start_move, moves), open(pickle_file_name,"wb"))
