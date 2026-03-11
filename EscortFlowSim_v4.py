@@ -258,6 +258,8 @@ if args.log:
 open_requests = []
 next_execution_time = args.exec_horizon * 2  # start moving loads on after two execution horizons
 
+dist_map = OneStepHeuristic_v2.build_dist_map(Lx, Ly, O)  # for the greedy heuristic
+
 while True:
     if args.log:
         f = open(sim_log_file, "a")
@@ -403,7 +405,7 @@ while True:
 
                 A, E = old_A, old_E  # no need to copy
                 for i in range(args.exec_horizon):
-                    A, E, one_step_move = OneStepHeuristic_v2.OneStep(Lx, Ly, set(O), set(A), set(E))
+                    A, E, one_step_move = OneStepHeuristic_v2.OneStep(Lx, Ly, set(O), set(A), set(E), dist_map)
                     moves[curr_t+i] = one_step_move
                     NumberOfMovements += len(one_step_move)
 
@@ -554,10 +556,6 @@ if max(start_move) == np.iinfo(np.int32).max:
     print("Error: the start moves time value for some request was not recorede")
     print(f"{np.where(start_move==np.iinfo(np.int32).max)}")
 
-print(f"start_move={start_move}")
-print(f"arrivals={arrivals}")
-print(f"waiting_times={start_move-arrivals}")
-
 if args.greedy:
     alg_name = "Greedy"
 else:
@@ -570,6 +568,8 @@ else:
     else:
         alg_name += "surrogate"
 
+    alg_name += f"Q{args.max_balls_in_air}"
+
 f = open(result_csv_file, 'a')
 f.write(
     f"{time.ctime()},v4, {args.num_threads}, {alg_name},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
@@ -579,10 +579,12 @@ f.write(
     f"{lead_time_mean:.3f}, {half_ci_lead_time:.3f}, {excess_time_mean:.3f}, {half_ci_excess_time:.3f}, {waiting_time_mean:.3f}, {half_ci_waiting_time:.3f}, {NumberOfMovements},{cpu_time:.2f}, {sim_iter}, {idle_takt}, {non_optimal}, "
     f"{max_gap:.4f}, {actual_max_balls},  {heuristic_sol}, {lag1_autocorr:.3f}, {sim_log_file}, {pickle_file_name}")
 
-if number_of_requests > 2*args.block_length:
-    for i in range(args.number_of_blocks):
-        f.write(f" ,{lead_time_blocks[i]}")
-f.write("\n")
+# if number_of_requests > 2*args.block_length:
+#     for i in range(args.number_of_blocks):
+#         f.write(f" ,{lead_time_blocks[i]}")
+# f.write("\n")
 f.close()
 
-pickle.dump((Lx, Ly, O, E_orig,arrivals, departures, start_move, moves), open(pickle_file_name,"wb"))
+pickle.dump((alg_name, args.queue_management, args.seed, args.fractional_horizon, args.integer_horizon,
+             args.exec_horizon,time_limit, args.max_balls_in_air, args.max_opt_gap, Lx, Ly, O, E_orig,arrivals,
+             departures, start_move, moves, actual_max_balls,non_optimal, max_gap,heuristic_sol), open(pickle_file_name,"wb"))
