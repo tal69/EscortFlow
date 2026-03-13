@@ -1,45 +1,62 @@
-# -------------------------------------------------------------------------------
-# Name:        EscortFlowSim_v5
-#
-# Purpose:     Simulate dynamic PBS system with parallel retrival using our rolling horizon framework for
-#              the escort flow ILP model, SBM/SLM  (formerly BM/LM-NBM),  multi-loads,
-#              continue retrival mode
-#              Poisson arrival of requests
-#              Works only with SBM regime. Adding SLM should be simple but I never test it
-#
-# Author:      Tal Raviv,  talraviv@tau.ac.il
-#
-# Created:     3/12/2023, first version adapted from the load flow formulation implementation, warm start for single load
-#              5/12/2023 Added animation export file and argparse parameters
-#              8/12/2023 Added block movement support (running pbs_escorts_bm.mod)
-#              9/12/2023 added using DP heuristic to create upper bound for BM with a single load (without warm-start for now)
-#              11/12/2023 Implementation of the RH framework
-#              13/12/2023 Block movement support for RH (running  escort_flow_bm_rh.mod)
-#              15/12/2023 Dynamic simulation
-#              16/12/2023 Add max_balls_in_air and queuing, collecting statistics in blocks and simulation warmup
-#              17/12/2023 Real time version that adjust to the solution time
-#              21/12/2023 Implementation of the simple heuristic for SBM
-#              31/12/2023 Record lead time at each block,   apply heuristic if ilp gap is above some threshold (default 0.3)
-#              13/1/2023 (v2), accept the requests while performing the solution, so requests that are
-#                         arrive at the output cells accidentally are removed immediately.
-#                         for this end we have to create a forecast of the state of the system at the beginning
-#                         of each execution horizon.
-#              18/1/2023 Keep record of the distance of the requests from the output cells upon their arrival
-#              15/1/2026 (v3) back to a version without warm start (cleaner). Also limits number of threads to eight by default to fix mac sudio bug
-#              26/1/2026 Option to run full static model at offline rolling horizon, report about actual_max_balls
-#              2/3/2026  Stop if get stuck
-#              4/3/2026  Collect real waiting times data
-#              6/3/2026  v4 - applying a new heuristic from the file OneStepHeuristic.py
-#              10/3/2026 applying v2 of one step heuristic
-#              11/3/2026 save detailed results in "raw<time>.p" file
-#              11/3/2026 v5 - remove block/warmup/CI estimation and use number_of_requests directly
-#
-# Copyright:   (c) Tal Raviv 2023, 2024, 2026
-# Licence:     Free but please let me know that you are using it
-# Depends on   PBSCom.py, escort_flow_lm_rh.mod, escort_flow_bm_rh.mod, SimpleHeuristic.py
-#              Assumes oplrun is installed and on the path
-#              Creates input for FlowAnimation (2023 version)
-# -------------------------------------------------------------------------------
+"""Simulate dynamic PBS retrieval under a rolling-horizon control policy.
+
+The script generates a stream of retrieval requests, runs either the MILP-based
+controller or the greedy fallback heuristic over successive execution horizons,
+and records both aggregate performance statistics and a raw pickle trace.
+
+Timing convention:
+- Requests with arrival time `t` enter the simulation at time `t`.
+- In offline mode, such requests are immediately eligible for the next
+  planning call. In online mode, they become eligible only after one full
+  execution-horizon delay, so a request may wait through one horizon before it
+  is first considered by the optimizer.
+- A planning decision taken at time `t` produces moves for the next
+  `exec_horizon` simulated time steps, so a newly eligible request may still
+  wait until the current solve finishes before its load starts moving.
+- The move list for the current time step is then applied to the PBS state.
+- Requests whose loads occupy an output cell after those moves depart at time
+  `t + 1`.
+
+Outputs:
+- CSV summary line with configuration and performance statistics.
+- Raw pickle containing the simulation trace needed by `CI_Calculation.py` and
+  `FlowAnimationSim.py`.
+
+Author:      Tal Raviv,  talraviv@tau.ac.il
+Copyright:   (c) Tal Raviv 2023, 2024, 2026
+Licence:     Free but please let me know that you are using it
+Depends on   PBSCom.py, escort_flow_lm_rh.mod, escort_flow_bm_rh.mod, SimpleHeuristic.py
+              Assumes oplrun is installed and on the path
+
+
+History:     3/12/2023, first version adapted from the load flow formulation implementation, warm start for single load
+             5/12/2023 Added animation export file and argparse parameters
+             8/12/2023 Added block movement support (running pbs_escorts_bm.mod)
+             9/12/2023 added using DP heuristic to create upper bound for BM with a single load (without warm-start for now)
+             11/12/2023 Implementation of the RH framework
+             13/12/2023 Block movement support for RH (running  escort_flow_bm_rh.mod)
+             15/12/2023 Dynamic simulation
+             16/12/2023 Add max_balls_in_air and queuing, collecting statistics in blocks and simulation warmup
+             17/12/2023 Real time version that adjust to the solution time
+             21/12/2023 Implementation of the simple heuristic for SBM
+             31/12/2023 Record lead time at each block,   apply heuristic if ilp gap is above some threshold (default 0.3)
+             13/1/2023 (v2), accept the requests while performing the solution, so requests that are
+                        arrive at the output cells accidentally are removed immediately.
+                        for this end we have to create a forecast of the state of the system at the beginning
+                        of each execution horizon.
+             18/1/2023 Keep record of the distance of the requests from the output cells upon their arrival
+             15/1/2026 (v3) back to a version without warm start (cleaner). Also limits number of threads to eight by default to fix mac sudio bug
+             26/1/2026 Option to run full static model at offline rolling horizon, report about actual_max_balls
+             2/3/2026  Stop if get stuck
+             4/3/2026  Collect real waiting times data
+             6/3/2026  v4 - applying a new heuristic from the file OneStepHeuristic.py
+             10/3/2026 applying v2 of one step heuristic
+             11/3/2026 save detailed results in "raw<time>.p" file
+             11/3/2026 v5 - remove block/warmup/CI estimation and use number_of_requests directly, many bug fix and improments
+
+
+"""
+
 import copy
 import random
 import itertools
@@ -55,12 +72,28 @@ import OneStepHeuristic_v2
 from PBSCom import *
 import CI_Calculation
 
+sim_log_file = ""
+
+
+def log_message(*messages, echo_to_screen=False):
+    """Write messages to the log file and optionally echo them to stdout."""
+    if echo_to_screen:
+        for message in messages:
+            print(message, end="")
+
+    if not args.log or not sim_log_file:
+        return
+
+    with open(sim_log_file, "a") as log_file:
+        for message in messages:
+            log_file.write(message)
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
 parser.add_argument("-O", "--output_cells", nargs='+',
-                    help="List of output locations, can be built from ranges in PBSCom format. e.g., 0-4-2 0  can be used to express cells (0,0),(0,2),(0,4)",
+                    help="List of output locations, can be built from ranges in PBSCom format. e.g., 0-4-2 can be used to express cells (0,0),(0,2),(0,4)",
                     default=['0', '0'])
 parser.add_argument("-e", "--escorts_num", help="Number of escorts", type=int, default=8)
 
@@ -74,10 +107,9 @@ parser.add_argument("--time_penalty", type=float,
                     help="fixed penalty for each unit of time outside output cell in the MILP model (default, 1)",
                     default=1)
 parser.add_argument("--num_threads", type=int,
-                    help="Number of threads to be used by the MIP solver - larger is not always better (default 8)", default=8)
-# parser.add_argument("-S", "--simulation_length", type=int,
-#                     help="Number of periods in the not including time it takes to empty the system (default, 100 time steps)",
-#                     default=100)
+                    help="Number of threads to be used by the MIP solver. 0 means use machine default (default 0)", default=0)
+# We need this because nn Mac Studio num_threads=8 works best but the machine default is to use all the 24  (probably an implementation bug of Cplex 22.1.1.0)
+
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)
 parser.add_argument("-T", "--fractional_horizon", type=int,
@@ -92,16 +124,15 @@ parser.add_argument("-E", "--exec_horizon", type=int,
 parser.add_argument("-t", "--time_limit", type=int,
                     help="Time limit for CPLEX calls in seconds (default: --exec_horizon)",
                     default=None)
-parser.add_argument("-a", "--export_animation", action="store_true",
-                    help="Export animation files, one for each instance")
 parser.add_argument("-m", "--offline", action="store_true",
-                    help="The actual computation time is "
-                         "completely ignored. With -E 1 this should give the best lead time. But it is not realistic ")
-parser.add_argument( "--static", action="store_true",
-                    help="Use the full static model instead of the surogate one. Should be used with --offline and long --time_limit ")
+                    help="Offline rolling horizon: requests are eligible for optimization immediately, without the online one-horizon information delay")
+parser.add_argument("--static", action="store_true",
+                    help="Use the full static MILP instead of the surrogate model")
 
-parser.add_argument( "--greedy", action="store_true",
-                    help="Use greedy heuristic only (ignore the --static flag and force --offline)")
+parser.add_argument("--greedy", action="store_true",
+                    help="Use the greedy heuristic only; this forces --offline and ignores CPLEX")
+parser.add_argument("--acyclic", action="store_true",
+                    help="Use greedy target order based on target seniority instead of the default dynamic distance-based order. This is inline with our acyclicty proof but it provde poorer result than the distance-based priority rule.")
 
 parser.add_argument("-L", "--log", action="store_true",
                     help="Write report after each iteration into log file (sim_log<time>.txt), overwrite previous report")
@@ -110,8 +141,8 @@ parser.add_argument("-R", "--request_rate", type=float, help="Request arrival ra
 parser.add_argument("-o", "--max_opt_gap", type=float, help="Maximum optimality gap to use ILP solution, otherwise use heuristic solution (default 0.4)",
                     default=1)
 parser.add_argument("--seed", type=int, help="random seed (default 0)", default=0)
-parser.add_argument("-H", "--header_line", action="store_true", help="Print header line in result csv file")
-parser.add_argument("-F", "--full_model", action="store_true", help="run the full model instead of the surrogate model)")
+parser.add_argument("-H", "--header_line", action="store_true",
+                    help="Print header line in result csv file; a new or empty file gets a header automatically")
 parser.add_argument("-M", "--max_balls_in_air", type=int,
                     help="Maximum number of target loads that are considered concurrently, the rest are queued (default 5)",
                     default=5)
@@ -134,6 +165,10 @@ if args.integer_horizon < args.exec_horizon:
     parser.error("--integer_horizon must be at least --exec_horizon")
 if args.fractional_horizon < args.integer_horizon:
     parser.error("--fractional_horizon must be at least --integer_horizon")
+if args.static and not args.offline:
+    parser.error("--static requires --offline")
+if args.greedy and args.static:
+    parser.error("--greedy cannot be combined with --static")
 
 result_csv_file = args.csv
 csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"
@@ -189,13 +224,9 @@ while B_new:
                     dist[x1, y1] = dist[x, y] + 1
                     B_new.add((x1, y1))
 
-sim_log_file = ""
 if args.log:
     sim_log_file = f"{csv_name_prefix}_log{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}.txt"
-    f = open(sim_log_file, "w")
-    f.write(f"{args}\n")
-    f.write("Start simulation logging ...\n")
-    f.close()
+    log_message(f"{args}\n", "Start simulation logging ...\n")
 
 pickle_file_name = f"{csv_name_prefix}_raw{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}.p"
 curr_t = 0
@@ -203,7 +234,7 @@ np.random.seed(args.seed)
 random.seed(args.seed + 1)
 
 E = random.sample(Locations, args.escorts_num)
-A_orig, E_orig = [], copy.copy(E)  # save for script file
+E_orig = copy.copy(E)
 number_of_requests = args.number_of_requests
 max_simulation_length = (int(number_of_requests/args.request_rate)+ 2500)  # +2500 for a good measure to allow cool down period after the arrival of the last request
 moves = [[] for _ in range((int(number_of_requests/args.request_rate)+ 2500))]
@@ -233,7 +264,7 @@ req_count = 0
 
 arrivals = []
 req2load = []
-enter_via_cell = []  # for the animation
+enter_via_cell = []  # request i sees its load enter via this cell; used only to reconstruct animation coloring
 load_queue = []  # loads waiting to be handled when there is enough capacity
 
 # create all arrivals in advance (for variability reduction)
@@ -251,12 +282,17 @@ while count < number_of_requests:
 
 
 departures = np.zeros(number_of_requests, dtype=np.int32)
-start_move = np.full(number_of_requests, np.iinfo(np.int32).max, dtype=np.int32) # Time the request start to be considered to allow calculation of waiting times
+# First time a request enters the control logic. This is used to compute
+# waiting time as "arrival until first active handling attempt", not merely
+# until physical movement starts.
+start_move = np.full(number_of_requests, np.iinfo(np.int32).max, dtype=np.int32)
 orig_distance = np.zeros(number_of_requests, dtype=np.int32)  # the distance of the request from the output cell upon arrival
 
 
+write_header = args.header_line or not os.path.exists(result_csv_file) or os.path.getsize(result_csv_file) == 0
+
 f = open(result_csv_file, 'a')
-if args.header_line:
+if write_header:
     header_cols = [
         "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs", "Max gap",
         "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
@@ -286,10 +322,7 @@ f.close()  # we want to open and close the file anyway just to make sure that th
 req_count = 0
 last_start_sol = 0
 
-if args.log:
-    f = open(sim_log_file, "a")
-    f.write(f"\n{time.ctime()} :Instance {Lx}x{Ly}, O={O}, E={E}\n")
-    f.close()
+log_message(f"\n{time.ctime()} :Instance {Lx}x{Ly}, O={O}, E={E}\n")
 
 open_requests = []
 next_execution_time = args.exec_horizon * 2  # start moving loads on after two execution horizons
@@ -298,13 +331,11 @@ dist_map = OneStepHeuristic_v2.build_dist_map(Lx, Ly, O)  # for the greedy heuri
 
 while True:
     if args.log:
-        f = open(sim_log_file, "a")
-        f.write(f"Time: {curr_t}: \n")
+        log_message(f"Time: {curr_t}: \n")
 
         if curr_t > max_simulation_length:
-            f.write(f"Panic: stop because get stuck for more than {max_simulation_length} taktst\n")
+            log_message(f"Panic: stop because get stuck for more than {max_simulation_length} taktst\n")
             exit(1)
-        f.close()
 
     # extract all requests that arrive at this takt
     while req_count < number_of_requests and arrivals[req_count] <= curr_t:
@@ -312,53 +343,49 @@ while True:
         if orig_distance[req_count] > 0:  # request is not for a load currently located on an output
             requests_on_load[req2load[req_count]].append(req_count)
             open_requests.append(req_count)
-            if args.log:
-                f = open(sim_log_file, "a")
-                f.write(
-                    f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]}\n")
-                f.close()
-            if args.export_animation:
-                enter_via_cell.append(load_loc[req2load[req_count]])
-                # if ll not in O:
-                #     moves[curr_t].insert(0,(ll,ll))  # change the color of the load
+            log_message(
+                f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]}\n")
+            enter_via_cell.append(load_loc[req2load[req_count]])
+            # if ll not in O:
+            #     moves[curr_t].insert(0,(ll,ll))  # change the color of the load
         else:  # request happened to be for a load located on an output cell
-            if args.export_animation:
-                enter_via_cell.append(load_loc[req2load[req_count]])
-            if args.log:
-                f = open(sim_log_file, "a")
-                f.write(
-                    f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]} - will be removed immediately\n")
-                f.close()
+            enter_via_cell.append(load_loc[req2load[req_count]])
+            log_message(
+                f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]} - will be removed immediately\n")
             departures[req_count] = curr_t
             start_move[req_count] = curr_t
         req_count += 1
 
     # idle takt
     if not open_requests:
-        if args.log:
-            f = open(sim_log_file, "a")
-            f.write(f"    Skipping an idle takt @ {curr_t}\n")
-            f.close()
+        log_message(f"    Skipping an idle takt @ {curr_t}\n")
         #curr_t += 1
         idle_takt += 1
 
-    # solve next execution horizon based on requests that where available at curt_t- execution_horizon
-    # or in the case of offline, available now
+    # Solve the next execution horizon based on requests already visible when
+    # the current decision epoch starts. In offline mode this means "available
+    # now"; otherwise we delay visibility by one execution horizon.
     elif curr_t >= next_execution_time:
         E = set(Locations) - set(load_loc.values())
-        # locations of target loads
-        target_loads = set([])  # target loads
+        cutoff_time = curr_t - (1 - args.offline) * args.exec_horizon
+        eligible_target_loads = []
+        eligible_target_set = set()
         if args.queue_management == 'fifo':
             for r in open_requests:
-                if arrivals[r] <= curr_t - (1 - args.offline) * args.exec_horizon:
-                    target_loads.add(req2load[r])
-                if len(target_loads) >= args.max_balls_in_air:
-                    break
+                if arrivals[r] <= cutoff_time and req2load[r] not in eligible_target_set:
+                    eligible_target_set.add(req2load[r])
+                    eligible_target_loads.append(req2load[r])
+            # CPLEX sees at most `max_balls_in_air` target loads concurrently.
+            target_loads = eligible_target_loads[:args.max_balls_in_air]
         else: # spt
             for r in open_requests:
-                if arrivals[r] <= curr_t - (1 - args.offline) * args.exec_horizon:
-                    target_loads.add(req2load[r])
-            target_loads = sorted(target_loads, key=lambda q: dist[load_loc[q][0], load_loc[q][1]] / len(requests_on_load[q]))[:args.max_balls_in_air]
+                if arrivals[r] <= cutoff_time and req2load[r] not in eligible_target_set:
+                    eligible_target_set.add(req2load[r])
+                    eligible_target_loads.append(req2load[r])
+            target_loads = sorted(
+                eligible_target_loads,
+                key=lambda q: dist[load_loc[q][0], load_loc[q][1]] / len(requests_on_load[q])
+            )[:args.max_balls_in_air]
 
         for l in target_loads:
             for r in requests_on_load[l]:
@@ -400,11 +427,7 @@ while True:
                     else:
                         subprocess.run(["oplrun", "escort_flow_bm_rh_v3.mod", dat_file], check=True)
                 except:
-                    print("Panic: Could not solve the model")
-                    if args.log:
-                        f = open(sim_log_file, "a")
-                        f.write("Panic: Could not solve the model")
-                        f.close()
+                    log_message("Panic: Could not solve the model\n", echo_to_screen=True)
                     exit(1)
                 else:
                     f = open("end_of_exec_horizon.txt", "r")
@@ -422,41 +445,47 @@ while True:
                     makespan_rh, flowtime_rh, NumberOfMovements_rh = round(float(s[4])), round(float(s[5])), round(
                         float(s[6]))
 
-                    if args.log:
-                        f = open(sim_log_file, "a")
-
-                        f.write(
-                            f"\tfinish running cplex, iteration {sim_iter}, cplex status:{cplex_status} LB={lb_rh}, ob={obj_rh} "
-                            f"flowtime={len(A) * args.exec_horizon + flowtime_rh}, open requests: {open_requests}\n"
-                            f"{'****** ' if cpu_time_iter >= time_limit else ''} cpu_time={cpu_time_iter:.2f} "
-                            f"Gap={100 * (obj_rh - lb_rh) / max(obj_rh, 1):.2f}%\n")
-                        f.close()
+                    log_message(
+                        f"\tfinish running cplex, iteration {sim_iter}, cplex status:{cplex_status} LB={lb_rh}, ob={obj_rh} "
+                        f"flowtime={len(A) * args.exec_horizon + flowtime_rh}, open requests: {open_requests}\n"
+                        f"{'****** ' if cpu_time_iter >= time_limit else ''} cpu_time={cpu_time_iter:.2f} "
+                        f"Gap={100 * (obj_rh - lb_rh) / max(obj_rh, 1):.2f}%\n")
 
 
             if args.greedy or cplex_status not in [1, 11, 101, 102, 127] or ilp_gap > args.max_opt_gap or (
                     old_A != [] and set(A) == set(old_A) and set(E) == set(old_E)):
 
-                print("Did not solve ILP model because greedy= true or solution obtained for the model is infeasible or trivial\n running *** greedy *** heuristic")
-                if args.log:
-                    f = open(sim_log_file, "a")
-                    f.write("Did not solve ILP model because greedy= true or solution obtained for the model is infeasible or trivial\n Running *** greedy *** heuristic\n")
+                log_message(
+                    "Did not solve ILP model because greedy= true or solution obtained for the model is infeasible or trivial\n"
+                    "Running *** greedy *** heuristic\n",
+                    echo_to_screen=True,
+                )
 
                 A, E = old_A, old_E  # no need to copy
+                # When CPLEX is skipped/rejected, the greedy fallback is run on
+                # the full set of currently eligible loads, not only on the
+                # truncated MILP subset defined by `max_balls_in_air`.
+                for l in eligible_target_loads:
+                    for r in requests_on_load[l]:
+                        start_move[r] = min(start_move[r], curr_t)
+                A = {
+                    load_loc[load_id]: min(requests_on_load[load_id])
+                    for load_id in eligible_target_loads
+                }
                 for i in range(args.exec_horizon):
-                    A, E, one_step_move = OneStepHeuristic_v2.OneStep(Lx, Ly, set(O), set(A), set(E), dist_map)
+                    A, E, one_step_move = OneStepHeuristic_v2.OneStep(
+                        Lx, Ly, set(O), A, set(E), dist_map, acyclic=args.acyclic
+                    )
                     moves[curr_t+i] = one_step_move
                     NumberOfMovements += len(one_step_move)
 
-                A,E = list(A), list(E)
+                A,E = list(A.keys()), list(E)
                 heuristic_sol += 1
 
-                if args.log:
-                    f = open(sim_log_file, "a")
-                    f.write(
-                        f"      iteration {sim_iter}")
-                    f.write(f"      old_E = {old_E}, old_A = {old_A}, open_requests = {open_requests}\n")
-                    f.write(f"      E = {E}, A = {A}\n")
-                    f.close()
+                log_message(
+                    f"      iteration {sim_iter}",
+                    f"      old_E = {old_E}, old_A = {old_A}, open_requests = {open_requests}\n",
+                    f"      E = {E}, A = {A}\n")
 
                 # print(f"obf_rh={obj_rh}    lb_rh={lb_rh}, oldA={old_A}    A={A}   old_E={old_E}  E={E}")
                 # exit(1)
@@ -471,11 +500,7 @@ while True:
                 # total_lead_time += (len(A) * args.exec_horizon + flowtime_rh)
                 NumberOfMovements += NumberOfMovements_rh
                 max_gap = max(max_gap, ilp_gap)
-                if args.log:
-                    f = open(sim_log_file, "a")
-                    f.write(f"State after: E = {E}, A = {A}\n")
-
-                    f.close()
+                log_message(f"State after: E = {E}, A = {A}\n")
                 f = open(file_export)
                 mvs = f.readlines()
                 f.close()
@@ -486,11 +511,8 @@ while True:
         for (loc1, loc2) in moves[curr_t]:
             if loc1 != loc2:  # can happen that they are equal because of changing color for the animation
                 load_loc[pbs[loc1[0], loc1[1]]] = loc2
-                if args.log:
-                    f = open(sim_log_file, "a")
-                    f.write(
-                        f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
-                    f.close()
+                log_message(
+                    f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
 
         pbs = np.zeros((Lx, Ly), dtype=int)
         for l, loc in load_loc.items():
@@ -505,35 +527,29 @@ while True:
                     start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
 
                     open_requests.remove(req)
-                    if args.log:
-                        f = open(sim_log_file, "a")
-                        f.write(
-                            f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
-                        f.close()
-                        #  For QA
-                        if departures[req] - arrivals[req] < orig_distance[req]:
-                            print("Panic: lead time is smaller than distance")
-                            if args.log:
-                                f = open(sim_log_file, "a")
-                                f.write("Panic: lead time is smaller than distance")
-                                f.close()
-                            exit(1)
+                    log_message(
+                        f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
+                    #  For QA
+                    if departures[req] - arrivals[req] < orig_distance[req]:
+                        log_message("Panic: lead time is smaller than distance\n", echo_to_screen=True)
+                        exit(1)
 
                 requests_on_load[leaving_load] = []
 
     if curr_t > arrivals[-1] and not open_requests:
-        print(f"Simulation end")
-        print(f"Total lead time: {total_lead_time}")
-        print(f"Mean lead time: {total_lead_time / req_count:.2f}")
+        log_message(
+            "Simulation end\n",
+            f"Total lead time: {total_lead_time}\n",
+            f"Mean lead time: {total_lead_time / req_count:.2f}\n",
+            echo_to_screen=True,
+        )
         break
 
     if idle_takt > max_simulation_length:
-        print("Error: simulation got stuck on idle state. Stopping and reporting results for debugging only")
-        if args.log:
-            f = open(sim_log_file, "a")
-            f.write(
-                "Error: simulation got stuck on idle state. Stopping and reporting results for debugging only\n")
-            f.close()
+        log_message(
+            "Error: simulation got stuck on idle state. Stopping and reporting results for debugging only\n",
+            echo_to_screen=True,
+        )
         break
 
     curr_t += 1  # advance the clock one takt
@@ -553,12 +569,11 @@ excess_stats = CI_Calculation.summarize_metric(excess_times)
 
 # just for debugging
 if min(departures - arrivals) < 0 and args.log:
-    print("Error: some arrivals occurs after departure")
-    print(f"{np.where(departures - arrivals < 0)}")
-    f = open(sim_log_file, "a")
-    f.write("Error: some arrivals occurs after departure\n")
-    f.write(f"{np.where(departures - arrivals < 0)}\n")
-    f.close()
+    log_message(
+        "Error: some arrivals occurs after departure\n",
+        f"{np.where(departures - arrivals < 0)}\n",
+        echo_to_screen=True,
+    )
 
 if max(start_move) == np.iinfo(np.int32).max:
     print("Error: the start moves time value for some request was not recorede")
@@ -604,20 +619,17 @@ f.write(",".join(map(str, row_vals)) + "\n")
 f.close()
 
 
-moves = moves[:curr_t+1]  # Trim trailing empty entries of the list
+moves = moves[:curr_t+1]  # Trim trailing empty entries of the realized move list
 
+for i in range(number_of_requests):
+    if enter_via_cell[i] not in O:
+        # A self-move is inserted at the request arrival time so animation can
+        # recolor that load as a target even when the raw pickle, rather than a
+        # dedicated animation file, is used as input.
+        moves[arrivals[i]].insert(0, (enter_via_cell[i], enter_via_cell[i]))
+
+# This is consumed by CI_Calculation.py and can also be read directly by
+# FlowAnimationSim.py.
 pickle.dump((alg_name, args.queue_management, args.seed, args.request_rate, args.fractional_horizon, args.integer_horizon,
              args.exec_horizon,time_limit, args.max_balls_in_air, args.max_opt_gap, Lx, Ly, O, E_orig,arrivals,
              departures, start_move, moves, actual_max_balls,non_optimal, max_gap,heuristic_sol), open(pickle_file_name,"wb"))
-
-if args.export_animation:
-
-    for i in range(number_of_requests):
-        if enter_via_cell[i] not in O:
-            moves[arrivals[i]].insert(0, (enter_via_cell[i], enter_via_cell[i]))
-
-    pickle.dump((Lx, Ly, O, E_orig, A_orig, moves),
-                # remove empty moves  periods at the end
-                open(
-                    f"script_sim_v5_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{number_of_requests}.p",
-                    "wb"))

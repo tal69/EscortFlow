@@ -18,7 +18,8 @@ int num_threads = ...;
 execute {
 		cplex.tilim = time_limit;  // set time limit
 		//cplex.auxRootThreads = -1;   // workaround for rare 22.1 root-thread hang
-		cplex.threads = num_threads;    // Limit the number to avoid too much overhead (good values are 4-16).
+		if (num_threads > 0)
+			cplex.threads = num_threads;    // Limit the number to avoid too much overhead (good values are 4-16).
 
 		var before = new Date();
 		temp = before.getTime();} 

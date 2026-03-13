@@ -4,6 +4,13 @@ def mser5(x, batch_size=5, min_remaining_batches=10):
     """
     MSER-5 warm-up estimator (Mean Squared Error Reduction with batch size 5).
 
+    See:
+    White, K. P., Jr. (1997). An effective truncation heuristic for bias reduction in simulation output. Simulation, 69(6), 323–334.
+    Spratt, S. C. (1998). Heuristics for the startup problem. M.S. Thesis, Department of Systems Engineering, University of Virginia.
+    White, K. P., Jr., Cobb, M. J., & Spratt, S. C. (2000). A comparison of five steady-state truncation heuristics for simulation. In Proceedings of the 2000 Winter Simulation Conference.
+    Franklin, W. W., & White, K. P., Jr. (2008). Stationarity tests and MSER-5… In Proceedings of the 2008 Winter Simulation Conference.
+
+
     Steps:
       1) Partition x into nonoverlapping batches of size 5 (or batch_size).
       2) Replace each batch by its mean -> y_1,...,y_N (batch means).

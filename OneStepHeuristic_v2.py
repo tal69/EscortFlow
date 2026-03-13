@@ -1,98 +1,72 @@
-"""
-Tal Raviv, talraviv@tau.ac.il,   14/12/2023
-           revised as OneStepHeuristic_v2.py 10/3/2026
+"""Greedy one-step escort heuristic for the PBS retrieval problem.
 
+Originally written by Tal Raviv on 14/12/2023 and revised as
+``OneStepHeuristic_v2.py`` on 10/3/2026.
+
+The main entry point is ``OneStep()``, which advances the system by one takt.
+``SolveGreedy()`` repeatedly applies ``OneStep()`` until all target loads
+reach output cells.
 """
-import copy
-from operator import itemgetter
+import itertools
+from collections import defaultdict
 
 import numpy as np
-import math
-from collections import defaultdict
-import random
-
-
-""" 
-    run one step of the heuristic and can apply it repeatedly to obtain a complete solution
-    At each step the algorithm consider the a single load (the one closest to to its output)
-    and greedily moves escorts to the best location
-    First escort that moves the selected load closer to the output are preformed, and next escort are moved arround the
-    load from zone B->A, the from C->B and D->C
-    (see zoning examples and scheme below inside the function  
-    
-    10/3/2026 update to handle movement of several targets at each step
-    
-"""
-
-
-
-
-""" Check that a move is feasible at the current state and given the loads that already moved in the current step """
-def check_move( E, cell_used, x0, y0, x1,y1):
-    if (x0,y0) not in E:
-        return False  # only an escort can move
-    dir_x, dir_y = int(np.sign(x1 - x0)), int(np.sign(y1 - y0))
-
-    if dir_x != 0 and dir_y != 0:
-        return False  # diagonal movements are not allowed
-
-    x, y = x0, y0
-
-    while (x, y) != (x1, y1):
-        if (x,y) in cell_used:
-            return False
-        x += dir_x
-        y += dir_y
-        if (x, y) in E:
-            return False
-
-    if (x, y) in cell_used:
-        return False
-    else:
-        return True
-
-
 
 
 def build_dist_map(Lx, Ly, O):
-
-    dist_map = defaultdict(lambda: (Lx+Ly, (-1-1), (-1-1)))
+    """Map each cell to its closest output and preferred movement direction."""
+    dist_map = defaultdict(lambda: (-1, -1))
+    best_dist = defaultdict(lambda: Lx + Ly)
     for x in range(Lx):
         for y in range(Ly):
             for o in O:
-                dist = abs(x - o[0]) + abs(y - o[1]) + x / Lx + y / (Lx*Ly)  # to break symetry
-                if dist < dist_map[(x,y)][0]:
-                    dist_map[(x,y)] = (dist, (int(np.sign(o[0] -x)), int(np.sign(o[1] - y))), o)
+                dist = abs(x - o[0]) + abs(y - o[1]) + x / Lx + y / (Lx * Ly)  # tie-break symmetry
+                if dist < best_dist[(x, y)]:
+                    best_dist[(x, y)] = dist
+                    dist_map[(x, y)] = (int(np.sign(o[0] - x)), int(np.sign(o[1] - y)))
     return dist_map
 
 
+def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False):
+    """Advance the heuristic by one takt.
 
+    Args:
+        Lx, Ly: PBS dimensions.
+        O: Output cell locations as a set of ``(x, y)`` tuples.
+        _A: Dictionary mapping target-load locations to target ids.
+        _E: Escort locations as a set of tuples.
+        dist_map: Optional precomputed distance map from ``build_dist_map``.
+        acyclic: If true, scan targets by increasing target id. Otherwise use
+            dynamic priority by distance to the closest output.
 
-"""   OneStep(Lx, Ly, O, _A, _E)
-      This function accept a PBS configuration and state and return new locations of escorts, target loads and moves
-      That can be done in one time step and are represented presumably better state. It is used to handle 
-      situation when we are unable to proceed with the rolling horizon heuristic when the MILP can't be solved
-      or return the same state as the initial state
-      Lx, Ly : dimension of the PBS units
-      O   location of the output cells - as set of tuples
-      _A, _E initial locations of the target loads and escorts - as sets of tuples
-      All locations are zero based index (botton left corner is (0,0) and tpp right is (Lx-1,Ly-1)
-      
-      :returns
-            A,E - the new target and escort locations as set of tuples
-            moves - List of movement, each movement is an ((x0,y0),(x1,y1)) tuple of tuples
-      
-      It is not clear if it leads to a deadlock free solution if applied repeatedly, but I don't have a counterexample yet
-"""
+    Returns:
+        Tuple ``(A, E, moves)`` where ``A`` maps updated target locations to
+        target ids, ``E`` is the updated escort set, and ``moves`` is the list
+        of movements executed during the current time step.
+    """
 
-def OneStep(Lx, Ly, O, _A, _E, dist_map):
-    """ move escort from (x0,y0) to (x1,y0)  and update moves, and cell_used
-      the input assumed to be valid movement (no checking is done)
+    def check_move(x0, y0, x1, y1):
+        """Return whether an escort move is feasible in the current one-step plan."""
+        if (x0, y0) not in E:
+            return False  # only an escort can move
+        dir_x, dir_y = int(np.sign(x1 - x0)), int(np.sign(y1 - y0))
 
-      The function return nothing it just update A, A_new, E, E_new, moves, and cell_used"""
+        if dir_x != 0 and dir_y != 0:
+            return False  # diagonal movements are not allowed
+
+        x, y = x0, y0
+
+        while (x, y) != (x1, y1):
+            if (x, y) in cell_used:
+                return False
+            x += dir_x
+            y += dir_y
+            if (x, y) in E:
+                return False
+
+        return (x, y) not in cell_used
 
     def move_escort(x0, y0, x1, y1):
-
         E.remove((x0, y0))
         E_new.add((x1, y1))
         dir_x, dir_y = int(np.sign(x1 - x0)), int(np.sign(y1 - y0))
@@ -103,309 +77,320 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map):
             cell_used.add((x, y))
 
             if (x + dir_x, y + dir_y) in A:
-                A_new.add((x, y))
-                A.remove((x + dir_x, y + dir_y))
-                target_moved[(x + dir_x, y + dir_y)] = (x, y)
+                target_id = A.pop((x + dir_x, y + dir_y))
+                A_new[(x, y)] = target_id
+                moved_target_ids.add(target_id)
             x += dir_x
             y += dir_y
 
         cell_used.add((x, y))  # last cell not included in the loop
 
-    """" Return the location of the target loads with sorted by rect distance to its nearest output cell + their directions """
-    def find_closest_targets():
+    def get_targets_in_priority_order():
+        """Return target loads in the selected heuristic priority order."""
+        if acyclic:
+            return sorted(A.items(), key=lambda item: item[1])
 
-        As = []
-        for a in A:
-            min_dist = math.inf
-            for o in O:
-                dist = abs(a[0] - o[0]) + abs(a[1] - o[1]) + a[0] * 0.01 + a[1] * 0.0001  # to break symetry
-                if dist < min_dist:
-                    min_dist = dist
-                    a_dir = (int(np.sign(o[0] - a[0])), int(np.sign(o[1] - a[1])))
-            As += [(min_dist, a, a_dir)]
+        def priority_key(item):
+            loc, _ = item
+            closest_output = min(
+                O,
+                key=lambda o: (abs(loc[0] - o[0]) + abs(loc[1] - o[1]), o[0], o[1]),
+            )
+            return (
+                abs(loc[0] - closest_output[0]) + abs(loc[1] - closest_output[1]),
+                closest_output[0],
+                closest_output[1],
+                loc[0],
+                loc[1],
+            )
 
-        return sorted(As, key=lambda x: x[0])
-
-    """  Find the closest escort that can be used to move a target load at location x_target, y_target in the right direction 
-         (i.e., an escort in Zone A) and return its location, or (-1,-1) if no escort is found  """
-
-    def find_closest_escort(x_target, y_target):
-        min_dist = math.inf
-        best_escort = (-1, -1)
-
-        dist_x, dist_y = dist_map[(x_target, y_target)][2]
-
-        for (x_escort, y_escort) in E:
-            cell_dist, A_dir, ez  = dist_map[(x_target, y_target)]
-            if (x_escort == x_target and np.sign(y_escort - y_target) == A_dir[1] or
-                    y_escort == y_target and np.sign(x_escort - x_target) == A_dir[0]):
-                dist = abs(x_escort - x_target) / (Lx**6) + abs(y_escort - y_target) / (Ly**6)
-                dist = abs(x_escort - x_target) / (0.1+dist_x) + abs(y_escort - y_target) / (0.1+dist_y)
-                #  Both seems ok
+        return sorted(A.items(), key=priority_key)
 
 
-                if dist < min_dist and check_move(E, cell_used, x_escort, y_escort, x_target, y_target):
-                    min_dist = dist
-                    best_escort = (x_escort, y_escort)
+    """
+            Zoning - output at (0,0)
 
-        return best_escort
+            BBBBCCCCC
+            BBBBCCCCC
+            AAAAXCCCC
+            BBBBABBBB
+            BBBBABBBB
 
-    A_new, E_new = set([]), set([])
-    A = copy.deepcopy(_A)  # to make sure we are not changing the argument outside
-    E = copy.deepcopy(_E)
+            DCCCC
+            XCCCC
+            ABBBB
+            ABBBB
+
+            BBBCCC
+            BBBCCC 
+            AAAXDD    
+
+
+            BBBBBC
+            BBBBBC
+            AAAAAX
+
+            Zoning - output at (3,0)
+
+            CCBBBBB   Target at a general position
+            CCBBBBB
+            CXAAAAA
+            BABBBBB
+            BABBBBB
+               *
+
+            CCCDCCC    Target above output
+            CCCDCCC
+            CCCXCCC
+            BBBABBB
+            BBBABBB
+               * 
+
+
+            BBBBCCC   Target at the same row as output
+            BBBBCCC
+            BBBBCCC   
+            BBBBCCC   
+            AAAAXDD
+               *
+
+    """
+
+    def find_zone_escorts(x_target, y_target):
+        """Return escort sets for zones A, B, C, and D for the given target.
+
+        The zones follow the paper definitions:
+        A: same row/column as the target, in the output direction
+        B: not in A, but sharing a row/column with an A-cell, and not on the
+           target row/column
+        C: not in A or B, but sharing a row/column with a B-cell
+        D: not in A, B, or C, but sharing a row/column with a C-cell
+        """
+        A_dir = dist_map[(x_target, y_target)]
+        has_horizontal_a = A_dir[0] != 0
+        has_vertical_a = A_dir[1] != 0
+
+        def in_horizontal_a(x):
+            return has_horizontal_a and np.sign(x - x_target) == A_dir[0]
+
+        def in_vertical_a(y):
+            return has_vertical_a and np.sign(y - y_target) == A_dir[1]
+
+        def is_zone_a(x, y):
+            return (y == y_target and in_horizontal_a(x)) or (x == x_target and in_vertical_a(y))
+
+        def is_zone_b(x, y):
+            return not is_zone_a(x, y) and x != x_target and y != y_target and (in_horizontal_a(x) or in_vertical_a(y))
+
+        def row_has_zone_b(y):
+            return y != y_target and (has_horizontal_a or in_vertical_a(y))
+
+        def col_has_zone_b(x):
+            return x != x_target and (has_vertical_a or in_horizontal_a(x))
+
+        def is_zone_c(x, y):
+            return not is_zone_a(x, y) and not is_zone_b(x, y) and (row_has_zone_b(y) or col_has_zone_b(x))
+
+        def is_zone_d(x, y):
+            if is_zone_a(x, y) or is_zone_b(x, y) or is_zone_c(x, y):
+                return False
+            if has_horizontal_a and not has_vertical_a:
+                return y == y_target and np.sign(x - x_target) == -A_dir[0]
+            if has_vertical_a and not has_horizontal_a:
+                return x == x_target and np.sign(y - y_target) == -A_dir[1]
+            return False
+
+        zone_a_escorts = set()
+        zone_b_escorts = set()
+        zone_c_escorts = set()
+        zone_d_escorts = set()
+
+        for x_escort, y_escort in E:
+            escort = (x_escort, y_escort)
+            if is_zone_a(x_escort, y_escort):
+                zone_a_escorts.add(escort)
+            elif is_zone_b(x_escort, y_escort):
+                zone_b_escorts.add(escort)
+            elif is_zone_c(x_escort, y_escort):
+                zone_c_escorts.add(escort)
+            elif is_zone_d(x_escort, y_escort):
+                zone_d_escorts.add(escort)
+
+        return zone_a_escorts, zone_b_escorts, zone_c_escorts, zone_d_escorts
+
+    def sort_escorts_by_distance(x, y, EE):
+        """Return escorts in ``EE`` sorted by distance to ``(x, y)`` and then lexicographically."""
+        return sorted(EE, key=lambda escort: (abs(escort[0] - x) + abs(escort[1] - y), escort[0], escort[1]))
+
+    def extend_move_for_lower_priority_targets(x0, y0, x1, y1):
+        """Extend a zone-to-zone escort move if it can also promote lower-priority targets."""
+        dir_x, dir_y = int(np.sign(x1 - x0)), int(np.sign(y1 - y0))
+        if dir_x == 0 and dir_y == 0:
+            return x1, y1
+
+        best_x, best_y = x1, y1
+        xx, yy = x1, y1
+
+        while (xx + dir_x, yy + dir_y) not in E and (xx + dir_x, yy + dir_y) not in cell_used:
+            xx += dir_x
+            yy += dir_y
+            if (xx, yy) in A:
+                target_dir = dist_map[(xx, yy)]
+                if (dir_x != 0 and target_dir[0] == dir_x) or (dir_y != 0 and target_dir[1] == dir_y):
+                    best_x, best_y = xx, yy
+
+        return best_x, best_y
+
+    A_new, E_new = dict(), set()
+    A = dict(_A)  # to make sure we are not changing the argument outside
+    E = set(_E)
     moves = []
 
-    for a in _A:
+    for a in list(_A):
         if a in O:
-            A.remove(a)
+            A.pop(a, None)
 
     if len(A) == 0:
         return A, E, moves
 
+    if dist_map is None:
+        dist_map = build_dist_map(Lx, Ly, O)
 
-    dist_map = build_dist_map(Lx, Ly,O)
+    cell_used = set()
 
-    cell_used = set([])
-
-    target_moved = {}
+    moved_target_ids = set()
 
     for x in range(Lx):
-        cell_used.add( (x,-1))
-        cell_used.add( (x,Ly))
+        cell_used.add((x, -1))
+        cell_used.add((x, Ly))
 
     for y in range(Ly):
-        cell_used.add( (-1,y))
-        cell_used.add( (Lx,y))
+        cell_used.add((-1, y))
+        cell_used.add((Lx, y))
 
 
-    # sort targets by distance from their output
-    A_sorted = find_closest_targets()
+    A_sorted = get_targets_in_priority_order()
 
     for i in range(len(A_sorted)):
-        x0, y0 = A_sorted[i][1]
+        (x0, y0), target_id = A_sorted[i]
 
-        # First check that it didn't move already in the current step
-        if (x0,y0) not in target_moved.keys():
+        # First check that it didn't move already in the current step due to the movement of a load with higher priority
+        if target_id not in moved_target_ids:
             # Try to move the item immediately in the right direction. An escort moves from Zone A->C/D
-            A_dir =A_sorted[i][2]
-            x_escort,y_escort = find_closest_escort(x0, y0)
-
-            if (x_escort,y_escort) != (-1,-1): # found an escort
-                if x_escort == x0:  # vertical movement
-                    # Look for another load in the same column to move
-                    yy, y1 = y0, y0
-                    while yy - A_dir[1] in range(Ly) and (x_escort, yy - A_dir[1]) not in E and (x_escort, yy - A_dir[1]) not in cell_used:
-                        yy -= A_dir[1]
-                        if (x0, yy) in A:
-                            y1 = yy
-                    move_escort( x_escort,y_escort, x_escort, y1)
-                    y0 += A_dir[1]
-                else:
-                    xx, x1 = x0, x0
-                    while xx - A_dir[0] in range(Lx) and (xx - A_dir[0], y_escort) not in E and (xx - A_dir[0],y_escort) not in cell_used:
-                        xx -= A_dir[0]
-                        if (xx, y0) in A:
-                            x1 = xx
-                    move_escort(x_escort, y_escort, x1, y_escort)
-                    x0 += A_dir[0]
-
-            # check if loads arrive at outputs  - we dont need to remove them just yet this will happe in the next iteration
-            # for (x,y) in O:
-            #     if (x,y) in A_new:
-            #         A_new.remove((x,y))
-            #         target_moved[(x, y)] = (-1, -1)
-
-
-            # make sure that no further escort movement in the current step moves high priority loads in the wrong direction
-            cell_used.add((x0,y0))
-        else:  # if the item was moved before while handling previous targets update its location
-            continue  #  For some reason it seems better to skip an item that moved altogether also from considering B->A and C->B movments
-
-            if target_moved[(x0,y0)] == (-1, -1):
-                continue  # if it was ejected from the system nothing to do with this load
-            else:
-                x0, y0 = target_moved[(x0,y0)]
-
-
-
-        """
-        Zoning - output at (0,0)
-    
-        BBBBCCCCC
-        BBBBCCCCC
-        AAAAXCCCC
-        BBBBABBBB
-        BBBBABBBB
-    
-        DCCCC
-        XCCCC
-        ABBBB
-        ABBBB
-    
-        BBBCCC
-        BBBCCC 
-        AAAXDD    
-        
-        
-        BBBBBC
-        BBBBBC
-        AAAAAX
-        
-        Zoning - output at (3,0)
-        
-        CCBBBBB   Target at a general position
-        CCBBBBB
-        CXAAAAA
-        BABBBBB
-        BABBBBB
-           *
-        
-        CCCDCCC    Target above output
-        CCCDCCC
-        CCCXCCC
-        BBBABBB
-        BBBABBB
-           * 
-        
-        
-        BBBBCCC   Target at the same row as output
-        BBBBCCC
-        BBBBCCC   
-        BBBBCCC   
-        AAAAXDD
-           *
-           
-        """
-
-        # Next try to move escorts from zone B -> A
-        moved = False
-        if A_dir[1] != 0:
-            x, y = x0, y0 + A_dir[1]
-            lst = []
-            while y in range(Ly):
-                if (x0, y) not in E | E_new:
-                    lst += [(xx, y) for xx in range(Lx) if (xx, y) in E]
-                y += A_dir[1]
-
-            if lst:
-                for e in lst:
-                    if check_move(E, cell_used, e[0], e[1], x0, e[1]):
-                        move_escort( e[0], e[1], x0, e[1])
-                        moved = True
-                        break  # move only one load B-> A in for each target load
-                        # could be made better by moving the closest possible escort from b->a
-
-        if not moved and A_dir[0] != 0:
-            x, y = x0 + A_dir[0], y0
-            lst = []
-            while x in range(Lx):
-                if (x, y0) not in E | E_new:
-                    lst += [(x, yy) for yy in range(Ly) if (x, yy) in E]
-                x += A_dir[0]
-
-            if lst:
-                for e in lst:
-                    if check_move(E, cell_used, e[0], e[1], e[0], y0):
-                        move_escort( e[0], e[1], e[0], y0)
-
-        # Next try to move escorts from zone C -> B and  D -> C
-
-        # C -> B
-        moved = False
-        if A_dir[0]!= 0 and A_dir[1] != 0:
-            x= x0
-            while x in range(Lx):
-                y = y0
-                while y in range(Ly):
-                    if (x,y) in E:
-                        # if the escort is "above" it can move vertically only
-                        if x == x0 and x0+A_dir[0] in range(Lx) and check_move(E,cell_used,x,y,x0+A_dir[0],y):
-                            x1 = x0+A_dir[0]
-                            while x1+A_dir[0] in range(Lx) and check_move(E,cell_used,x,y,x1+A_dir[0],y):
-                                x1 += A_dir[0]
-                            move_escort(x, y, x1, y)
-                            moved = True
-                        # if the escort is "to the right" it can move horizontally only
-                        elif y == y0 and y0+A_dir[1] in range(Ly) and check_move(E,cell_used,x,y,x,y0+A_dir[1]):
-                            y1 = y0+A_dir[1]
-                            while y1+A_dir[1] in range(Ly) and  check_move(E,cell_used,x,y,x,y1+A_dir[1]):
-                                y1 += A_dir[1]
-                            move_escort(x, y, x, y1)
-                            moved = True
-
-                        if x!=x0 and y!=y0:
-                            # check if it is possible to move vertically beyond the item
-                            if y0 + A_dir[1] in range(Ly) and check_move(E,cell_used,x,y,x,y0+A_dir[1]):
-                                y1 = y0 + A_dir[1]
-                                # if y1 + A_dir[1] in range(Ly)  and check_move(E, cell_used, x, y, x, y1 + A_dir[1]):
-                                #      y1 += A_dir[1]   # Not helping
-                                move_escort( x, y, x, y1)
-                                moved = True
-                            elif x0+A_dir[0] in range(Lx) and check_move(E,cell_used,x,y,x0+A_dir[0],y):
-                                x1 = x0 + A_dir[0]
-                                # if x1 + A_dir[0] in range(Lx) and check_move(E, cell_used, x, y, x1 + A_dir[0], y):
-                                #        x1 += A_dir[0] # Not helping
-                                move_escort(x, y, x1, y)
-                                moved = True
-
-                    y -= A_dir[1]
-                    if moved:
-                        break
-                x -= A_dir[0]
-                if moved:
+            #A_dir = A_sorted[i][2]  # we can also take it from dist_map
+            zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts = find_zone_escorts(x0, y0)
+            lst = sort_escorts_by_distance(x0, y0, zone_A_escorts)
+            for (x_escort, y_escort ) in lst:
+                if check_move(x_escort, y_escort, x0, y0):
+                    dx, dy =np.sign(x0-x_escort), np.sign(y0-y_escort)  # only one of them is non zero
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0, y0)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    x0, y0 = x0-dx, y0-dy  # update the location of the current target load
+                    zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts = find_zone_escorts(x0, y0)
                     break
 
-        elif not moved and A_dir[1] == 0:   # target directly left or right to the output on the same row
-            x = x0
-            while not moved and x in range(Lx):
-                for y in range(Ly):
-                    if y!= y0 and (x, y) in E:
-                        if check_move(E, cell_used, x, y, x0 + A_dir[0], y):
-                            move_escort( x, y, x0 + A_dir[0], y)
-                            moved = True
-                            break
-                x -= A_dir[0]
+            # make sure that no further escort movement in the current step moves high priority loads in the wrong direction
+            cell_used.add((x0, y0))
+
+        else:
+            # If a higher-priority target already moved this load, skip further re-positioning attempts in the current takt.
+            continue
 
 
-            #  Now check D->C
-            x = x0 - A_dir[0]
-            shift = 1 if (y0 < Ly - 1) else  -1  # move up or down  (maybe add randomization here)
-            while not moved and x in range(Lx):
-                if (x, y0) in E:
-                    if check_move(E, cell_used, x, y0, x, y0+shift):
-                        move_escort( x, y0, x, y0 + shift)
-                        moved = True
-                x -= A_dir[0]
+        # try to move an escort from zone B -> A
+        lst = sort_escorts_by_distance(x0, y0, zone_B_escorts)
+        for (x_escort, y_escort) in lst:
+            if np.sign(y_escort - y0) == dist_map[(x0, y0)][1]: # escort is "below" the load
+                if check_move(x_escort, y_escort, x0, y_escort):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0, y_escort)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+            else:  # escort is "above" the load
+                if check_move(x_escort, y_escort, x_escort, y0):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y0)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
 
-        elif A_dir[0] == 0: # target "above" output
-            for x in range(Lx):
-                if x != x0:
-                    y = y0
-                    while not moved and y in range(Ly):
-                        if (x, y) in E:
-                            if check_move(E, cell_used, x, y, x, y0 + A_dir[1]):
-                                move_escort(x, y, x, y0 + A_dir[1])
-                                moved = True
-                        y -= A_dir[1]
+        # try to move an escort from zone C to zone B
+        lst = sort_escorts_by_distance(x0, y0, zone_C_escorts)
+        for (x_escort, y_escort) in lst:
+            dir_x, dir_y = dist_map[(x0, y0)]
+            if dir_x == 0:
+                if check_move(x_escort, y_escort, x_escort, y0 + dir_y):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y0 + dir_y)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+            elif dir_y == 0:
+                if check_move(x_escort, y_escort, x0 + dir_x, y_escort):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0 + dir_x, y_escort)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+            elif np.sign(y0 - y_escort) == dir_y:  # escort is "above" the load
+                if check_move(x_escort, y_escort, x0 + dir_x, y_escort):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0 + dir_x, y_escort)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+            else:  # escort is "below" the load
+                if check_move(x_escort, y_escort, x_escort, y0 + dir_y):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y0 + dir_y)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
 
-            #  Now check D->C
-            y = y0 - A_dir[1]
-            shift = 1 if (x0 < Lx - 1) else -1  # move right or left  (maybe add randomization here)
-            while not moved and y in range(Ly):
-                if (x0, y) in E:
-                    if check_move(E, cell_used, x0, y, x0 + shift, y):
-                        move_escort(x0, y, x0 + shift, y)
-                        moved = True
-                y -= A_dir[1]
+        # Finally, check D -> C
+        lst = sort_escorts_by_distance(x0, y0, zone_D_escorts)
+        for (x_escort, y_escort) in lst:
+            dir_x, dir_y = dist_map[(x0, y0)]
+            if dir_y == 0:
+                if check_move(x_escort, y_escort, x_escort, y_escort + 1):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort + 1)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+                elif check_move(x_escort, y_escort, x_escort, y_escort - 1):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort - 1)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+            elif dir_x == 0:
+                if check_move(x_escort, y_escort, x_escort + 1, y_escort):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort + 1, y_escort)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+                elif check_move(x_escort, y_escort, x_escort - 1, y_escort):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort - 1, y_escort)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+            elif np.sign(y0 - y_escort) == dir_y:  # escort is "above" the load
+                if check_move(x_escort, y_escort, x_escort + 1, y_escort):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort + 1, y_escort)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+                elif check_move(x_escort, y_escort, x_escort - 1, y_escort):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort - 1, y_escort)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+            else: # escort to the left or to the right of the load
+                if check_move(x_escort, y_escort, x_escort, y_escort + 1):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort + 1)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
+                elif check_move(x_escort, y_escort, x_escort, y_escort - 1):
+                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort - 1)
+                    move_escort(x_escort, y_escort, x1, y1)
+                    break
 
-    return A | A_new, E | E_new, moves
+    A.update(A_new)
+    return A, E | E_new, moves
 
 
-def SolveGreedy(Lx, Ly, O, _A, _E, verbal=False, max_steps=100):
-    A = copy.deepcopy(_A)  # to make sure we are not changing the argument outside
-    E = copy.deepcopy(_E)
+def SolveGreedy(Lx, Ly, O, _A, _E, verbal=False, max_steps=500, acyclic=False):
+    """Repeatedly apply ``OneStep`` until all target loads are retrieved."""
+    ordered_targets = sorted(
+        set(_A),
+        key=lambda a: (min(abs(a[0] - o[0]) + abs(a[1] - o[1]) for o in O), a[0], a[1]),
+    )
+    A = {loc: idx + 1 for idx, loc in enumerate(ordered_targets)}
+    E = set(_E)
 
-    dist_map = build_dist_map(Lx, Ly,O)
+    dist_map = build_dist_map(Lx, Ly, O)
 
     if verbal:
         print(f"initial A = {A}")
@@ -413,11 +398,11 @@ def SolveGreedy(Lx, Ly, O, _A, _E, verbal=False, max_steps=100):
 
     flow_time = 0
     makespan = 0
-    movements= 0
+    movements = 0
     while A:
         flow_time += len(A)
 
-        A, E, mv = OneStep(Lx, Ly, O, A, E, dist_map)
+        A, E, mv = OneStep(Lx, Ly, O, A, E, dist_map, acyclic=acyclic)
         if verbal:
             print(f"After step: {makespan}")
             print(f"A {A}")
@@ -429,7 +414,8 @@ def SolveGreedy(Lx, Ly, O, _A, _E, verbal=False, max_steps=100):
 
         if makespan >= max_steps:
             print(f"Panic: could not solve in {max_steps} steps")
-            break
+            exit(1)
+
     return makespan, flow_time, movements
 
 
@@ -438,20 +424,20 @@ if __name__ == '__main__':
     from PBSCom import *
 
 
-    O = set([(4,0), (13,0)])
-    Lx, Ly = 18,5
+    O = set([(0,0)])
+    Lx, Ly = 10,10
 
     Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
     total_makespan = 0
     total_flow_time = 0
-    total_movements= 0
-    num_of_loads = 2
-    n = 100
+    total_movements = 0
+    num_of_loads = 4
+    n = 1000
     for seed in range(n):
-        if seed % 50 == 0:
+        if seed % 1 == 0:
           print(f"{seed} / {n}")
-        A,E = GeneretaeRandomInstance(seed, Locations, 20, num_load=num_of_loads)
-        makepan, flow_time, movements = SolveGreedy(Lx, Ly, O, set(A), set(E), verbal=False, max_steps=(Lx + Ly) * len(A) * 2)
+        A,E = GeneretaeRandomInstance(seed, Locations, 12, num_load=num_of_loads)
+        makepan, flow_time, movements = SolveGreedy(Lx, Ly, O, set(A), set(E), verbal=False, max_steps=(Lx + Ly) * len(A) * 20 // len(E))
         total_makespan += makepan
         total_flow_time += flow_time
         total_movements += movements
@@ -461,5 +447,3 @@ if __name__ == '__main__':
     print(f"total flow_time {total_flow_time/n}")
     print(f"mean flowtime {total_flow_time/n/num_of_loads}")
     print(f"movements {total_movements/n}")
-    dist_map = build_dist_map(Lx, Ly, O)
-    print(dist_map)

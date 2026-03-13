@@ -274,6 +274,25 @@ class PathAnimation:
                 self.step_button['state'] = 'normal'
 
 
+def load_animation_data(pickle_path):
+    """Load either the legacy animation pickle or a raw simulation pickle."""
+    data = pickle.load(open(pickle_path, "rb"))
+
+    if isinstance(data, tuple) and len(data) == 6:
+        Lx, Ly, O, E, R, moves = data
+        return [Lx, Ly], O, E, R, moves
+
+    if isinstance(data, tuple) and len(data) == 22:
+        (_, _, _, _, _, _, _, _, _, _, Lx, Ly, O, E, _, _, _, moves, _, _, _, _) = data
+        return [Lx, Ly], O, E, set(), moves
+
+    if isinstance(data, tuple) and len(data) == 21:
+        (_, _, _, _, _, _, _, _, _, Lx, Ly, O, E, _, _, _, moves, _, _, _, _) = data
+        return [Lx, Ly], O, E, set(), moves
+
+    raise ValueError("Unsupported pickle format for FlowAnimationSim")
+
+
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         print("usage: python", sys.argv[0], "<script_name.p> ")
@@ -283,8 +302,6 @@ if __name__ == '__main__':
     if sys.argv[1][-2:].upper() != ".P":
         sys.argv[1] += ".p"
 
-    Lx, Ly, O, E, R, moves = pickle.load(open(sys.argv[1], "rb"))
-
-    L = [Lx, Ly]
+    L, O, E, R, moves = load_animation_data(sys.argv[1])
 
     PathAnimation()
