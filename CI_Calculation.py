@@ -1,6 +1,17 @@
-""" From chat """
+"""
+Name:        EscortFlowSim_v5
+
+Purpose:     Take the raw output pickle file of EscortFlowSim_v5.py and process it to create 95% confidence
+             intervals for the steady state mean lead time, flow time, and waiting time
+             It first apply MSER-5 procedure tp remove warmup period and than optimize batch (block) length
+             to minimize variance of batch means while keeping acceptable lag-1 auto correlation
+
+Author:      Tal Raviv,  talraviv@tau.ac.il, feel free to use this code but please contact me and let me know if you do
+Create:      11/3/2026 (with some help from ChatGPT)
+"""
 
 import argparse
+import glob
 import pickle
 import numpy as np
 import mser5
@@ -126,6 +137,16 @@ def choose_batches_min_var_with_lag1(
 
 
 def summarize_metric(x):
+    """
+    Summarize one metric time series using the current pipeline:
+    1) warmup deletion via MSER-5,
+    2) batch-size selection with lag-1 constraint,
+    3) mean and CI half-widths from batch means.
+
+    Returns a dict with batching diagnostics and:
+    - `half_width_95`: 95% CI half-width (normal approximation)
+    - `half_width_99`: 99% CI half-width (normal approximation)
+    """
     x = np.asarray(x, dtype=float)
     obs_del = int(mser5.mser5(x)["d_obs"])
     x_post_warmup = x[obs_del:]
@@ -142,11 +163,13 @@ def summarize_metric(x):
             "batch_means_variance": np.nan,
             "mean": np.nan,
             "half_width_95": np.nan,
+            "half_width_99": np.nan,
             "res": None,
         }
 
     mean_est = float(np.mean(res["batch_means"]))
     half_width_95 = 1.96 * np.sqrt(res["s2"] / res["k"])
+    half_width_99 = 2.576 * np.sqrt(res["s2"] / res["k"])
     return {
         "obs_deleted": obs_del,
         "obs_used": int(res["used_m"]),
@@ -157,6 +180,7 @@ def summarize_metric(x):
         "batch_means_variance": float(res["s2"]),
         "mean": mean_est,
         "half_width_95": float(half_width_95),
+        "half_width_99": float(half_width_99),
         "res": res,
     }
 
@@ -170,7 +194,7 @@ if __name__ == "__main__":
         "--pickle-file",
         dest="pickle_files",
         nargs="+",
-        help="One or more pickle file names to read raw simulation output from",
+        help="One or more pickle file names to read raw simulation output from, wildcards such as *.p are ok",
         required=True,
     )
     parser.add_argument(
@@ -188,9 +212,21 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    expanded_pickle_files = []
+    for pattern in args.pickle_files:
+        if glob.has_magic(pattern):
+            matches = sorted(glob.glob(pattern))
+            if not matches:
+                parser.error(f"Pattern matched no files: {pattern}")
+            expanded_pickle_files.extend(matches)
+        else:
+            expanded_pickle_files.append(pattern)
+
+    # Keep first occurrence order while removing duplicates.
+    pickle_files = list(dict.fromkeys(expanded_pickle_files))
 
     header_cols = [
-        "Pickle File", "Algorithm Name", "Queue Management", "Seed", "Lx", "Ly", "Output Cells",
+        "Pickle File", "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
         "Number of outputs", "Number of Escorts",
         "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Max Balls In Air",
         "Max Opt Gap", "Actual Max Balls", "Non Optimal", "Max Gap", "Heuristic Solutions",
@@ -207,11 +243,25 @@ if __name__ == "__main__":
     with open(args.csv_file, "a") as f:
         if args.header:
             f.write(",".join(header_cols) + "\n")
-        for pickle_file in args.pickle_files:
+        for pickle_file in pickle_files:
             with open(pickle_file, "rb") as pf:
+                raw = pickle.load(pf)
+
+            # Backward-compatible parsing:
+            # v5+ raw format includes request_rate right after seed.
+            if len(raw) == 22:
+                (alg_name, queue_management, seed, request_rate, fractional_horizon, integer_horizon,
+                 exec_horizon, time_limit, max_balls_in_air, max_opt_gap, Lx, Ly, O, E_orig, arrivals,
+                 departures, start_move, moves, actual_max_balls, non_optimal, max_gap, heuristic_sol) = raw
+            elif len(raw) == 21:
                 (alg_name, queue_management, seed, fractional_horizon, integer_horizon,
                  exec_horizon, time_limit, max_balls_in_air, max_opt_gap, Lx, Ly, O, E_orig, arrivals,
-                 departures, start_move, moves, actual_max_balls, non_optimal, max_gap, heuristic_sol) = pickle.load(pf)
+                 departures, start_move, moves, actual_max_balls, non_optimal, max_gap, heuristic_sol) = raw
+                request_rate = np.nan
+            else:
+                raise ValueError(
+                    f"Unsupported raw tuple format in {pickle_file}. Expected length 21 or 22, got {len(raw)}"
+                )
 
             lead_time = departures - arrivals
             waiting_time = start_move - arrivals
@@ -222,9 +272,10 @@ if __name__ == "__main__":
             flow_stats = summarize_metric(flow_time)
 
             o_str = str(O).replace('"', '""')
+            pbs_dimensions = f"{Lx}x{Ly}"
 
             f.write(
-                f"{pickle_file},{alg_name},{queue_management},{seed},{Lx},{Ly},\"{o_str}\",{len(O)},{len(E_orig)},"
+                f"{pickle_file},{alg_name},{queue_management},{seed},{request_rate},{pbs_dimensions},\"{o_str}\",{len(O)},{len(E_orig)},"
                 f"{fractional_horizon},{integer_horizon},{exec_horizon},{time_limit},{max_balls_in_air},"
                 f"{max_opt_gap},{actual_max_balls},{non_optimal},{max_gap},{heuristic_sol},"
                 f"{lead_stats['mean']},{lead_stats['half_width_95']},"

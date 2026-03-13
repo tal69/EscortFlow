@@ -46,11 +46,14 @@ import itertools
 import subprocess
 import pickle
 import time
+import os
+import socket
 import numpy as np
 import argparse
 
 import OneStepHeuristic_v2
 from PBSCom import *
+import CI_Calculation
 
 parser = argparse.ArgumentParser()
 
@@ -78,15 +81,17 @@ parser.add_argument("--num_threads", type=int,
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)
 parser.add_argument("-T", "--fractional_horizon", type=int,
-                    help="Number of fractional periods in model (default 10)",
-                    default=10)
+                    help="Number of fractional periods in model (default: --exec_horizon + 4)",
+                    default=None)
 parser.add_argument("-I", "--integer_horizon", type=int,
-                    help="Number of periods in the planning horizon represented by boolean variables (default 5)",
-                    default=5)
+                    help="Number of periods in the planning horizon represented by boolean variables (default: --exec_horizon)",
+                    default=None)
 parser.add_argument("-E", "--exec_horizon", type=int,
                     help="Number of periods in the execution horizon (default 5)",
                     default=5)
-parser.add_argument("-t", "--time_limit", type=int, help="Time limit for CPLEX calls (default 10 sec.)", default=10)
+parser.add_argument("-t", "--time_limit", type=int,
+                    help="Time limit for CPLEX calls in seconds (default: --exec_horizon)",
+                    default=None)
 parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
 parser.add_argument("-m", "--offline", action="store_true",
@@ -117,7 +122,21 @@ parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
 
 
 args = parser.parse_args()
+
+if args.integer_horizon is None:
+    args.integer_horizon = args.exec_horizon
+if args.time_limit is None:
+    args.time_limit = args.exec_horizon
+if args.fractional_horizon is None:
+    args.fractional_horizon = args.exec_horizon + 4
+
+if args.integer_horizon < args.exec_horizon:
+    parser.error("--integer_horizon must be at least --exec_horizon")
+if args.fractional_horizon < args.integer_horizon:
+    parser.error("--fractional_horizon must be at least --integer_horizon")
+
 result_csv_file = args.csv
+csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"
 file_export = "out.txt"
 dat_file = "escort_flow_sim.dat"
 
@@ -172,13 +191,13 @@ while B_new:
 
 sim_log_file = ""
 if args.log:
-    sim_log_file = f"sim_log{time.strftime('%Y-%m%-d_%H%M%S', time.localtime())}.txt"
+    sim_log_file = f"{csv_name_prefix}_log{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}.txt"
     f = open(sim_log_file, "w")
     f.write(f"{args}\n")
     f.write("Start simulation logging ...\n")
     f.close()
 
-pickle_file_name = f"raw{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}.p"
+pickle_file_name = f"{csv_name_prefix}_raw{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}.p"
 curr_t = 0
 np.random.seed(args.seed)
 random.seed(args.seed + 1)
@@ -186,7 +205,7 @@ random.seed(args.seed + 1)
 E = random.sample(Locations, args.escorts_num)
 A_orig, E_orig = [], copy.copy(E)  # save for script file
 number_of_requests = args.number_of_requests
-max_simulation_length = (int(number_of_requests/args.request_rate)+ 2500)
+max_simulation_length = (int(number_of_requests/args.request_rate)+ 2500)  # +2500 for a good measure to allow cool down period after the arrival of the last request
 moves = [[] for _ in range((int(number_of_requests/args.request_rate)+ 2500))]
 cpu_time = 0
 total_lead_time = 0
@@ -238,12 +257,30 @@ orig_distance = np.zeros(number_of_requests, dtype=np.int32)  # the distance of 
 
 f = open(result_csv_file, 'a')
 if args.header_line:
-    f.write(
-        f"\ndate, version, number_threads, Solution mode, Queue Management, Lx x Ly, #IOs, # Escorts, IOs, Request rate, gamma, "
-        f"distance_penalty, time_penalty, seed , T fractional, T integer, T execution, cpu time_limit, max balls in air, max opt gap, "
-        f"Number of requests, T actual, Total lead time, # loads entered, Mean lead time, Mean waiting time, Mean flow time, Mean excess time, "
-        f"#load movements, total CPU time, Sim iterations, Idle takts, Non optimal iter, max gap, Actual Max balls, Heuristic solution, "
-        f"log file name, pickle file name\n")
+    header_cols = [
+        "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs", "Max gap",
+        "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
+        "Number of outputs", "Number of Escorts",
+        "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Max Balls In Air",
+        "Max Opt Gap", "Actual Max Balls",
+        "Lead Time Mean", "Lead Time CI Half Width 95%",
+        "Waiting Time Mean", "Waiting Time CI Half Width 95%",
+        "Flow Time Mean", "Flow Time CI Half Width 95%",
+        "Excess time Mean", "Excess Time CI Half Width 95%",
+        "Lead Time Deleted", "Lead Time Used", "Lead Time Batch Size", "Lead Time Number of Batches",
+        "Lead Time Lag1 Autocorr", "Lead Time Lag1 Threshold", "Lead Time Batch Means Variance",
+        "Waiting Time Deleted", "Waiting Time Used", "Waiting Time Batch Size", "Waiting Time Number of Batches",
+        "Waiting Time Lag1 Autocorr", "Waiting Time Lag1 Threshold", "Waiting Time Batch Means Variance",
+        "Flow Time Deleted", "Flow Time Used", "Flow Time Batch Size", "Flow Time Number of Batches",
+        "Flow Time Lag1 Autocorr", "Flow Time Lag1 Threshold", "Flow Time Batch Means Variance",
+        "Excess Time Deleted", "Excess Time Used", "Excess Time Batch Size", "Excess Time Number of Batches",
+        "Excess Time Lag1 Autocorr", "Excess Time Lag1 Threshold", "Excess Time Batch Means Variance",
+        "Log File Name", "Raw Pickle File Name"
+    ]
+
+    f.write(",".join(header_cols) + "\n")
+
+
 f.close()  # we want to open and close the file anyway just to make sure that the file is available for writing.
 
 req_count = 0
@@ -285,13 +322,15 @@ while True:
                 # if ll not in O:
                 #     moves[curr_t].insert(0,(ll,ll))  # change the color of the load
         else:  # request happened to be for a load located on an output cell
+            if args.export_animation:
+                enter_via_cell.append(load_loc[req2load[req_count]])
             if args.log:
                 f = open(sim_log_file, "a")
                 f.write(
                     f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]} - will be removed immediately\n")
                 f.close()
-                departures[req_count] = curr_t
-                start_move[req_count] = curr_t
+            departures[req_count] = curr_t
+            start_move[req_count] = curr_t
         req_count += 1
 
     # idle takt
@@ -442,51 +481,51 @@ while True:
                 f.close()
                 moves[curr_t:(curr_t+args.exec_horizon)] = eval(mvs[-1])
 
-        if moves[curr_t]:
-            for (loc1, loc2) in moves[curr_t]:
-                if loc1 != loc2:  # can happen because of changing color in animation
-                    load_loc[pbs[loc1[0], loc1[1]]] = loc2
+    # Apply the move already planned for the current takt, even if the next solve is scheduled for later.
+    if moves[curr_t]:
+        for (loc1, loc2) in moves[curr_t]:
+            if loc1 != loc2:  # can happen that they are equal because of changing color for the animation
+                load_loc[pbs[loc1[0], loc1[1]]] = loc2
+                if args.log:
+                    f = open(sim_log_file, "a")
+                    f.write(
+                        f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
+                    f.close()
+
+        pbs = np.zeros((Lx, Ly), dtype=int)
+        for l, loc in load_loc.items():
+            pbs[loc[0], loc[1]] = l
+
+        for loc in O:
+            if pbs[loc[0], loc[1]] != 0:
+                leaving_load = pbs[loc[0], loc[1]]
+                for req in requests_on_load[leaving_load]:
+                    departures[req] = curr_t + 1
+                    total_lead_time += (departures[req] - arrivals[req])
+                    start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
+
+                    open_requests.remove(req)
                     if args.log:
                         f = open(sim_log_file, "a")
                         f.write(
-                            f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
+                            f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
                         f.close()
+                        #  For QA
+                        if departures[req] - arrivals[req] < orig_distance[req]:
+                            print("Panic: lead time is smaller than distance")
+                            if args.log:
+                                f = open(sim_log_file, "a")
+                                f.write("Panic: lead time is smaller than distance")
+                                f.close()
+                            exit(1)
 
-            pbs = np.zeros((Lx, Ly), dtype=int)
-            for l, loc in load_loc.items():
-                pbs[loc[0], loc[1]] = l
+                requests_on_load[leaving_load] = []
 
-            for loc in O:
-                if pbs[loc[0], loc[1]] != 0:
-                    leaving_load = pbs[loc[0], loc[1]]
-                    for req in requests_on_load[leaving_load]:
-                        departures[req] = curr_t + 1
-                        total_lead_time += (departures[req] - arrivals[req])
-                        start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
-
-                        open_requests.remove(req)
-                        if args.log:
-                            f = open(sim_log_file, "a")
-                            f.write(
-                                f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
-                            f.close()
-                            #  For QA
-                            if departures[req] - arrivals[req] < orig_distance[req]:
-                                print("Panic: lead time is smaller than distance")
-                                if args.log:
-                                    f = open(sim_log_file, "a")
-                                    f.write("Panic: lead time is smaller than distance")
-                                    f.close()
-                                exit(1)
-
-
-                    requests_on_load[leaving_load] = []
-
-        if curr_t > arrivals[-1] and not open_requests:
-            print(f"Simulation end")
-            print(f"Total lead time: {total_lead_time}")
-            print(f"Mean lead time: {total_lead_time / req_count:.2f}")
-            break
+    if curr_t > arrivals[-1] and not open_requests:
+        print(f"Simulation end")
+        print(f"Total lead time: {total_lead_time}")
+        print(f"Mean lead time: {total_lead_time / req_count:.2f}")
+        break
 
     if idle_takt > max_simulation_length:
         print("Error: simulation got stuck on idle state. Stopping and reporting results for debugging only")
@@ -499,28 +538,18 @@ while True:
 
     curr_t += 1  # advance the clock one takt
 
-if args.export_animation:
-    moves = moves[:curr_t+1]
-    for i in range(number_of_requests):
-        if enter_via_cell[i] not in O:
-            moves[arrivals[i]].insert(0, (enter_via_cell[i], enter_via_cell[i]))
-
-    pickle.dump((Lx, Ly, O, E_orig, A_orig, moves),
-                # remove empty moves  periods at the end
-                open(
-                    f"script_sim_v5_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{number_of_requests}.p",
-                    "wb"))
-
 arrivals = np.array(arrivals, dtype=int) # convert to np vector
 lead_times = departures - arrivals
 waiting_times = start_move - arrivals
 flow_times = departures - start_move
 excess_times = departures - arrivals - orig_distance
 
-lead_time_mean = np.mean(lead_times)
-waiting_time_mean = np.mean(waiting_times)
-flow_time_mean = np.mean(flow_times)
-excess_time_mean = np.mean(excess_times)
+lead_stats = CI_Calculation.summarize_metric(lead_times)
+waiting_stats = CI_Calculation.summarize_metric(waiting_times)
+flow_stats = CI_Calculation.summarize_metric(flow_times)
+excess_stats = CI_Calculation.summarize_metric(excess_times)
+
+
 
 # just for debugging
 if min(departures - arrivals) < 0 and args.log:
@@ -550,16 +579,45 @@ else:
     alg_name += f"Q{args.max_balls_in_air}"
 
 f = open(result_csv_file, 'a')
-f.write(
-    f"{time.ctime()},v5, {args.num_threads}, {alg_name},{args.queue_management},{Lx}x{Ly}, {len(O)}, {len(E_orig)}, "
-    f"{tuple_opl(O)},{args.request_rate}, {gamma}, {args.distance_penalty}, {args.time_penalty},{args.seed},"
-    f" {args.fractional_horizon}, {args.integer_horizon}, {args.exec_horizon},{time_limit}, {args.max_balls_in_air}, {args.max_opt_gap}, "
-    f"{number_of_requests}, {curr_t}, {total_lead_time},{number_of_requests}, "
-    f"{lead_time_mean:.3f}, {waiting_time_mean:.3f}, {flow_time_mean:.3f}, {excess_time_mean:.3f}, "
-    f"{NumberOfMovements},{cpu_time:.2f}, {sim_iter}, {idle_takt}, {non_optimal}, "
-    f"{max_gap:.4f}, {actual_max_balls},  {heuristic_sol}, {sim_log_file}, {pickle_file_name}\n")
+script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
+machine_name = socket.gethostname()
+row_vals = [
+    machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol, f"{max_gap:.4f}",
+    alg_name, args.queue_management, args.seed, args.request_rate, f"{Lx}x{Ly}", tuple_opl(O),
+    len(O), len(E_orig), args.fractional_horizon, args.integer_horizon, args.exec_horizon, time_limit,
+    args.max_balls_in_air, args.max_opt_gap, actual_max_balls,
+    lead_stats["mean"], lead_stats["half_width_95"],
+    waiting_stats["mean"], waiting_stats["half_width_95"],
+    flow_stats["mean"], flow_stats["half_width_95"],
+    excess_stats["mean"], excess_stats["half_width_95"],
+    lead_stats["obs_deleted"], lead_stats["obs_used"], lead_stats["batch_size"], lead_stats["num_batches"],
+    lead_stats["lag1_autocorr"], lead_stats["lag1_threshold"], lead_stats["batch_means_variance"],
+    waiting_stats["obs_deleted"], waiting_stats["obs_used"], waiting_stats["batch_size"], waiting_stats["num_batches"],
+    waiting_stats["lag1_autocorr"], waiting_stats["lag1_threshold"], waiting_stats["batch_means_variance"],
+    flow_stats["obs_deleted"], flow_stats["obs_used"], flow_stats["batch_size"], flow_stats["num_batches"],
+    flow_stats["lag1_autocorr"], flow_stats["lag1_threshold"], flow_stats["batch_means_variance"],
+    excess_stats["obs_deleted"], excess_stats["obs_used"], excess_stats["batch_size"], excess_stats["num_batches"],
+    excess_stats["lag1_autocorr"], excess_stats["lag1_threshold"], excess_stats["batch_means_variance"],
+    sim_log_file, pickle_file_name,
+]
+f.write(",".join(map(str, row_vals)) + "\n")
 f.close()
 
-pickle.dump((alg_name, args.queue_management, args.seed, args.fractional_horizon, args.integer_horizon,
+
+moves = moves[:curr_t+1]  # Trim trailing empty entries of the list
+
+pickle.dump((alg_name, args.queue_management, args.seed, args.request_rate, args.fractional_horizon, args.integer_horizon,
              args.exec_horizon,time_limit, args.max_balls_in_air, args.max_opt_gap, Lx, Ly, O, E_orig,arrivals,
              departures, start_move, moves, actual_max_balls,non_optimal, max_gap,heuristic_sol), open(pickle_file_name,"wb"))
+
+if args.export_animation:
+
+    for i in range(number_of_requests):
+        if enter_via_cell[i] not in O:
+            moves[arrivals[i]].insert(0, (enter_via_cell[i], enter_via_cell[i]))
+
+    pickle.dump((Lx, Ly, O, E_orig, A_orig, moves),
+                # remove empty moves  periods at the end
+                open(
+                    f"script_sim_v5_{Lx}_{Ly}_{args.escorts_num}_{args.request_rate}_{number_of_requests}.p",
+                    "wb"))

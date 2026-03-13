@@ -11,7 +11,6 @@ import math
 from collections import defaultdict
 import random
 
-from tornado.escape import xhtml_escape
 
 """ 
     run one step of the heuristic and can apply it repeatedly to obtain a complete solution
