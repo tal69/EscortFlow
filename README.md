@@ -4,7 +4,7 @@ This repository contains simulation and optimization code for retrieval control 
 
 1. run a dynamic simulation with `EscortFlowSim_v5.py`
 2. collect steady-state statistics directly into a CSV row
-3. optionally inspect the raw trace with `CI_Calculation.py` or animate it with `FlowAnimationSim.py`
+3. optionally inspect the raw trace with `CI_Calculation.py` or animate it with `PBSAnimation.py`
 
 The project mixes Python simulation code with IBM ILOG OPL models (`.mod` / `.dat`) used by the rolling-horizon MILP controller.
 
@@ -14,7 +14,7 @@ The project mixes Python simulation code with IBM ILOG OPL models (`.mod` / `.da
 - `EscortFlow_v3.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
 - `load_flow_multi.py`: static load-flow ILP experiment runner for the corresponding benchmark instances
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
-- `FlowAnimationSim.py`: visualize a raw simulation trace
+- `PBSAnimation.py`: animate PBS outputs from `EscortFlow_v3.py`, `load_flow_multi.py`, and `EscortFlowSim_v5.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
 
 ## Requirements
@@ -311,15 +311,28 @@ This script:
 - applies MSER-5 warmup deletion
 - chooses a feasible batch size subject to a lag-1 autocorrelation check
 
-## Animate a simulation
+## Animate PBS outputs
 
-To inspect a raw trace visually:
+`PBSAnimation.py` is the unified animation viewer for this repository. It is
+compatible with:
+
+- raw simulation pickles produced by `EscortFlowSim_v5.py`
+- exported animation script pickles produced by `EscortFlow_v3.py` with `-a`
+- exported animation script pickles produced by `load_flow_multi.py` with `-a`
+
+To inspect a raw `EscortFlowSim_v5.py` trace visually:
 
 ```bash
-python3 FlowAnimationSim.py sim_escort_flow_raw2026-03-15_143541.p
+python3 PBSAnimation.py sim_escort_flow_raw2026-03-15_143541.p
 ```
 
-`FlowAnimationSim.py` uses `tkinter` and opens a desktop GUI.
+To inspect an exported static script visually:
+
+```bash
+python3 PBSAnimation.py script_BM_leave_16_10_8_4_1.p
+```
+
+`PBSAnimation.py` uses `tkinter` and opens a desktop GUI.
 
 ## Repository layout
 
@@ -329,7 +342,7 @@ python3 FlowAnimationSim.py sim_escort_flow_raw2026-03-15_143541.p
 - `CI_Calculation.py`: steady-state analysis from raw traces
 - `mser5.py`: MSER-5 warmup deletion helper
 - `OneStepHeuristic_v2.py`: greedy step heuristic
-- `FlowAnimationSim.py`: animation for simulation traces
+- `PBSAnimation.py`: unified animation tool for static and dynamic PBS traces
 - `PBSCom.py`: common PBS parsing/helpers
 - `PBS_DPHeuristic_lm.py`, `PBS_DPHeuristic_bm.py`: DP-based upper-bound helpers for single-load static runs
 - `escort_flow_*.mod`, `pbs_*.mod`: OPL model files

@@ -30,7 +30,14 @@ parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS 
 parser.add_argument("-O", "--output_cells", nargs='+', type=int, help="List of output locations", required=True)
 parser.add_argument("-e", "--escorts_range", help="Range of number of escorts  3, 3-10, or 1-30-3", default="5")
 parser.add_argument("-r", "--reps_range", help="Replication range (seed range) 1, 1-10, or 1-30-3", default="1")
-parser.add_argument("-l", "--load_num_curr_t", type=int, help="Number of target loads (default 1)", default=1)
+parser.add_argument(
+    "-l",
+    "--load_num",
+    dest="load_num",
+    type=int,
+    help="Number of target loads (default 1)",
+    default=1,
+)
 parser.add_argument('-m', '--retrieval_mode', choices=['stay', 'leave', 'continue'],
                     help='Select a retrieval mode. Default is stay. Also note that for stay mode the number '
                          'of output cells must be greater or equal the number target loads  (ONLY LEAVE IS SUPPORTED FOR NOW)',

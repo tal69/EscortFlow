@@ -20,7 +20,7 @@ Timing convention:
 Outputs:
 - CSV summary line with configuration and performance statistics.
 - Raw pickle containing the simulation trace needed by `CI_Calculation.py` and
-  `FlowAnimationSim.py`.
+  `PBSAnimation.py`.
 
 Author:      Tal Raviv,  talraviv@tau.ac.il
 Copyright:   (c) Tal Raviv 2023, 2024, 2026
@@ -642,7 +642,7 @@ for i in range(number_of_requests):
         moves[arrivals[i]].insert(0, (enter_via_cell[i], enter_via_cell[i]))
 
 # This is consumed by CI_Calculation.py and can also be read directly by
-# FlowAnimationSim.py.
+# PBSAnimation.py.
 pickle.dump((alg_name, args.queue_management, args.seed, args.request_rate, args.fractional_horizon, args.integer_horizon,
              args.exec_horizon,time_limit, args.max_balls_in_air, args.max_opt_gap, Lx, Ly, O, E_orig,arrivals,
              departures, start_move, moves, actual_max_balls,non_optimal, max_gap,heuristic_sol), open(pickle_file_name,"wb"))

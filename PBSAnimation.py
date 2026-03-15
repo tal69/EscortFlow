@@ -1,9 +1,10 @@
 # -------------------------------------------------------------------------------
-# Name:        FlowAnimationSim
-# Purpose:     Animation of a script produced by Rolling, ExperimentFull
-#              also work for the solution of the DP based heuristic
-#              (adapted from previous version of KivaAnnimation)
-#              Version for dynamic animation where new requests arrive, different data structure
+# Name:        PBSAnimation
+# Purpose:     Unified animation entry point for PBS retrieval experiments.
+#              Compatible with exported animation scripts from EscortFlow_v3.py
+#              and load_flow_multi.py, and with raw simulation pickles from
+#              EscortFlowSim_v5.py.
+#              Adapted from previous versions of FlowAnimation / FlowAnimationSim.
 #
 #
 # Author:      Tal Raviv talraviv@tau.ac.il
@@ -13,7 +14,7 @@
 #              ('leave' and 'stay' were already supported.)
 #              15-12-2023 Version for dynamic animation where new requests arrive, different data structure
 #
-# Copyright:   (c) TAL 2020, 2023
+# Copyright:   (c) TAL 2020, 2023, 2026
 # Licence:     Free to use but please contact me  talraviv@tau.ac.il
 # -------------------------------------------------------------------------------
 
@@ -275,7 +276,7 @@ class PathAnimation:
 
 
 def load_animation_data(pickle_path):
-    """Load either the legacy animation pickle or a raw simulation pickle."""
+    """Load animation data from static or dynamic PBS experiment outputs."""
     data = pickle.load(open(pickle_path, "rb"))
 
     if isinstance(data, tuple) and len(data) == 6:
@@ -290,7 +291,7 @@ def load_animation_data(pickle_path):
         (_, _, _, _, _, _, _, _, _, Lx, Ly, O, E, _, _, _, moves, _, _, _, _) = data
         return [Lx, Ly], O, E, set(), moves
 
-    raise ValueError("Unsupported pickle format for FlowAnimationSim")
+    raise ValueError("Unsupported pickle format for PBSAnimation")
 
 
 if __name__ == '__main__':
