@@ -472,12 +472,14 @@ while True:
                     load_loc[load_id]: min(requests_on_load[load_id])
                     for load_id in eligible_target_loads
                 }
+                heuristic_start_time = time.perf_counter()
                 for i in range(args.exec_horizon):
                     A, E, one_step_move = OneStepHeuristic_v2.OneStep(
                         Lx, Ly, set(O), A, set(E), dist_map, acyclic=args.acyclic
                     )
                     moves[curr_t+i] = one_step_move
                     NumberOfMovements += len(one_step_move)
+                cpu_time += time.perf_counter() - heuristic_start_time
 
                 A,E = list(A.keys()), list(E)
                 heuristic_sol += 1
@@ -565,6 +567,17 @@ waiting_stats = CI_Calculation.summarize_metric(waiting_times)
 flow_stats = CI_Calculation.summarize_metric(flow_times)
 excess_stats = CI_Calculation.summarize_metric(excess_times)
 
+for metric_name, stats in [
+    ("Lead Time", lead_stats),
+    ("Waiting Time", waiting_stats),
+    ("Flow Time", flow_stats),
+    ("Excess Time", excess_stats),
+]:
+    if stats["res"] is None:
+        log_message(
+            f"{metric_name} steady-state summary skipped: {stats.get('error', 'unknown error')}\n",
+            echo_to_screen=True,
+        )
 
 
 # just for debugging
@@ -615,7 +628,7 @@ row_vals = [
     excess_stats["lag1_autocorr"], excess_stats["lag1_threshold"], excess_stats["batch_means_variance"],
     sim_log_file, pickle_file_name,
 ]
-f.write(",".join(map(str, row_vals)) + "\n")
+f.write(",".join(CI_Calculation.csv_cell(v) for v in row_vals) + "\n")
 f.close()
 
 

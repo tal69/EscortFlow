@@ -148,9 +148,25 @@ def summarize_metric(x):
     - `half_width_99`: 99% CI half-width (normal approximation)
     """
     x = np.asarray(x, dtype=float)
-    obs_del = int(mser5.mser5(x)["d_obs"])
-    x_post_warmup = x[obs_del:]
-    res = choose_batches_min_var_with_lag1(x_post_warmup, d=0, k_min=20)
+    try:
+        obs_del = int(mser5.mser5(x)["d_obs"])
+        x_post_warmup = x[obs_del:]
+        res = choose_batches_min_var_with_lag1(x_post_warmup, d=0, k_min=20)
+    except Exception as exc:
+        return {
+            "obs_deleted": np.nan,
+            "obs_used": np.nan,
+            "batch_size": np.nan,
+            "num_batches": np.nan,
+            "lag1_autocorr": np.nan,
+            "lag1_threshold": np.nan,
+            "batch_means_variance": np.nan,
+            "mean": np.nan,
+            "half_width_95": np.nan,
+            "half_width_99": np.nan,
+            "res": None,
+            "error": str(exc),
+        }
 
     if res is None:
         return {
@@ -165,6 +181,7 @@ def summarize_metric(x):
             "half_width_95": np.nan,
             "half_width_99": np.nan,
             "res": None,
+            "error": "no feasible batch size found after warmup deletion",
         }
 
     mean_est = float(np.mean(res["batch_means"]))
@@ -182,7 +199,17 @@ def summarize_metric(x):
         "half_width_95": float(half_width_95),
         "half_width_99": float(half_width_99),
         "res": res,
+        "error": "",
     }
+
+
+def csv_cell(value):
+    """Serialize NaN/None as an empty CSV cell."""
+    if value is None:
+        return ""
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return ""
+    return str(value)
 
 
 # ---- example usage ----
@@ -274,25 +301,26 @@ if __name__ == "__main__":
             o_str = str(O).replace('"', '""')
             pbs_dimensions = f"{Lx}x{Ly}"
 
-            f.write(
-                f"{pickle_file},{alg_name},{queue_management},{seed},{request_rate},{pbs_dimensions},\"{o_str}\",{len(O)},{len(E_orig)},"
-                f"{fractional_horizon},{integer_horizon},{exec_horizon},{time_limit},{max_balls_in_air},"
-                f"{max_opt_gap},{actual_max_balls},{non_optimal},{max_gap},{heuristic_sol},"
-                f"{lead_stats['mean']},{lead_stats['half_width_95']},"
-                f"{waiting_stats['mean']},{waiting_stats['half_width_95']},"
-                f"{flow_stats['mean']},{flow_stats['half_width_95']},"
-                f"{lead_stats['obs_deleted']},{lead_stats['obs_used']},{lead_stats['batch_size']},{lead_stats['num_batches']},"
-                f"{lead_stats['lag1_autocorr']},{lead_stats['lag1_threshold']},{lead_stats['batch_means_variance']},"
-                f"{waiting_stats['obs_deleted']},{waiting_stats['obs_used']},{waiting_stats['batch_size']},{waiting_stats['num_batches']},"
-                f"{waiting_stats['lag1_autocorr']},{waiting_stats['lag1_threshold']},{waiting_stats['batch_means_variance']},"
-                f"{flow_stats['obs_deleted']},{flow_stats['obs_used']},{flow_stats['batch_size']},{flow_stats['num_batches']},"
-                f"{flow_stats['lag1_autocorr']},{flow_stats['lag1_threshold']},{flow_stats['batch_means_variance']}\n"
-            )
+            row_vals = [
+                pickle_file, alg_name, queue_management, seed, request_rate, pbs_dimensions, f'"{o_str}"', len(O), len(E_orig),
+                fractional_horizon, integer_horizon, exec_horizon, time_limit, max_balls_in_air,
+                max_opt_gap, actual_max_balls, non_optimal, max_gap, heuristic_sol,
+                lead_stats["mean"], lead_stats["half_width_95"],
+                waiting_stats["mean"], waiting_stats["half_width_95"],
+                flow_stats["mean"], flow_stats["half_width_95"],
+                lead_stats["obs_deleted"], lead_stats["obs_used"], lead_stats["batch_size"], lead_stats["num_batches"],
+                lead_stats["lag1_autocorr"], lead_stats["lag1_threshold"], lead_stats["batch_means_variance"],
+                waiting_stats["obs_deleted"], waiting_stats["obs_used"], waiting_stats["batch_size"], waiting_stats["num_batches"],
+                waiting_stats["lag1_autocorr"], waiting_stats["lag1_threshold"], waiting_stats["batch_means_variance"],
+                flow_stats["obs_deleted"], flow_stats["obs_used"], flow_stats["batch_size"], flow_stats["num_batches"],
+                flow_stats["lag1_autocorr"], flow_stats["lag1_threshold"], flow_stats["batch_means_variance"],
+            ]
+            f.write(",".join(csv_cell(v) for v in row_vals) + "\n")
 
             print(f"\nResults for {pickle_file}")
             for metric_name, stats in [("Lead Time", lead_stats), ("Waiting Time", waiting_stats), ("Flow Time", flow_stats)]:
                 if stats["res"] is None:
-                    print(f"{metric_name}: no feasible batch size found after warmup deletion.")
+                    print(f"{metric_name}: {stats['error']}.")
                     continue
                 print(
                     f"{metric_name}: b={stats['batch_size']}, k={stats['num_batches']}, "
