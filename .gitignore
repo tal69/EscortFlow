@@ -5,4 +5,9 @@
 .idea/*
 test.py
 TestScript_v2.py
-/Junk/
+/Junk/*
+kit/*
+.oplproject
+.project
+.DS_Store
+__pycache__/
