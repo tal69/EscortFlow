@@ -222,15 +222,16 @@ python3 EscortFlowSim_v5.py \
   -x 9 -y 5 \
   -O 4 0 \
   -e 4 \
-  -S 200 \
-  -E 1 \
   -R 0.4 \
-  -M 20 \
-  -q spt \
+  -S 1600 \
   --greedy \
   -f results.csv \
   -H
 ```
+This will run a simulation of the RTRH drove by the greedy heuristic.
+The simulation is of 9x5 with 4 escorts PBS unit with an output cell at (0,4) which is the middle of the bottom wall. 
+New random request will arrive at rate of 0.4 per tie step. The simulation runs until the 1600^th request is ejected at
+an output cell. The summary statistics of the simulation results are written to "results.csv." 
 
 Example rolling-horizon MILP run:
 
@@ -240,10 +241,9 @@ python3 EscortFlowSim_v5.py \
   -O 4 0 \
   -e 4 \
   -S 2000 \
-  -T 10 \
+  -T 5 \
   -I 1 \
   -E 1 \
-  -t 3600 \
   -R 0.2 \
   -M 6 \
   -q spt \
