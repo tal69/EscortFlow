@@ -244,7 +244,7 @@ Important options:
 - `-T`: fractional horizon for the MILP; defaults to `max(--exec_horizon + 4, --integer_horizon)`
 - `-I`: integer horizon for the MILP
 - `-t`: per-solve OPL/CPLEX time limit in seconds
-- `-M`: maximum number of target loads considered concurrently
+- `-M`: maximum number of target loads considered concurrently; if omitted it defaults internally to `Lx*Ly`
 - `-q`: queue management, either `fifo` or `spt`
 - `-m`: offline mode
 - `--full`: use the full MILP in either realtime or offline mode

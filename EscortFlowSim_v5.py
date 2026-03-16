@@ -144,8 +144,8 @@ parser.add_argument("--seed", type=int, help="random seed (default 0)", default=
 parser.add_argument("-H", "--header_line", action="store_true",
                     help="Print header line in result csv file; a new or empty file gets a header automatically")
 parser.add_argument("-M", "--max_balls_in_air", type=int,
-                    help="Maximum number of target loads that are considered concurrently, the rest are queued (default 5)",
-                    default=5)
+                    help="Maximum number of target loads that are considered concurrently; if omitted, all cells are eligible",
+                    default=None)
 parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
                     help='Select queue management strategy when there are to many open requests to hande (more than '
                          'max_balls_in__air spt (default) or spt - closest load with most requests'
@@ -179,6 +179,9 @@ gamma = args.gamma  # movement weight
 time_limit = args.time_limit  # Time limit for cplex run (seconds)
 Lx = args.Lx
 Ly = args.Ly
+max_balls_in_air_csv = "n/a" if args.max_balls_in_air is None else args.max_balls_in_air
+if args.max_balls_in_air is None:
+    args.max_balls_in_air = Lx * Ly
 
 if args.greedy:
     args.offline = True
@@ -289,31 +292,35 @@ start_move = np.full(number_of_requests, np.iinfo(np.int32).max, dtype=np.int32)
 orig_distance = np.zeros(number_of_requests, dtype=np.int32)  # the distance of the request from the output cell upon arrival
 
 
+header_cols = [
+    "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs",
+    "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
+    "Number of outputs", "Number of Escorts",
+    "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Max Balls In Air",
+    "Actual Max Balls", "Max actual opt gap", "Max allowed opt gap",
+    "Lead Time Mean", "Lead Time CI Half Width 95%",
+    "Waiting Time Mean", "Waiting Time CI Half Width 95%",
+    "Flow Time Mean", "Flow Time CI Half Width 95%",
+    "Excess time Mean", "Excess Time CI Half Width 95%",
+    "Lead Time Deleted", "Lead Time Used", "Lead Time Batch Size", "Lead Time Number of Batches",
+    "Lead Time Lag1 Autocorr", "Lead Time Lag1 Threshold", "Lead Time Batch Means Variance",
+    "Waiting Time Deleted", "Waiting Time Used", "Waiting Time Batch Size", "Waiting Time Number of Batches",
+    "Waiting Time Lag1 Autocorr", "Waiting Time Lag1 Threshold", "Waiting Time Batch Means Variance",
+    "Flow Time Deleted", "Flow Time Used", "Flow Time Batch Size", "Flow Time Number of Batches",
+    "Flow Time Lag1 Autocorr", "Flow Time Lag1 Threshold", "Flow Time Batch Means Variance",
+    "Excess Time Deleted", "Excess Time Used", "Excess Time Batch Size", "Excess Time Number of Batches",
+    "Excess Time Lag1 Autocorr", "Excess Time Lag1 Threshold", "Excess Time Batch Means Variance",
+    "Log File Name", "Raw Pickle File Name"
+]
+expected_header = ",".join(header_cols)
 write_header = args.header_line or not os.path.exists(result_csv_file) or os.path.getsize(result_csv_file) == 0
+if not write_header:
+    with open(result_csv_file, "r") as existing_csv:
+        first_line = existing_csv.readline().strip()
+    write_header = first_line != expected_header
 
 f = open(result_csv_file, 'a')
 if write_header:
-    header_cols = [
-        "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs", "Max gap",
-        "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
-        "Number of outputs", "Number of Escorts",
-        "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Max Balls In Air",
-        "Max Opt Gap", "Actual Max Balls",
-        "Lead Time Mean", "Lead Time CI Half Width 95%",
-        "Waiting Time Mean", "Waiting Time CI Half Width 95%",
-        "Flow Time Mean", "Flow Time CI Half Width 95%",
-        "Excess time Mean", "Excess Time CI Half Width 95%",
-        "Lead Time Deleted", "Lead Time Used", "Lead Time Batch Size", "Lead Time Number of Batches",
-        "Lead Time Lag1 Autocorr", "Lead Time Lag1 Threshold", "Lead Time Batch Means Variance",
-        "Waiting Time Deleted", "Waiting Time Used", "Waiting Time Batch Size", "Waiting Time Number of Batches",
-        "Waiting Time Lag1 Autocorr", "Waiting Time Lag1 Threshold", "Waiting Time Batch Means Variance",
-        "Flow Time Deleted", "Flow Time Used", "Flow Time Batch Size", "Flow Time Number of Batches",
-        "Flow Time Lag1 Autocorr", "Flow Time Lag1 Threshold", "Flow Time Batch Means Variance",
-        "Excess Time Deleted", "Excess Time Used", "Excess Time Batch Size", "Excess Time Number of Batches",
-        "Excess Time Lag1 Autocorr", "Excess Time Lag1 Threshold", "Excess Time Batch Means Variance",
-        "Log File Name", "Raw Pickle File Name"
-    ]
-
     f.write(",".join(header_cols) + "\n")
 
 
@@ -610,10 +617,10 @@ f = open(result_csv_file, 'a')
 script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
 machine_name = socket.gethostname()
 row_vals = [
-    machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol, f"{max_gap:.4f}",
+    machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
     alg_name, args.queue_management, args.seed, args.request_rate, f"{Lx}x{Ly}", tuple_opl(O),
     len(O), len(E_orig), args.fractional_horizon, args.integer_horizon, args.exec_horizon, time_limit,
-    args.max_balls_in_air, args.max_opt_gap, actual_max_balls,
+    max_balls_in_air_csv, actual_max_balls, f"{max_gap:.4f}", args.max_opt_gap,
     lead_stats["mean"], lead_stats["half_width_95"],
     waiting_stats["mean"], waiting_stats["half_width_95"],
     flow_stats["mean"], flow_stats["half_width_95"],
