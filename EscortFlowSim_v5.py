@@ -113,21 +113,21 @@ parser.add_argument("--num_threads", type=int,
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)
 parser.add_argument("-T", "--fractional_horizon", type=int,
-                    help="Number of fractional periods in model (default: --exec_horizon + 4)",
+                    help="Number of fractional periods in model (default: max(--exec_horizon + 4, --integer_horizon))",
                     default=None)
 parser.add_argument("-I", "--integer_horizon", type=int,
                     help="Number of periods in the planning horizon represented by boolean variables (default: --exec_horizon)",
                     default=None)
 parser.add_argument("-E", "--exec_horizon", type=int,
-                    help="Number of periods in the execution horizon (default 5)",
-                    default=5)
+                    help="Number of periods in the execution horizon (default 1)",
+                    default=1)
 parser.add_argument("-t", "--time_limit", type=int,
                     help="Time limit for CPLEX calls in seconds (default: --exec_horizon)",
                     default=None)
 parser.add_argument("-m", "--offline", action="store_true",
                     help="Offline rolling horizon: requests are eligible for optimization immediately, without the online one-horizon information delay")
-parser.add_argument("--static", action="store_true",
-                    help="Use the full static MILP instead of the surrogate model")
+parser.add_argument("--full", action="store_true",
+                    help="Use the full MILP instead of the surrogate model, in either realtime or offline mode")
 
 parser.add_argument("--greedy", action="store_true",
                     help="Use the greedy heuristic only; this forces --offline and ignores CPLEX")
@@ -159,16 +159,16 @@ if args.integer_horizon is None:
 if args.time_limit is None:
     args.time_limit = args.exec_horizon
 if args.fractional_horizon is None:
-    args.fractional_horizon = args.exec_horizon + 4
+    args.fractional_horizon = max(args.exec_horizon + 4, args.integer_horizon)
 
 if args.integer_horizon < args.exec_horizon:
     parser.error("--integer_horizon must be at least --exec_horizon")
 if args.fractional_horizon < args.integer_horizon:
     parser.error("--fractional_horizon must be at least --integer_horizon")
-if args.static and not args.offline:
-    parser.error("--static requires --offline")
-if args.greedy and args.static:
-    parser.error("--greedy cannot be combined with --static")
+if args.greedy and args.exec_horizon != 1:
+    parser.error("--greedy requires --exec_horizon == 1")
+if args.greedy and args.full:
+    parser.error("--greedy cannot be combined with --full")
 
 result_csv_file = args.csv
 csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"
@@ -413,7 +413,7 @@ while True:
                 f.write('Ly=%d;\n' % Ly)
                 f.write(f'T={args.fractional_horizon};\n')
                 f.write(f'T_exec={args.exec_horizon};\n')
-                if not args.static:
+                if not args.full:
                     f.write(f'T_int={args.integer_horizon};\n')
                 f.write('E=%s;\n' % tuple_opl(E))
                 f.write('A=%s;\n' % tuple_opl(A))
@@ -422,7 +422,7 @@ while True:
                 f.close()
 
                 try:
-                    if args.static:   # using the same model as v3 so I didn't change the names
+                    if args.full:   # using the same model as v3 so I didn't change the names
                         subprocess.run(["oplrun", "escort_flow_bm_rh_static_v3.mod", dat_file], check=True)
                     else:
                         subprocess.run(["oplrun", "escort_flow_bm_rh_v3.mod", dat_file], check=True)
@@ -599,8 +599,8 @@ else:
         alg_name = "offline-"
     else:
         alg_name = "realtime-"
-    if args.static:
-        alg_name += "static"
+    if args.full:
+        alg_name += "full"
     else:
         alg_name += "surrogate"
 

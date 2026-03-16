@@ -36,11 +36,10 @@ Optimization:
 
 - IBM ILOG OPL / CPLEX with `oplrun` available on `PATH`
 
-The simulator also expects the OPL model files in this repository, especially:
+The simulator expects the OPL model files in this repository, especially:
 
 - `escort_flow_bm_rh_v3.mod`
 - `escort_flow_bm_rh_static_v3.mod`
-- `escort_flow_sim.dat`
 
 The static experiment scripts additionally depend on:
 
@@ -218,38 +217,20 @@ They are not the main experiment entry points; normally you use them through `Es
 Example greedy-only run:
 
 ```bash
-python3 EscortFlowSim_v5.py \
-  -x 9 -y 5 \
-  -O 4 0 \
-  -e 4 \
-  -R 0.4 \
-  -S 1600 \
-  --greedy \
-  -f results.csv \
-  -H
+python3 EscortFlowSim_v5.py -x 9 -y 5 -O 4 0 -e 4 -R 0.4 \
+  -S 1600 --greedy -f results.csv -H
 ```
 This will run a simulation of the RTRH drove by the greedy heuristic.
 The simulation is of 9x5 with 4 escorts PBS unit with an output cell at (0,4) which is the middle of the bottom wall. 
 New random request will arrive at rate of 0.4 per tie step. The simulation runs until the 1600^th request is ejected at
-an output cell. The summary statistics of the simulation results are written to "results.csv." 
+an output cell. The summary statistics of the simulation results are written to "results.csv." after an header row with 
+all the titles of the instance demographics and results.
 
 Example rolling-horizon MILP run:
 
 ```bash
-python3 EscortFlowSim_v5.py \
-  -x 9 -y 5 \
-  -O 4 0 \
-  -e 4 \
-  -S 2000 \
-  -T 5 \
-  -I 1 \
-  -E 1 \
-  -R 0.2 \
-  -M 6 \
-  -q spt \
-  -L \
-  -f results.csv \
-  -H
+python3 EscortFlowSim_v5.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
+-T 5 -I 1 -E 1 -R 0.2 -M 6 -q spt -L -f results.csv -H
 ```
 
 Important options:
@@ -260,14 +241,14 @@ Important options:
 - `-S`: number of requests in the simulation
 - `-R`: Poisson request arrival rate per time step
 - `-E`: execution horizon
-- `-T`: fractional horizon for the MILP
+- `-T`: fractional horizon for the MILP; defaults to `max(--exec_horizon + 4, --integer_horizon)`
 - `-I`: integer horizon for the MILP
 - `-t`: per-solve OPL/CPLEX time limit in seconds
 - `-M`: maximum number of target loads considered concurrently
 - `-q`: queue management, either `fifo` or `spt`
 - `-m`: offline mode
-- `--static`: use the full static MILP; requires `-m`
-- `--greedy`: greedy heuristic only; forces offline behavior and skips OPL
+- `--full`: use the full MILP in either realtime or offline mode
+- `--greedy`: greedy heuristic only; forces offline behavior, requires `--exec_horizon 1`, and skips OPL
 - `-L`: write a detailed log file
 - `-f`: output CSV file
 - `-H`: write CSV header if needed
