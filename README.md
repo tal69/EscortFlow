@@ -249,6 +249,8 @@ Important options:
 - `-m`: offline mode
 - `--full`: use the full MILP in either realtime or offline mode
 - `--greedy`: greedy heuristic only; forces offline behavior, requires `--exec_horizon 1`, and skips OPL
+- `--hybrid`: use the rolling-horizon MILP as usual, but switch to the greedy heuristic when the number of open target loads is small
+- `--hybrid_threshold`: threshold for `--hybrid` (default `1`); at or below this many open target loads, greedy handles all requests that have arrived so far
 - `-L`: write a detailed log file
 - `-f`: output CSV file
 - `-H`: write CSV header if needed
