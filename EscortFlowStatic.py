@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------
-# Name:        EscortFlow_v3   - WRONG TRY
+# Name:        EscortFlowStatic
 # Purpose:     Run the escort flow ILP model, SBM (formerly LM)/ BM, multi-loads, stay/continue/leave
 #              Use DP to create upper bound
 #              For now works with one target load only
@@ -12,8 +12,9 @@
 #              9/12/2023 added using DP heuristic to create upper bound for BM with a single load (without warm-start for now)
 #              14/12/2023 adding lp relaxation with "--lp" switch
 #              20/12/2025 (v3) adding cuts as described in the revised paper, removing support for external network, SLM, removing makespan objective (alpha)
+#              17/3/2026 Rename to EscortFlowStatic.py and add support for the GreedyHeurisitc
 #
-# Copyright:   (c) Tal Raviv 2020, 2023, 2025
+# Copyright:   (c) Tal Raviv 2020, 2023, 2025, 2026
 # Licence:     Free but please let me know that you are using it
 # Depends on   PBSCom.py, PBS_DPHeuristic_lm.py, pbs_escorts3.mod, , pbs_escorts_bm.mod
 #              Assumes oplrun is installed and on the path
@@ -31,6 +32,7 @@ import numpy as np
 from PBSCom import *
 import PBS_DPHeuristic_lm
 import PBS_DPHeuristic_bm
+import OneStepHeuristic_v2
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -62,6 +64,8 @@ parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
 parser.add_argument("--lp", action="store_true",
                     help="Run lp relaxation work only with bm movement regime (default False)")
+parser.add_argument("--greedy", action="store_true",
+                    help="Solve the static instance with OneStepHeuristic_v2.SolveGreedy instead of OPL")
 
 args = parser.parse_args()
 result_csv_file = args.csv
@@ -113,6 +117,14 @@ if k_prime > 0:
 
 if len(set(O)) < len(O):
     print(f"Panic: All output cells location must be unique {sorted(O)}")
+    exit(1)
+
+if args.greedy and args.lp:
+    print("Panic: --greedy cannot be combined with --lp")
+    exit(1)
+
+if args.greedy and args.retrieval_mode not in ["continue", "leave"]:
+    print("Panic: --greedy currently supports only --retrieval_mode continue or leave")
     exit(1)
 
 Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
@@ -322,29 +334,48 @@ for escort_num in escorts_range:
 
         f = open(result_csv_file, 'a')
         f.write(
-            f"{time.ctime()},BM, {'LP' if args.lp else 'ILP'},"
+            f"{time.ctime()},BM, {'Greedy' if args.greedy else ('LP' if args.lp else 'ILP')},"
             f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
             f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {len(moves)}, "
             f"{sum([len(x) for x in moves])}")
         f.close()
 
-        try:
-            if args.lp:
-                subprocess.run(["oplrun", "pbs_escorts_bm_lp_v3.mod", dat_file, network_file], check=True)
-            else:
-                subprocess.run(["oplrun", "pbs_escorts_bm_v3.mod", dat_file, network_file], check=True)
+        if args.greedy:
+            max_steps = max(T, (Lx + Ly) * len(R) * 20 // max(len(E), 1))
+            greedy_start_time = time.perf_counter()
+            makespan, flowtime, movements, greedy_moves = OneStepHeuristic_v2.SolveGreedy(
+                Lx, Ly, set(O), set(R), set(E), verbal=False, max_steps=max_steps, return_moves=True,
+                retrieval_mode=args.retrieval_mode
+            )
+            cpu_time = time.perf_counter() - greedy_start_time
 
-        except:
-            print("Could not solve the model")
-        else:
-            # Create script file
             if file_export != "":
-                f = open(file_export)
-                s = f.readlines()
-                moves = eval(s[-1])  # read moves in the current horizon
-                f.close()
-                pickle.dump((Lx, Ly, O, E, R, moves),
-                            open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p","wb"))
+                pickle.dump((Lx, Ly, O, E, R, greedy_moves),
+                            open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p", "wb"))
+
+            f = open(result_csv_file, 'a')
+            f.write(
+                f",{makespan}, {flowtime}, {movements}, {beta * flowtime + gamma * movements}, , {cpu_time:.4f}, Greedy"
+            )
+            f.close()
+        else:
+            try:
+                if args.lp:
+                    subprocess.run(["oplrun", "pbs_escorts_bm_lp_v3.mod", dat_file, network_file], check=True)
+                else:
+                    subprocess.run(["oplrun", "pbs_escorts_bm_v3.mod", dat_file, network_file], check=True)
+
+            except:
+                print("Could not solve the model")
+            else:
+                # Create script file
+                if file_export != "":
+                    f = open(file_export)
+                    s = f.readlines()
+                    moves = eval(s[-1])  # read moves in the current horizon
+                    f.close()
+                    pickle.dump((Lx, Ly, O, E, R, moves),
+                                open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p","wb"))
         f = open(result_csv_file, 'a')
         f.write("\n")
         f.close()

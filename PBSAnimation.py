@@ -1,7 +1,7 @@
 # -------------------------------------------------------------------------------
 # Name:        PBSAnimation
 # Purpose:     Unified animation entry point for PBS retrieval experiments.
-#              Compatible with exported animation scripts from EscortFlow_v3.py
+#              Compatible with exported animation scripts from EscortFlowStatic.py
 #              and load_flow_multi.py, and with raw simulation pickles from
 #              EscortFlowSim_v5.py.
 #              Adapted from previous versions of FlowAnimation / FlowAnimationSim.

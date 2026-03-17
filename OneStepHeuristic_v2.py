@@ -27,7 +27,7 @@ def build_dist_map(Lx, Ly, O):
     return dist_map
 
 
-def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False):
+def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue"):
     """Advance the heuristic by one takt.
 
     Args:
@@ -38,6 +38,10 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False):
         dist_map: Optional precomputed distance map from ``build_dist_map``.
         acyclic: If true, scan targets by increasing target id. Otherwise use
             dynamic priority by distance to the closest output.
+        retrieval_mode: Target-handling mode after arrival at an output. In
+            ``continue`` mode, loads at outputs stop being targets but do not
+            create new escorts. In ``leave`` mode, they become escorts at the
+            beginning of the next step.
 
     Returns:
         Tuple ``(A, E, moves)`` where ``A`` maps updated target locations to
@@ -249,6 +253,8 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False):
     for a in list(_A):
         if a in O:
             A.pop(a, None)
+            if retrieval_mode == "leave":
+                E.add(a)
 
     if len(A) == 0:
         return A, E, moves
@@ -381,7 +387,10 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False):
     return A, E | E_new, moves
 
 
-def SolveGreedy(Lx, Ly, O, _A, _E, verbal=False, max_steps=500, acyclic=False):
+def SolveGreedy(
+    Lx, Ly, O, _A, _E, verbal=False, max_steps=500, acyclic=False, return_moves=False,
+    retrieval_mode="continue"
+):
     """Repeatedly apply ``OneStep`` until all target loads are retrieved."""
     ordered_targets = sorted(
         set(_A),
@@ -399,10 +408,15 @@ def SolveGreedy(Lx, Ly, O, _A, _E, verbal=False, max_steps=500, acyclic=False):
     flow_time = 0
     makespan = 0
     movements = 0
+    move_history = []
     while A:
         flow_time += len(A)
 
-        A, E, mv = OneStep(Lx, Ly, O, A, E, dist_map, acyclic=acyclic)
+        A, E, mv = OneStep(
+            Lx, Ly, O, A, E, dist_map, acyclic=acyclic, retrieval_mode=retrieval_mode
+        )
+        if return_moves:
+            move_history.append(mv)
         if verbal:
             print(f"After step: {makespan}")
             print(f"A {A}")
@@ -415,6 +429,9 @@ def SolveGreedy(Lx, Ly, O, _A, _E, verbal=False, max_steps=500, acyclic=False):
         if makespan >= max_steps:
             print(f"Panic: could not solve in {max_steps} steps")
             exit(1)
+
+    if return_moves:
+        return makespan, flow_time, movements, move_history
 
     return makespan, flow_time, movements
 

@@ -11,10 +11,10 @@ The project mixes Python simulation code with IBM ILOG OPL models (`.mod` / `.da
 ## Main entry points
 
 - `EscortFlowSim_v6.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and raw pickle export
-- `EscortFlow_v3.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
+- `EscortFlowStatic.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
 - `load_flow_multi.py`: static load-flow ILP experiment runner for the corresponding benchmark instances
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
-- `PBSAnimation.py`: animate PBS outputs from `EscortFlow_v3.py`, `load_flow_multi.py`, and `EscortFlowSim_v6.py`
+- `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `load_flow_multi.py`, and `EscortFlowSim_v6.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
 
 ## Requirements
@@ -43,7 +43,7 @@ The simulator expects the OPL model files in this repository, especially:
 
 The static experiment scripts additionally depend on:
 
-- `pbs_escorts_bm_v3.mod` and related escort-flow OPL files used by `EscortFlow_v3.py`
+- `pbs_escorts_bm_v3.mod` and related escort-flow OPL files used by `EscortFlowStatic.py`
 - `pbs_load_flow_multi.mod` and `pbs_load_flow_multi_lp.mod` used by `load_flow_multi.py`
 - `PBSCom.py` for common instance-generation and formatting helpers
 - `PBS_DPHeuristic_bm.py` and `PBS_DPHeuristic_lm.py` when a DP-based upper bound is requested
@@ -65,12 +65,12 @@ Place the extracted `.p` files in the project directory when using the single-lo
 
 The repository contains two older but still useful experiment runners for the static setting:
 
-- `EscortFlow_v3.py`: escort-flow formulation
+- `EscortFlowStatic.py`: escort-flow formulation
 - `load_flow_multi.py`: load-flow formulation
 
 These scripts are the ones used to reproduce the static benchmark experiments discussed in Appendix D of the paper source.
 
-### `EscortFlow_v3.py`
+### `EscortFlowStatic.py`
 
 Purpose:
 
@@ -101,6 +101,7 @@ Common arguments:
 - `--dp_file`: DP table file for the single-load case
 - `-k`: `k'` parameter used with the DP heuristic
 - `--lp`: LP relaxation option
+- `--greedy`: solve the static instance with the greedy heuristic instead of OPL; currently supported for `continue` and `leave` modes. In `leave` mode, a target load that reached an output cell becomes an escort at the beginning of the next step
 - `-a`: export animation trace
 
 Range syntax:
@@ -117,19 +118,19 @@ Notes:
 Single-load examples from the appendix:
 
 ```bash
-python3 EscortFlow_v3.py -x 10 -y 10 -O 0 0 -r 1-100 -m leave -e 3-8 -k 3 \
+python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -r 1-100 -m leave -e 3-8 -k 3 \
   --dp_file BM_set10x10_k3_corner.p -b
 ```
 
 ```bash
-python3 EscortFlow_v3.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -k 3 \
+python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -k 3 \
   --dp_file BM_set16x10_k3_2centers.p -b
 ```
 
 Multi-load example:
 
 ```bash
-python3 EscortFlow_v3.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -l 4
+python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -l 4
 ```
 
 For multi-load experiments, drop `-k` and `--dp_file`. If the guessed time horizon is too small and the model becomes infeasible, increase `-T`.
@@ -139,7 +140,7 @@ For multi-load experiments, drop `-k` and `--dp_file`. If the guessed time horiz
 Purpose:
 
 - runs the static load-flow formulation
-- supports the same benchmark family as `EscortFlow_v3.py`
+- supports the same benchmark family as `EscortFlowStatic.py`
 - can solve the ILP or LP relaxation
 - can also export animation traces
 
@@ -172,7 +173,7 @@ Common arguments:
 Notes:
 
 - the script header says only `leave` is supported at present; that is the safe mode to use
-- as in `EscortFlow_v3.py`, the DP table route is for the single-load case
+- as in `EscortFlowStatic.py`, the DP table route is for the single-load case
 - without a DP table, the script guesses a time horizon from the problem dimensions and `-T`
 
 Single-load examples from the appendix:
@@ -208,7 +209,7 @@ These helpers depend on:
 - `PBSCom.py`
 - a compatible DP table pickle
 
-They are not the main experiment entry points; normally you use them through `EscortFlow_v3.py` or `load_flow_multi.py`.
+They are not the main experiment entry points; normally you use them through `EscortFlowStatic.py` or `load_flow_multi.py`.
 
 ## Typical workflow
 
@@ -312,7 +313,7 @@ This script:
 compatible with:
 
 - raw simulation pickles produced by `EscortFlowSim_v6.py`
-- exported animation script pickles produced by `EscortFlow_v3.py` with `-a`
+- exported animation script pickles produced by `EscortFlowStatic.py` with `-a`
 - exported animation script pickles produced by `load_flow_multi.py` with `-a`
 
 To inspect a raw `EscortFlowSim_v6.py` trace visually:
@@ -332,7 +333,7 @@ python3 PBSAnimation.py script_BM_leave_16_10_8_4_1.p
 ## Repository layout
 
 - `EscortFlowSim_v6.py`: main simulator
-- `EscortFlow_v3.py`: static escort-flow experiment runner
+- `EscortFlowStatic.py`: static escort-flow experiment runner
 - `load_flow_multi.py`: static load-flow experiment runner
 - `CI_Calculation.py`: steady-state analysis from raw traces
 - `mser5.py`: MSER-5 warmup deletion helper
