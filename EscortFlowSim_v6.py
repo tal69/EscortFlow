@@ -11,7 +11,7 @@ Timing convention:
   execution-horizon delay, so a request may wait through one horizon before it
   is first considered by the optimizer.
 - A planning decision taken at time `t` produces moves for the next
-  `exec_horizon` simulated time steps, so a newly eligible request may still
+  `epoch` simulated time steps, so a newly eligible request may still
   wait until the current solve finishes before its load starts moving.
 - The move list for the current time step is then applied to the PBS state.
 - Requests whose loads occupy an output cell after those moves depart at time
@@ -65,6 +65,7 @@ import subprocess
 import pickle
 import time
 import os
+import sys
 import socket
 import numpy as np
 import argparse
@@ -90,6 +91,7 @@ def log_message(*messages, echo_to_screen=False):
             log_file.write(message)
 
 parser = argparse.ArgumentParser()
+default_num_threads = 8 if sys.platform == "darwin" else 0
 
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
@@ -108,34 +110,34 @@ parser.add_argument("--time_penalty", type=float,
                     help="fixed penalty for each unit of time outside output cell in the MILP model (default, 1)",
                     default=1)
 parser.add_argument("--num_threads", type=int,
-                    help="Number of threads to be used by the MIP solver. 0 means use machine default (default 0)", default=0)
-# We need this because nn Mac Studio num_threads=8 works best but the machine default is to use all the 24  (probably an implementation bug of Cplex 22.1.1.0)
+                    help=f"Number of threads to be used by the MIP solver. 0 means use machine default (default {default_num_threads})", default=default_num_threads)
+# On macOS, 8 threads is a safer default than the machine-wide CPLEX default.
 
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)
 parser.add_argument("-T", "--fractional_horizon", type=int,
-                    help="Number of fractional periods in model (default: max(--exec_horizon + 4, --integer_horizon))",
+                    help="Number of fractional periods in model (default: max(--epoch + 4, --integer_horizon))",
                     default=None)
 parser.add_argument("-I", "--integer_horizon", type=int,
-                    help="Number of periods in the planning horizon represented by boolean variables (default: --exec_horizon)",
+                    help="Number of periods in the planning horizon represented by boolean variables (default: --epoch)",
                     default=None)
-parser.add_argument("-E", "--exec_horizon", type=int,
-                    help="Execution horizon for v6; must be 1",
+parser.add_argument("-E", "--epoch", type=int,
+                    help="Number of periods in the execution epoch (default 1)",
                     default=1)
 parser.add_argument("-t", "--time_limit", type=int,
-                    help="Time limit for CPLEX calls in seconds (default: --exec_horizon)",
+                    help="Time limit for CPLEX calls in seconds (default: --epoch)",
                     default=None)
 parser.add_argument("-m", "--offline", action="store_true",
-                    help="Not supported in v6; the OPL model always sees requests known by the beginning of the previous takt")
+                    help="Offline rolling horizon: use target loads visible at the current decision time; cannot be combined with --greedy or --hybrid")
 parser.add_argument("--full", action="store_true",
                     help="Use the full MILP instead of the surrogate model, in either realtime or offline mode")
 
 parser.add_argument("--greedy", action="store_true",
-                    help="Use the greedy heuristic only; this forces --offline and ignores CPLEX")
+                    help="Use the greedy heuristic only; ignores CPLEX and currently requires --epoch 1")
 parser.add_argument("--hybrid", action="store_true",
-                    help="Use rolling horizon as usual, but switch to an offline-like greedy solve whenever the number of open target loads is at or below --hybrid_threshold")
-parser.add_argument("--hybrid_threshold", type=int, default=1,
-                    help="Threshold for --hybrid: when the number of open target loads is at or below this value, use the greedy heuristic on all requests arrived so far (default 1)")
+                    help="Use rolling horizon as usual, but switch to a greedy epoch whenever the number of new target loads is at least the number of old target loads times --hybrid_ratio")
+parser.add_argument("--hybrid_ratio", type=float, default=1.0,
+                    help="Ratio for --hybrid: use greedy when number_of_new_target_loads >= number_of_old_target_loads * --hybrid_ratio (default 1.0)")
 parser.add_argument("--acyclic", action="store_true",
                     help="Use greedy target order based on target seniority instead of the default dynamic distance-based order. This is inline with our acyclicty proof but it provde poorer result than the distance-based priority rule.")
 
@@ -160,28 +162,28 @@ parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
 args = parser.parse_args()
 
 if args.integer_horizon is None:
-    args.integer_horizon = args.exec_horizon
+    args.integer_horizon = args.epoch
 if args.time_limit is None:
-    args.time_limit = args.exec_horizon
+    args.time_limit = args.epoch
 if args.fractional_horizon is None:
-    args.fractional_horizon = max(args.exec_horizon + 4, args.integer_horizon)
+    args.fractional_horizon = max(args.epoch + 4, args.integer_horizon)
 
-if args.integer_horizon < args.exec_horizon:
-    parser.error("--integer_horizon must be at least --exec_horizon")
+if args.integer_horizon < args.epoch:
+    parser.error("--integer_horizon must be at least --epoch")
 if args.fractional_horizon < args.integer_horizon:
     parser.error("--fractional_horizon must be at least --integer_horizon")
-if args.exec_horizon != 1:
-    parser.error("EscortFlowSim_v6.py supports only --exec_horizon == 1")
-if args.greedy and args.exec_horizon != 1:
-    parser.error("--greedy requires --exec_horizon == 1")
+if args.greedy and args.epoch != 1:
+    parser.error("--greedy requires --epoch == 1")
 if args.greedy and args.full:
     parser.error("--greedy cannot be combined with --full")
 if args.greedy and args.hybrid:
     parser.error("--greedy cannot be combined with --hybrid")
-if args.hybrid_threshold < 0:
-    parser.error("--hybrid_threshold must be non-negative")
-if args.offline:
-    parser.error("--offline is not supported in EscortFlowSim_v6.py")
+if args.offline and args.greedy:
+    parser.error("--offline cannot be combined with --greedy")
+if args.offline and args.hybrid:
+    parser.error("--offline cannot be combined with --hybrid")
+if args.hybrid_ratio < 0:
+    parser.error("--hybrid_ratio must be non-negative")
 
 result_csv_file = args.csv
 csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"
@@ -308,7 +310,7 @@ header_cols = [
     "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs",
     "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
     "Number of outputs", "Number of Escorts",
-    "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Max Balls In Air",
+    "Fractional Horizon", "Integer Horizon", "Epoch", "Time Limit", "Max Balls In Air",
     "Actual Max Balls", "Max actual opt gap", "Max allowed opt gap",
     "Lead Time Mean", "Lead Time CI Half Width 95%",
     "Waiting Time Mean", "Waiting Time CI Half Width 95%",
@@ -364,6 +366,32 @@ def collect_target_loads(cutoff_time):
     )
 
 
+def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
+    """Plan greedy moves for the next epoch from the current state."""
+    global cpu_time, NumberOfMovements, heuristic_sol, actual_max_balls
+
+    actual_max_balls = max(actual_max_balls, len(candidate_loads))
+    for load_id in candidate_loads:
+        for req in requests_on_load[load_id]:
+            start_move[req] = min(start_move[req], start_time)
+
+    A = {
+        load_loc[load_id]: min(requests_on_load[load_id])
+        for load_id in candidate_loads
+    }
+    E = set(escort_positions)
+    heuristic_start_time = time.perf_counter()
+    for i in range(args.epoch):
+        A, E, one_step_move = OneStepHeuristic_v2.OneStep(
+            Lx, Ly, set(O), A, set(E), dist_map, acyclic=args.acyclic
+        )
+        moves[start_time + i] = one_step_move
+        NumberOfMovements += len(one_step_move)
+    cpu_time += time.perf_counter() - heuristic_start_time
+    heuristic_sol += 1
+    return list(A.keys()), list(E)
+
+
 def run_opl_model(target_positions, escort_positions):
     """Solve the current rolling-horizon MILP model from the supplied state."""
     with open(dat_file, "w") as f:
@@ -376,7 +404,7 @@ def run_opl_model(target_positions, escort_positions):
         f.write('Lx=%d;\n' % Lx)
         f.write('Ly=%d;\n' % Ly)
         f.write(f'T={args.fractional_horizon};\n')
-        f.write(f'T_exec={args.exec_horizon};\n')
+        f.write(f'T_exec={args.epoch};\n')
         if not args.full:
             f.write(f'T_int={args.integer_horizon};\n')
         f.write('E=%s;\n' % tuple_opl(escort_positions))
@@ -423,15 +451,21 @@ def run_opl_model(target_positions, escort_positions):
 
 
 def is_usable_model_solution(model_result, old_A, old_E):
-    """Return whether a model result should be executed rather than discarded."""
-    return (
-        model_result["cplex_status"] in [1, 11, 101, 102, 127]
-        and model_result["ilp_gap"] <= args.max_opt_gap
-        and not (old_A != [] and set(model_result["A"]) == set(old_A) and set(model_result["E"]) == set(old_E))
-    )
+    """Return whether a model result should be executed, and why if not."""
+    if model_result["cplex_status"] not in [1, 11, 101, 102, 127]:
+        return False, f"CPLEX status {model_result['cplex_status']} is not a usable solve status"
+
+    if model_result["ilp_gap"] > args.max_opt_gap:
+        return False, (
+            f"ILP gap {model_result['ilp_gap']:.4f} exceeds the allowed optimality gap threshold {args.max_opt_gap:.4f}"
+        )
+
+    if old_A != [] and set(model_result["A"]) == set(old_A) and set(model_result["E"]) == set(old_E):
+        return False, "the model returned the same A/E state as the input state"
+
+    return True, None
 
 while True:
-    new_open_load_arrivals = 0
     if args.log:
         log_message(f"Time: {curr_t}: \n")
 
@@ -445,7 +479,6 @@ while True:
         if orig_distance[req_count] > 0:  # request is not for a load currently located on an output
             requests_on_load[req2load[req_count]].append(req_count)
             open_requests.append(req_count)
-            new_open_load_arrivals += 1
             log_message(
                 f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]}\n")
             enter_via_cell.append(load_loc[req2load[req_count]])
@@ -464,45 +497,27 @@ while True:
         log_message(f"    Skipping an idle takt @ {curr_t}\n")
         idle_takt += 1
 
-    else:
+    elif curr_t % args.epoch == 0:
         E = set(Locations) - set(load_loc.values())
-        visible_target_loads = collect_target_loads(curr_t - 1)
-        all_open_target_loads = collect_target_loads(curr_t)
-        hybrid_threshold_active = args.hybrid and len(visible_target_loads) <= args.hybrid_threshold
-        use_hybrid_greedy = hybrid_threshold_active and new_open_load_arrivals > 0
+        old_target_loads = collect_target_loads(curr_t - args.epoch)
+        current_time_target_loads = collect_target_loads(curr_t)
+        old_target_load_set = set(old_target_loads)
+        new_target_loads = [load_id for load_id in current_time_target_loads if load_id not in old_target_load_set]
+        hybrid_ratio_active = args.hybrid and len(new_target_loads) >= len(old_target_loads) * args.hybrid_ratio
 
-        if args.greedy or use_hybrid_greedy:
-            if use_hybrid_greedy:
+        if args.greedy:
+            if current_time_target_loads:
+                schedule_greedy_epoch(curr_t, current_time_target_loads, E)
+        elif hybrid_ratio_active:
+            if current_time_target_loads:
                 log_message(
-                    f"\tHybrid mode: using greedy because {len(visible_target_loads)} target loads were visible by the beginning of the previous takt <= threshold {args.hybrid_threshold} and there are new arrivals in the current takt\n"
+                    f"\tHybrid mode: using greedy because new target loads={len(new_target_loads)} >= old target loads={len(old_target_loads)} * ratio {args.hybrid_ratio}\n"
                 )
-            greedy_candidate_loads = all_open_target_loads
-            actual_max_balls = max(actual_max_balls, len(greedy_candidate_loads))
-            for l in greedy_candidate_loads:
-                for r in requests_on_load[l]:
-                    start_move[r] = min(start_move[r], curr_t)
+                greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, E)
+                log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
-            A = {
-                load_loc[load_id]: min(requests_on_load[load_id])
-                for load_id in greedy_candidate_loads
-            }
-            heuristic_start_time = time.perf_counter()
-            A, E, one_step_move = OneStepHeuristic_v2.OneStep(
-                Lx, Ly, set(O), A, set(E), dist_map, acyclic=args.acyclic
-            )
-            moves[curr_t] = one_step_move
-            NumberOfMovements += len(one_step_move)
-            cpu_time += time.perf_counter() - heuristic_start_time
-            heuristic_sol += 1
-
-        else:
-            if hybrid_threshold_active:
-                log_message(
-                    f"\tHybrid mode: using OPL because there are no new arrivals in the current takt; the model sees all {len(all_open_target_loads)} currently open target loads\n"
-                )
-                eligible_target_loads = all_open_target_loads
-            else:
-                eligible_target_loads = visible_target_loads
+        else:  # run the ILP model
+            eligible_target_loads = current_time_target_loads if args.offline else old_target_loads
             target_loads = eligible_target_loads[:args.max_balls_in_air]
 
             for l in target_loads:
@@ -522,39 +537,28 @@ while True:
 
                 log_message(
                     f"\tfinish running cplex, iteration {sim_iter}, cplex status:{model_result['cplex_status']} LB={model_result['lb_rh']}, ob={model_result['obj_rh']} "
-                    f"flowtime={len(A) + model_result['flowtime_rh']}, open requests: {open_requests}\n"
+                    f"flowtime={len(A) * args.epoch + model_result['flowtime_rh']}, open requests: {open_requests}\n"
                     f"{'****** ' if cpu_time_iter >= time_limit else ''} cpu_time={cpu_time_iter:.2f} "
                     f"Gap={100 * (model_result['obj_rh'] - model_result['lb_rh']) / max(model_result['obj_rh'], 1):.2f}%\n")
 
-                if is_usable_model_solution(model_result, old_A, old_E):
+                use_model_solution, unusable_reason = is_usable_model_solution(model_result, old_A, old_E)
+                if use_model_solution:
                     if cpu_time_iter >= time_limit:
                         non_optimal += 1
                     NumberOfMovements += model_result["NumberOfMovements_rh"]
                     max_gap = max(max_gap, ilp_gap)
                     log_message(f"State after: E = {E}, A = {A}\n")
                     if model_result["planned_moves"]:
-                        moves[curr_t] = model_result["planned_moves"][0]
+                        for i, one_step_move in enumerate(model_result["planned_moves"][:args.epoch]):
+                            moves[curr_t + i] = one_step_move
                 else:
                     log_message(
-                        "Did not solve ILP model because the solution obtained for the model is infeasible, trivial, or above the allowed gap threshold\n"
-                        "Running *** greedy *** heuristic on target loads visible by the beginning of the current takt\n",
+                        f"Did not use ILP model solution because {unusable_reason}\n"
+                        "Running *** greedy *** heuristic on all target loads visible at the current decision time\n",
                         echo_to_screen=True,
                     )
-                    for l in all_open_target_loads:
-                        for r in requests_on_load[l]:
-                            start_move[r] = min(start_move[r], curr_t)
-                    A = {
-                        load_loc[load_id]: min(requests_on_load[load_id])
-                        for load_id in all_open_target_loads
-                    }
-                    heuristic_start_time = time.perf_counter()
-                    A, E, one_step_move = OneStepHeuristic_v2.OneStep(
-                        Lx, Ly, set(O), A, set(E), dist_map, acyclic=args.acyclic
-                    )
-                    moves[curr_t] = one_step_move
-                    NumberOfMovements += len(one_step_move)
-                    cpu_time += time.perf_counter() - heuristic_start_time
-                    heuristic_sol += 1
+                    greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, old_E)
+                    log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
     # Apply the move already planned for the current takt, even if the next solve is scheduled for later.
     if moves[curr_t]:
@@ -643,8 +647,10 @@ if max(start_move) == np.iinfo(np.int32).max:
 if args.greedy:
     alg_name = "Greedy"
 else:
-    alg_prefix = f"hybrid{args.hybrid_threshold}-" if args.hybrid else ""
-    alg_name = alg_prefix + "realtime-"
+    alg_prefix = f"hybrid{args.hybrid_ratio}-" if args.hybrid else ""
+    if not alg_prefix:
+        alg_prefix = "offline-" if args.offline else "realtime-"
+    alg_name = alg_prefix
     if args.full:
         alg_name += "full"
     else:
@@ -658,7 +664,7 @@ machine_name = socket.gethostname()
 row_vals = [
     machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
     alg_name, args.queue_management, args.seed, args.request_rate, f"{Lx}x{Ly}", tuple_opl(O),
-    len(O), len(E_orig), args.fractional_horizon, args.integer_horizon, args.exec_horizon, time_limit,
+    len(O), len(E_orig), args.fractional_horizon, args.integer_horizon, args.epoch, time_limit,
     max_balls_in_air_csv, actual_max_balls, f"{max_gap:.4f}", args.max_opt_gap,
     lead_stats["mean"], lead_stats["half_width_95"],
     waiting_stats["mean"], waiting_stats["half_width_95"],
@@ -690,5 +696,5 @@ for i in range(number_of_requests):
 # This is consumed by CI_Calculation.py and can also be read directly by
 # PBSAnimation.py.
 pickle.dump((alg_name, args.queue_management, args.seed, args.request_rate, args.fractional_horizon, args.integer_horizon,
-             args.exec_horizon,time_limit, args.max_balls_in_air, args.max_opt_gap, Lx, Ly, O, E_orig,arrivals,
+             args.epoch,time_limit, args.max_balls_in_air, args.max_opt_gap, Lx, Ly, O, E_orig,arrivals,
              departures, start_move, moves, actual_max_balls,non_optimal, max_gap,heuristic_sol), open(pickle_file_name,"wb"))

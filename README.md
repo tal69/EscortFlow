@@ -2,7 +2,7 @@
 
 This repository contains simulation and optimization code for retrieval control in a puzzle-based storage (PBS) system with escorts. The main workflow is:
 
-1. run a dynamic simulation with `EscortFlowSim_v5.py`
+1. run a dynamic simulation with `EscortFlowSim_v6.py`
 2. collect steady-state statistics directly into a CSV row
 3. optionally inspect the raw trace with `CI_Calculation.py` or animate it with `PBSAnimation.py`
 
@@ -10,11 +10,11 @@ The project mixes Python simulation code with IBM ILOG OPL models (`.mod` / `.da
 
 ## Main entry points
 
-- `EscortFlowSim_v5.py`: primary simulator for dynamic request arrivals, rolling-horizon control, greedy fallback, CSV reporting, and raw pickle export
+- `EscortFlowSim_v6.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and raw pickle export
 - `EscortFlow_v3.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
 - `load_flow_multi.py`: static load-flow ILP experiment runner for the corresponding benchmark instances
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
-- `PBSAnimation.py`: animate PBS outputs from `EscortFlow_v3.py`, `load_flow_multi.py`, and `EscortFlowSim_v5.py`
+- `PBSAnimation.py`: animate PBS outputs from `EscortFlow_v3.py`, `load_flow_multi.py`, and `EscortFlowSim_v6.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
 
 ## Requirements
@@ -217,20 +217,23 @@ They are not the main experiment entry points; normally you use them through `Es
 Example greedy-only run:
 
 ```bash
-python3 EscortFlowSim_v5.py -x 9 -y 5 -O 4 0 -e 4 -R 0.4 \
+python3 EscortFlowSim_v6.py -x 9 -y 5 -O 4 0 -e 4 -R 0.4 \
   -S 1600 --greedy -f results.csv -H
 ```
-This will run a simulation of the RTRH drove by the greedy heuristic.
-The simulation is of 9x5 with 4 escorts PBS unit with an output cell at (0,4) which is the middle of the bottom wall. 
-New random request will arrive at rate of 0.4 per tie step. The simulation runs until the 1600^th request is ejected at
-an output cell. The summary statistics of the simulation results are written to "results.csv." after an header row with 
-all the titles of the instance demographics and results.
+This runs the `v6` simulator in greedy-only mode on a `9x5` PBS with `4` escorts and one output cell at `(4,0)`. Requests arrive as a Poisson process with rate `0.4` per time step, the run stops after `1600` requests, and summary statistics are appended to `results.csv`.
 
 Example rolling-horizon MILP run:
 
 ```bash
-python3 EscortFlowSim_v5.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
--T 5 -I 1 -E 1 -R 0.2 -M 6 -q spt -L -f results.csv -H
+python3 EscortFlowSim_v6.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
+  -T 5 -I 1 -E 1 -R 0.2 -M 6 -q spt -L -f results.csv -H
+```
+
+Example hybrid run with multi-step epochs:
+
+```bash
+python3 EscortFlowSim_v6.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
+  -T 6 -I 2 -E 2 -R 0.2 -M 6 --hybrid --hybrid_ratio 1.0 -L -f results.csv -H
 ```
 
 Important options:
@@ -240,24 +243,33 @@ Important options:
 - `-e`: number of escorts
 - `-S`: number of requests in the simulation
 - `-R`: Poisson request arrival rate per time step
-- `-E`: execution horizon
-- `-T`: fractional horizon for the MILP; defaults to `max(--exec_horizon + 4, --integer_horizon)`
+- `-E`, `--epoch`: execution epoch length
+- `-T`: fractional horizon for the MILP; defaults to `max(--epoch + 4, --integer_horizon)`
 - `-I`: integer horizon for the MILP
 - `-t`: per-solve OPL/CPLEX time limit in seconds
 - `-M`: maximum number of target loads considered concurrently; if omitted it defaults internally to `Lx*Ly`
 - `-q`: queue management, either `fifo` or `spt`
-- `-m`: offline mode
-- `--full`: use the full MILP in either realtime or offline mode
-- `--greedy`: greedy heuristic only; forces offline behavior, requires `--exec_horizon 1`, and skips OPL
-- `--hybrid`: use the rolling-horizon MILP as usual, but switch to the greedy heuristic when the number of open target loads is small
-- `--hybrid_threshold`: threshold for `--hybrid` (default `1`); at or below this many open target loads, greedy handles all requests that have arrived so far
+- `-m`, `--offline`: offline rolling horizon for pure ILP mode only; in offline mode the MILP sees requests visible at the current decision time, and the flag cannot be combined with `--greedy` or `--hybrid`
+- `--full`: use the full MILP instead of the surrogate model
+- `--greedy`: greedy heuristic only; skips OPL and currently requires `--epoch 1`
+- `--hybrid`: at each decision epoch, split the currently visible target loads into `old` target loads already visible at the beginning of the previous epoch and `new` target loads that were not visible then; use greedy when `number_of_new_target_loads >= number_of_old_target_loads * --hybrid_ratio`
+- `--hybrid_ratio`: non-negative real ratio used by `--hybrid` (default `1.0`)
+- `--num_threads`: CPLEX thread count; on macOS the default is `8`, otherwise `0` means machine default
 - `-L`: write a detailed log file
 - `-f`: output CSV file
 - `-H`: write CSV header if needed
 
+`v6` timing notes:
+
+- The simulator plans once per epoch and then executes the resulting move list for that entire epoch.
+- MILP visibility is delayed by one epoch: requests must be visible by the beginning of the previous epoch to enter the next MILP solve.
+- With `--offline`, the MILP instead uses the requests visible at the current decision time.
+- In hybrid mode, `old target loads` are the currently open target loads that were already visible at the beginning of the previous epoch, and `new target loads` are the currently open target loads that were not visible then.
+- If an ILP solution is unusable, `v6` falls back to greedy on all target loads visible at the current decision time and fills the whole epoch greedily.
+
 ## Simulator outputs
 
-Each run of `EscortFlowSim_v5.py` produces:
+Each run of `EscortFlowSim_v6.py` produces:
 
 - one appended row in the requested CSV file
 - one raw pickle trace such as `sim_escort_flow_rawYYYY-MM-DD_HHMMSS.p`
@@ -271,7 +283,7 @@ The CSV includes:
 - batching diagnostics after MSER-5 warmup deletion
 - `cpu_time`
 
-`cpu_time` currently means accumulated algorithm compute time:
+`cpu_time` means accumulated algorithm compute time:
 
 - for MILP runs: summed solver time reported by OPL/CPLEX
 - for greedy runs: summed time spent inside the greedy heuristic
@@ -299,11 +311,11 @@ This script:
 `PBSAnimation.py` is the unified animation viewer for this repository. It is
 compatible with:
 
-- raw simulation pickles produced by `EscortFlowSim_v5.py`
+- raw simulation pickles produced by `EscortFlowSim_v6.py`
 - exported animation script pickles produced by `EscortFlow_v3.py` with `-a`
 - exported animation script pickles produced by `load_flow_multi.py` with `-a`
 
-To inspect a raw `EscortFlowSim_v5.py` trace visually:
+To inspect a raw `EscortFlowSim_v6.py` trace visually:
 
 ```bash
 python3 PBSAnimation.py sim_escort_flow_raw2026-03-15_143541.p
@@ -319,7 +331,7 @@ python3 PBSAnimation.py script_BM_leave_16_10_8_4_1.p
 
 ## Repository layout
 
-- `EscortFlowSim_v5.py`: main simulator
+- `EscortFlowSim_v6.py`: main simulator
 - `EscortFlow_v3.py`: static escort-flow experiment runner
 - `load_flow_multi.py`: static load-flow experiment runner
 - `CI_Calculation.py`: steady-state analysis from raw traces
