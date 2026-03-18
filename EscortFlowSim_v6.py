@@ -259,6 +259,8 @@ cpu_time = 0
 total_lead_time = 0
 non_optimal = 0
 heuristic_sol = 0
+fallback_heuristic_sol = 0
+hybrid_heuristic_sol = 0
 sim_iter = 0
 NumberOfMovements = 0
 idle_takt = 0
@@ -308,6 +310,7 @@ orig_distance = np.zeros(number_of_requests, dtype=np.int32)  # the distance of 
 
 header_cols = [
     "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs",
+    "Fallback Greedy Runs", "Hybrid-Ratio Greedy Runs",
     "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
     "Number of outputs", "Number of Escorts",
     "Fractional Horizon", "Integer Horizon", "Epoch", "Time Limit", "Max Balls In Air",
@@ -514,6 +517,7 @@ while True:
                     f"\tHybrid mode: using greedy because new target loads={len(new_target_loads)} >= old target loads={len(old_target_loads)} * ratio {args.hybrid_ratio}\n"
                 )
                 greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, E)
+                hybrid_heuristic_sol += 1
                 log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
         else:  # run the ILP model
@@ -558,6 +562,7 @@ while True:
                         echo_to_screen=True,
                     )
                     greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, old_E)
+                    fallback_heuristic_sol += 1
                     log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
     # Apply the move already planned for the current takt, even if the next solve is scheduled for later.
@@ -647,6 +652,7 @@ if max(start_move) == np.iinfo(np.int32).max:
 if args.greedy:
     alg_name = "Greedy"
 else:
+    horizon_suffix = "-LPR" if args.fractional_horizon > args.integer_horizon else "-ILP"
     alg_prefix = f"hybrid{args.hybrid_ratio}-" if args.hybrid else ""
     if not alg_prefix:
         alg_prefix = "offline-" if args.offline else "realtime-"
@@ -657,12 +663,14 @@ else:
         alg_name += "surrogate"
 
     alg_name += f"Q{args.max_balls_in_air}"
+    alg_name += horizon_suffix
 
 f = open(result_csv_file, 'a')
 script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
 machine_name = socket.gethostname()
 row_vals = [
     machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
+    fallback_heuristic_sol, hybrid_heuristic_sol,
     alg_name, args.queue_management, args.seed, args.request_rate, f"{Lx}x{Ly}", tuple_opl(O),
     len(O), len(E_orig), args.fractional_horizon, args.integer_horizon, args.epoch, time_limit,
     max_balls_in_air_csv, actual_max_balls, f"{max_gap:.4f}", args.max_opt_gap,

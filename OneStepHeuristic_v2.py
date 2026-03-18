@@ -89,6 +89,42 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
 
         cell_used.add((x, y))  # last cell not included in the loop
 
+    def distance_to_closest_output(loc):
+        return min(abs(loc[0] - o[0]) + abs(loc[1] - o[1]) for o in O)
+
+    def move_hurts_lower_priority_targets(x0, y0, x1, y1, current_priority_rank):
+        dir_x, dir_y = int(np.sign(x1 - x0)), int(np.sign(y1 - y0))
+        x, y = x0, y0
+
+        while (x, y) != (x1, y1):
+            next_x, next_y = x + dir_x, y + dir_y
+            if (next_x, next_y) in A:
+                moved_target_id = A[(next_x, next_y)]
+                if priority_rank[moved_target_id] > current_priority_rank:
+                    current_dist = distance_to_closest_output((next_x, next_y))
+                    next_dist = distance_to_closest_output((x, y))
+                    if next_dist > current_dist:
+                        return True
+            x, y = next_x, next_y
+
+        return False
+
+    def choose_guarded_move(candidates, current_priority_rank):
+        fallback_move = None
+
+        for x0, y0, x1, y1 in candidates:
+            if not check_move(x0, y0, x1, y1):
+                continue
+
+            x1_ext, y1_ext = extend_move_for_lower_priority_targets(x0, y0, x1, y1)
+            if not move_hurts_lower_priority_targets(x0, y0, x1_ext, y1_ext, current_priority_rank):
+                return x0, y0, x1_ext, y1_ext
+
+            if current_priority_rank == 0 and fallback_move is None:
+                fallback_move = (x0, y0, x1_ext, y1_ext)
+
+        return fallback_move
+
     def get_targets_in_priority_order():
         """Return target loads in the selected heuristic priority order."""
         if acyclic:
@@ -276,6 +312,7 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
 
 
     A_sorted = get_targets_in_priority_order()
+    priority_rank = {target_id: idx for idx, (_, target_id) in enumerate(A_sorted)}
 
     for i in range(len(A_sorted)):
         (x0, y0), target_id = A_sorted[i]
@@ -286,14 +323,15 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
             #A_dir = A_sorted[i][2]  # we can also take it from dist_map
             zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts = find_zone_escorts(x0, y0)
             lst = sort_escorts_by_distance(x0, y0, zone_A_escorts)
-            for (x_escort, y_escort ) in lst:
-                if check_move(x_escort, y_escort, x0, y0):
-                    dx, dy =np.sign(x0-x_escort), np.sign(y0-y_escort)  # only one of them is non zero
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0, y0)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    x0, y0 = x0-dx, y0-dy  # update the location of the current target load
-                    zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts = find_zone_escorts(x0, y0)
-                    break
+            candidates = [(x_escort, y_escort, x0, y0) for (x_escort, y_escort) in lst]
+
+            chosen_move = choose_guarded_move(candidates, i)
+            if chosen_move is not None:
+                x_escort, y_escort, x1, y1 = chosen_move
+                dx, dy = np.sign(x0 - x_escort), np.sign(y0 - y_escort)  # only one of them is non zero
+                move_escort(x_escort, y_escort, x1, y1)
+                x0, y0 = x0 - dx, y0 - dy  # update the location of the current target load
+                zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts = find_zone_escorts(x0, y0)
 
             # make sure that no further escort movement in the current step moves high priority loads in the wrong direction
             cell_used.add((x0, y0))
@@ -305,83 +343,59 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
 
         # try to move an escort from zone B -> A
         lst = sort_escorts_by_distance(x0, y0, zone_B_escorts)
+        candidates = []
         for (x_escort, y_escort) in lst:
             if np.sign(y_escort - y0) == dist_map[(x0, y0)][1]: # escort is "below" the load
-                if check_move(x_escort, y_escort, x0, y_escort):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0, y_escort)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x0, y_escort))
             else:  # escort is "above" the load
-                if check_move(x_escort, y_escort, x_escort, y0):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y0)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x_escort, y0))
+
+        chosen_move = choose_guarded_move(candidates, i)
+        if chosen_move is not None:
+            x_escort, y_escort, x1, y1 = chosen_move
+            move_escort(x_escort, y_escort, x1, y1)
 
         # try to move an escort from zone C to zone B
         lst = sort_escorts_by_distance(x0, y0, zone_C_escorts)
+        candidates = []
         for (x_escort, y_escort) in lst:
             dir_x, dir_y = dist_map[(x0, y0)]
             if dir_x == 0:
-                if check_move(x_escort, y_escort, x_escort, y0 + dir_y):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y0 + dir_y)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x_escort, y0 + dir_y))
             elif dir_y == 0:
-                if check_move(x_escort, y_escort, x0 + dir_x, y_escort):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0 + dir_x, y_escort)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x0 + dir_x, y_escort))
             elif np.sign(y0 - y_escort) == dir_y:  # escort is "above" the load
-                if check_move(x_escort, y_escort, x0 + dir_x, y_escort):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x0 + dir_x, y_escort)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x0 + dir_x, y_escort))
             else:  # escort is "below" the load
-                if check_move(x_escort, y_escort, x_escort, y0 + dir_y):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y0 + dir_y)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x_escort, y0 + dir_y))
+
+        chosen_move = choose_guarded_move(candidates, i)
+        if chosen_move is not None:
+            x_escort, y_escort, x1, y1 = chosen_move
+            move_escort(x_escort, y_escort, x1, y1)
 
         # Finally, check D -> C
         lst = sort_escorts_by_distance(x0, y0, zone_D_escorts)
+        candidates = []
         for (x_escort, y_escort) in lst:
             dir_x, dir_y = dist_map[(x0, y0)]
             if dir_y == 0:
-                if check_move(x_escort, y_escort, x_escort, y_escort + 1):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort + 1)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
-                elif check_move(x_escort, y_escort, x_escort, y_escort - 1):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort - 1)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x_escort, y_escort + 1))
+                candidates.append((x_escort, y_escort, x_escort, y_escort - 1))
             elif dir_x == 0:
-                if check_move(x_escort, y_escort, x_escort + 1, y_escort):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort + 1, y_escort)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
-                elif check_move(x_escort, y_escort, x_escort - 1, y_escort):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort - 1, y_escort)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x_escort + 1, y_escort))
+                candidates.append((x_escort, y_escort, x_escort - 1, y_escort))
             elif np.sign(y0 - y_escort) == dir_y:  # escort is "above" the load
-                if check_move(x_escort, y_escort, x_escort + 1, y_escort):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort + 1, y_escort)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
-                elif check_move(x_escort, y_escort, x_escort - 1, y_escort):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort - 1, y_escort)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x_escort + 1, y_escort))
+                candidates.append((x_escort, y_escort, x_escort - 1, y_escort))
             else: # escort to the left or to the right of the load
-                if check_move(x_escort, y_escort, x_escort, y_escort + 1):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort + 1)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
-                elif check_move(x_escort, y_escort, x_escort, y_escort - 1):
-                    x1, y1 = extend_move_for_lower_priority_targets(x_escort, y_escort, x_escort, y_escort - 1)
-                    move_escort(x_escort, y_escort, x1, y1)
-                    break
+                candidates.append((x_escort, y_escort, x_escort, y_escort + 1))
+                candidates.append((x_escort, y_escort, x_escort, y_escort - 1))
+
+        chosen_move = choose_guarded_move(candidates, i)
+        if chosen_move is not None:
+            x_escort, y_escort, x1, y1 = chosen_move
+            move_escort(x_escort, y_escort, x1, y1)
 
     A.update(A_new)
     return A, E | E_new, moves
@@ -451,7 +465,7 @@ if __name__ == '__main__':
     num_of_loads = 4
     n = 1000
     for seed in range(n):
-        if seed % 1 == 0:
+        if seed % 50 == 0:
           print(f"{seed} / {n}")
         A,E = GeneretaeRandomInstance(seed, Locations, 12, num_load=num_of_loads)
         makepan, flow_time, movements = SolveGreedy(Lx, Ly, O, set(A), set(E), verbal=False, max_steps=(Lx + Ly) * len(A) * 20 // len(E))
