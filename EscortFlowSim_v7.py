@@ -25,30 +25,29 @@ Outputs:
 Author:      Tal Raviv,  talraviv@tau.ac.il
 Copyright:   (c) Tal Raviv 2023, 2024, 2026
 Licence:     Free but please let me know that you are using it
-Depends on   PBSCom.py, escort_flow_lm_rh.mod, escort_flow_bm_rh.mod, SimpleHeuristic.py
-              Assumes oplrun is installed and on the path
+Depends on   PBSCom.py, OneStepHeuristic_v2.py, gurobipy
 
 """
 
 import copy
 import random
 import itertools
-import subprocess
 import pickle
 import time
 import os
 import sys
 import socket
-import atexit
 import numpy as np
 import argparse
-from datetime import datetime
+import gurobipy as gp
+from gurobipy import GRB
 
 import OneStepHeuristic_v2
 from PBSCom import *
 import CI_Calculation
 
 sim_log_file = ""
+OPTIMALITY_TOLERANCE = 1e-4  # 0.01%
 
 
 def log_message(*messages, echo_to_screen=False):
@@ -85,7 +84,7 @@ parser.add_argument("--time_penalty", type=float,
                     default=1)
 parser.add_argument("--num_threads", type=int,
                     help=f"Number of threads to be used by the MIP solver. 0 means use machine default (default {default_num_threads})", default=default_num_threads)
-# On macOS, 8 threads is a safer default than the machine-wide CPLEX default.
+# On macOS, 8 threads is a safer default than the machine-wide solver default.
 
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)
@@ -99,7 +98,7 @@ parser.add_argument("-E", "--epoch", type=int,
                     help="Number of periods in the execution epoch (default 1)",
                     default=1)
 parser.add_argument("-t", "--time_limit", type=int,
-                    help="Time limit for CPLEX calls in seconds (default: --epoch)",
+                    help="Time limit for Gurobi calls in seconds (default: --epoch)",
                     default=None)
 parser.add_argument("-m", "--offline", action="store_true",
                     help="Offline rolling horizon: use target loads visible at the current decision time; cannot be combined with --greedy or --hybrid")
@@ -107,7 +106,7 @@ parser.add_argument("--full", action="store_true",
                     help="Use the full MILP instead of the surrogate model, in either realtime or offline mode")
 
 parser.add_argument("--greedy", action="store_true",
-                    help="Use the greedy heuristic only; ignores CPLEX and currently requires --epoch 1")
+                    help="Use the greedy heuristic only; ignores Gurobi and currently requires --epoch 1")
 parser.add_argument("--hybrid", action="store_true",
                     help="Use rolling horizon as usual, but switch to a greedy epoch whenever the number of new open requests is at least the number of old open requests times --hybrid_ratio")
 parser.add_argument("--hybrid_ratio", type=float, default=1.0,
@@ -163,25 +162,9 @@ if args.hybrid_ratio <= 0:
 
 result_csv_file = args.csv
 csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"
-simulation_run_stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
-file_export = f"{csv_name_prefix}_opl_moves_{simulation_run_stamp}.txt"
-dat_file = f"{csv_name_prefix}_opl_input_{simulation_run_stamp}.dat"
-end_of_exec_horizon_file = f"{csv_name_prefix}_opl_state_{simulation_run_stamp}.txt"
-
-
-def cleanup_temp_files():
-    for temp_file in (file_export, dat_file, end_of_exec_horizon_file):
-        if temp_file and os.path.exists(temp_file):
-            try:
-                os.remove(temp_file)
-            except OSError:
-                pass
-
-
-atexit.register(cleanup_temp_files)
 
 gamma = args.gamma  # movement weight
-time_limit = args.time_limit  # Time limit for cplex run (seconds)
+time_limit = args.time_limit  # Time limit for gurobi run (seconds)
 Lx = args.Lx
 Ly = args.Ly
 max_balls_in_air_csv = "n/a" if args.max_balls_in_air is None else args.max_balls_in_air
@@ -366,6 +349,127 @@ def collect_visible_requests(cutoff_time):
     return [r for r in open_requests if arrivals[r] <= cutoff_time]
 
 
+def build_gurobi_network():
+    locations = list(Locations)
+    output_set = set(O)
+    not_outputs = [loc for loc in locations if loc not in output_set]
+
+    na = {loc: [loc] for loc in locations}
+    ne = {loc: [] for loc in locations}
+    moves_a = []
+    moves_e = []
+    move_cost_e = {}
+    outgoing_a = {loc: [] for loc in locations}
+    incoming_a = {loc: [] for loc in locations}
+    outgoing_e = {loc: [] for loc in locations}
+    incoming_e = {loc: [] for loc in locations}
+    stay_move = {}
+
+    location_penalty = {
+        loc: args.time_penalty + (Lx + Ly + 1) * args.distance_penalty
+        for loc in locations
+    }
+    for loc in locations:
+        for output in O:
+            distance = abs(output[0] - loc[0]) + abs(output[1] - loc[1])
+            location_penalty[loc] = min(
+                location_penalty[loc],
+                args.time_penalty + args.distance_penalty * distance,
+            )
+        if loc in output_set:
+            location_penalty[loc] = 0
+
+    for x, y in locations:
+        move = (x, y, x, y)
+        moves_a.append(move)
+        outgoing_a[(x, y)].append(move)
+        incoming_a[(x, y)].append(move)
+        stay_move[(x, y)] = move
+
+        if x < Lx - 1:
+            move = (x, y, x + 1, y)
+            na[(x, y)].append((x + 1, y))
+            moves_a.append(move)
+            outgoing_a[(x, y)].append(move)
+            incoming_a[(x + 1, y)].append(move)
+        if y < Ly - 1:
+            move = (x, y, x, y + 1)
+            na[(x, y)].append((x, y + 1))
+            moves_a.append(move)
+            outgoing_a[(x, y)].append(move)
+            incoming_a[(x, y + 1)].append(move)
+        if x > 0:
+            move = (x, y, x - 1, y)
+            na[(x, y)].append((x - 1, y))
+            moves_a.append(move)
+            outgoing_a[(x, y)].append(move)
+            incoming_a[(x - 1, y)].append(move)
+        if y > 0:
+            move = (x, y, x, y - 1)
+            na[(x, y)].append((x, y - 1))
+            moves_a.append(move)
+            outgoing_a[(x, y)].append(move)
+            incoming_a[(x, y - 1)].append(move)
+
+        for x1 in range(Lx):
+            move = (x, y, x1, y)
+            ne[(x, y)].append((x1, y))
+            moves_e.append(move)
+            move_cost_e[move] = abs(x - x1)
+            outgoing_e[(x, y)].append(move)
+            incoming_e[(x1, y)].append(move)
+        for y1 in range(Ly):
+            if y1 == y:
+                continue
+            move = (x, y, x, y1)
+            ne[(x, y)].append((x, y1))
+            moves_e.append(move)
+            move_cost_e[move] = abs(y - y1)
+            outgoing_e[(x, y)].append(move)
+            incoming_e[(x, y1)].append(move)
+
+    cell_cover = {loc: [] for loc in locations}
+    move_cover = {move: [] for move in moves_a}
+    for move in moves_e:
+        orig_x, orig_y, dest_x, dest_y = move
+        if orig_y == dest_y:
+            for x in range(min(orig_x, dest_x), max(orig_x, dest_x) + 1):
+                cell_cover[(x, orig_y)].append(move)
+            for x in range(orig_x, dest_x):
+                move_cover[(x + 1, orig_y, x, orig_y)].append(move)
+            for x in range(orig_x, dest_x, -1):
+                move_cover[(x - 1, orig_y, x, orig_y)].append(move)
+        else:
+            for y in range(min(orig_y, dest_y), max(orig_y, dest_y) + 1):
+                cell_cover[(orig_x, y)].append(move)
+            for y in range(orig_y, dest_y):
+                move_cover[(orig_x, y + 1, orig_x, y)].append(move)
+            for y in range(orig_y, dest_y, -1):
+                move_cover[(orig_x, y - 1, orig_x, y)].append(move)
+
+    return {
+        "locations": locations,
+        "output_set": output_set,
+        "not_outputs": not_outputs,
+        "na": na,
+        "ne": ne,
+        "moves_a": moves_a,
+        "moves_e": moves_e,
+        "move_cost_e": move_cost_e,
+        "outgoing_a": outgoing_a,
+        "incoming_a": incoming_a,
+        "outgoing_e": outgoing_e,
+        "incoming_e": incoming_e,
+        "cell_cover": cell_cover,
+        "move_cover": move_cover,
+        "stay_move": stay_move,
+        "location_penalty": location_penalty,
+    }
+
+
+NETWORK = build_gurobi_network()
+
+
 def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
     """Plan greedy moves for the next epoch from the current state."""
     global cpu_time, NumberOfMovements, heuristic_sol, actual_max_balls
@@ -392,69 +496,225 @@ def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
     return list(A.keys()), list(E)
 
 
-def run_opl_model(target_positions, escort_positions):
-    """Solve the current rolling-horizon MILP model from the supplied state."""
-    with open(dat_file, "w") as f:
-        f.write('file_export = "%s";\n' % file_export)
-        f.write('end_of_exec_horizon_file = "%s";\n' % end_of_exec_horizon_file)
-        f.write('time_limit = %d;\n' % time_limit)
-        f.write('num_threads = %d;\n' % args.num_threads)
-        f.write(f'distance_penalty={args.distance_penalty};\n')
-        f.write(f'time_penalty={args.time_penalty};\n')
-        f.write('gamma=%f;\n' % gamma)
-        f.write('Lx=%d;\n' % Lx)
-        f.write('Ly=%d;\n' % Ly)
-        f.write(f'T={args.fractional_horizon};\n')
-        f.write(f'T_exec={args.epoch};\n')
-        if not args.full:
-            f.write(f'T_int={args.integer_horizon};\n')
-        f.write('E=%s;\n' % tuple_opl(escort_positions))
-        f.write('A=%s;\n' % tuple_opl(target_positions))
-        f.write('O=%s;\n' % tuple_opl(O))
-        f.write('retrieval_mode = "continue";\n')
-
-    try:
-        if args.full:   # using the same model as v3 so I didn't change the names
-            subprocess.run(["oplrun", "escort_flow_bm_rh_static_v3.mod", dat_file], check=True)
-        else:
-            subprocess.run(["oplrun", "escort_flow_bm_rh_v3.mod", dat_file], check=True)
-    except Exception:
-        log_message("Panic: Could not solve the model\n", echo_to_screen=True)
-        exit(1)
-
-    with open(end_of_exec_horizon_file, "r") as f:
-        s = f.readlines()
-
-    result = {
-        "A": eval(s[0]),
-        "E": eval(s[1]),
-        "cplex_status": int(s[2]),
-        "cpu_time_iter": float(s[3]),
-        "makespan_rh": round(float(s[4])),
-        "flowtime_rh": round(float(s[5])),
-        "NumberOfMovements_rh": round(float(s[6])),
-        "obj_rh": float(s[7]),
-        "lb_rh": float(s[8]),
+def gurobi_status_name(status_code):
+    status_names = {
+        GRB.LOADED: "LOADED",
+        GRB.OPTIMAL: "OPTIMAL",
+        GRB.INFEASIBLE: "INFEASIBLE",
+        GRB.INF_OR_UNBD: "INF_OR_UNBD",
+        GRB.UNBOUNDED: "UNBOUNDED",
+        GRB.CUTOFF: "CUTOFF",
+        GRB.ITERATION_LIMIT: "ITERATION_LIMIT",
+        GRB.NODE_LIMIT: "NODE_LIMIT",
+        GRB.TIME_LIMIT: "TIME_LIMIT",
+        GRB.SOLUTION_LIMIT: "SOLUTION_LIMIT",
+        GRB.INTERRUPTED: "INTERRUPTED",
+        GRB.NUMERIC: "NUMERIC",
+        GRB.SUBOPTIMAL: "SUBOPTIMAL",
+        GRB.INPROGRESS: "INPROGRESS",
+        GRB.USER_OBJ_LIMIT: "USER_OBJ_LIMIT",
+        GRB.WORK_LIMIT: "WORK_LIMIT",
+        GRB.MEM_LIMIT: "MEM_LIMIT",
     }
-    if result["obj_rh"] != 0:
-        result["ilp_gap"] = (result["obj_rh"] - result["lb_rh"]) / result["obj_rh"]
-    else:
-        result["ilp_gap"] = 1
+    return status_names.get(status_code, str(status_code))
 
-    if result["cplex_status"] != -1:
-        with open(file_export) as f:
-            mvs = f.readlines()
-        result["planned_moves"] = eval(mvs[-1]) if mvs else []
-    else:
-        result["planned_moves"] = []
 
+def extract_planned_moves(x_e_vars):
+    planned_moves = []
+    for t in range(args.epoch):
+        one_step_moves = []
+        for move in NETWORK["moves_e"]:
+            if x_e_vars[(move, t)].X <= 0.99:
+                continue
+            orig_x, orig_y, dest_x, dest_y = move
+            if orig_x == dest_x and orig_y == dest_y:
+                continue
+
+            if dest_x < orig_x:
+                for x in range(dest_x, orig_x):
+                    one_step_moves.append(((x, dest_y), (x + 1, orig_y)))
+            elif dest_x > orig_x:
+                for x in range(orig_x, dest_x):
+                    one_step_moves.append(((x + 1, dest_y), (x, orig_y)))
+            elif dest_y < orig_y:
+                for y in range(dest_y, orig_y):
+                    one_step_moves.append(((dest_x, y), (orig_x, y + 1)))
+            elif dest_y > orig_y:
+                for y in range(orig_y, dest_y):
+                    one_step_moves.append(((dest_x, y + 1), (orig_x, y)))
+
+        planned_moves.append(one_step_moves)
+    return planned_moves
+
+
+def run_gurobi_model(target_positions, escort_positions):
+    """Solve the current rolling-horizon model directly in Gurobi."""
+    model = gp.Model("escort_flow_rh_v7")
+    model.Params.OutputFlag = 0
+    model.Params.TimeLimit = time_limit
+    model.Params.MIPGap = OPTIMALITY_TOLERANCE
+    model.Params.MIPFocus = 1
+    if args.num_threads > 0:
+        model.Params.Threads = args.num_threads
+
+    T = args.fractional_horizon
+    T_exec = args.epoch
+    output_set = NETWORK["output_set"]
+    target_set = set(target_positions)
+    escort_set = set(escort_positions)
+    loads_to_retrieve = len(target_set - output_set)
+
+    x_a = {}
+    x_e = {}
+    for t in range(T + 1):
+        a_vtype = GRB.BINARY if args.full or t <= args.integer_horizon else GRB.CONTINUOUS
+        e_vtype = GRB.BINARY if args.full or t <= args.integer_horizon else GRB.CONTINUOUS
+        for move in NETWORK["moves_a"]:
+            x_a[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=a_vtype)
+        for move in NETWORK["moves_e"]:
+            x_e[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=e_vtype)
+
+    q = None
+    if args.full:
+        q = {output: model.addVar(lb=0.0, vtype=GRB.INTEGER) for output in O}
+
+    model.update()
+
+    movement_term = gp.quicksum(
+        NETWORK["move_cost_e"][move] * x_e[(move, t)]
+        for move in NETWORK["moves_e"]
+        for t in range(T + 1)
+    )
+    if args.full:
+        model.setObjective(gp.quicksum(q[output] for output in O) + gamma * movement_term, GRB.MINIMIZE)
+    else:
+        surrogate_term = gp.quicksum(
+            NETWORK["location_penalty"][(move[2], move[3])] * x_a[(move, t)]
+            for move in NETWORK["moves_a"]
+            for t in range(T + 1)
+        )
+        model.setObjective(gamma * movement_term + surrogate_term, GRB.MINIMIZE)
+
+    for t in range(1, T + 1):
+        for loc in NETWORK["locations"]:
+            model.addConstr(
+                gp.quicksum(x_e[(move, t - 1)] for move in NETWORK["incoming_e"][loc]) ==
+                gp.quicksum(x_e[(move, t)] for move in NETWORK["outgoing_e"][loc])
+            )
+        for loc in NETWORK["not_outputs"]:
+            model.addConstr(
+                gp.quicksum(x_a[(move, t - 1)] for move in NETWORK["incoming_a"][loc]) ==
+                gp.quicksum(x_a[(move, t)] for move in NETWORK["outgoing_a"][loc])
+            )
+
+    for output in O:
+        nonstay_output_moves = [
+            move for move in NETWORK["outgoing_a"][output]
+            if (move[0], move[1]) != (move[2], move[3])
+        ]
+        for t in range(T + 1):
+            model.addConstr(gp.quicksum(x_a[(move, t)] for move in nonstay_output_moves) == 0)
+
+    for loc in NETWORK["locations"]:
+        supply_a = 1 if loc in target_set else 0
+        supply_e = 1 if loc in escort_set else 0
+        model.addConstr(gp.quicksum(x_a[(move, 0)] for move in NETWORK["outgoing_a"][loc]) == supply_a)
+        model.addConstr(gp.quicksum(x_e[(move, 0)] for move in NETWORK["outgoing_e"][loc]) == supply_e)
+
+    for loc in NETWORK["locations"]:
+        stay_move = NETWORK["stay_move"][loc]
+        nonstay_target_moves = [
+            move for move in NETWORK["outgoing_a"][loc]
+            if move != stay_move
+        ]
+        for t in range(T + 1):
+            model.addConstr(
+                gp.quicksum(x_a[(move, t)] for move in NETWORK["outgoing_a"][loc]) +
+                gp.quicksum(x_e[(move, t)] for move in NETWORK["outgoing_e"][loc]) <= 1
+            )
+            model.addConstr(gp.quicksum(x_e[(move, t)] for move in NETWORK["cell_cover"][loc]) <= 1)
+            model.addConstr(
+                1 - x_a[(stay_move, t)] >= gp.quicksum(x_e[(move, t)] for move in NETWORK["cell_cover"][loc])
+            )
+            for move in nonstay_target_moves:
+                model.addConstr(
+                    x_a[(move, t)] <= gp.quicksum(x_e[(escort_move, t)] for escort_move in NETWORK["move_cover"][move])
+                )
+
+    if args.full:
+        arrival_moves_to_outputs = [
+            move for move in NETWORK["moves_a"]
+            if (move[2], move[3]) in output_set and (move[0], move[1]) != (move[2], move[3])
+        ]
+        model.addConstr(
+            gp.quicksum(x_a[(move, t)] for move in arrival_moves_to_outputs for t in range(T + 1)) == loads_to_retrieve
+        )
+        for output in O:
+            incoming_output_moves = [
+                move for move in NETWORK["incoming_a"][output]
+                if (move[0], move[1]) != (move[2], move[3])
+            ]
+            model.addConstr(
+                gp.quicksum((t + 1) * x_a[(move, t)] for move in incoming_output_moves for t in range(T + 1)) == q[output]
+            )
+
+    model.optimize()
+
+    status_code = model.Status
+    result = {
+        "A": [],
+        "E": [],
+        "solver_status": status_code,
+        "solver_status_name": gurobi_status_name(status_code),
+        "sol_count": model.SolCount,
+        "cpu_time_iter": model.Runtime,
+        "makespan_rh": 0,
+        "flowtime_rh": 0,
+        "NumberOfMovements_rh": 0,
+        "obj_rh": 0.0,
+        "lb_rh": 0.0,
+        "planned_moves": [],
+        "ilp_gap": 1.0,
+        "is_optimal_with_tolerance": False,
+    }
+
+    if model.SolCount <= 0:
+        return result
+
+    result["A"] = [
+        (move[0], move[1]) for move in NETWORK["moves_a"] if x_a[(move, T_exec)].X > 0.99
+    ]
+    result["E"] = [
+        (move[0], move[1]) for move in NETWORK["moves_e"] if x_e[(move, T_exec)].X > 0.99
+    ]
+    result["planned_moves"] = extract_planned_moves(x_e)
+    result["NumberOfMovements_rh"] = round(sum(
+        NETWORK["move_cost_e"][move] * x_e[(move, t)].X
+        for move in NETWORK["moves_e"]
+        for t in range(T_exec)
+    ))
+    result["makespan_rh"] = round(max(
+        [(t + 1) * x_a[(move, t)].X for move in NETWORK["moves_a"] for t in range(T_exec) if (move[0], move[1]) not in output_set] or [0]
+    ))
+    result["flowtime_rh"] = round(sum(
+        (t + 1) * x_a[(move, t)].X
+        for move in NETWORK["moves_a"]
+        for t in range(T_exec)
+        if (move[2], move[3]) in output_set and (move[0], move[1]) != (move[2], move[3])
+    ))
+    result["obj_rh"] = model.ObjVal
+    result["lb_rh"] = model.ObjBound
+    result["ilp_gap"] = model.MIPGap if model.IsMIP else 0.0
+    result["is_optimal_with_tolerance"] = (
+        result["solver_status"] == GRB.OPTIMAL or result["ilp_gap"] <= OPTIMALITY_TOLERANCE
+    )
     return result
 
 
 def is_usable_model_solution(model_result, old_A, old_E):
     """Return whether a model result should be executed, and why if not."""
-    if model_result["cplex_status"] not in [1, 11, 101, 102, 127]:
-        return False, f"CPLEX status {model_result['cplex_status']} is not a usable solve status"
+    if model_result["sol_count"] <= 0:
+        return False, f"Gurobi status {model_result['solver_status_name']} produced no feasible solution"
 
     if model_result["ilp_gap"] > args.max_opt_gap:
         return False, (
@@ -533,21 +793,21 @@ while True:
                 old_A, old_E = copy.copy(A), copy.copy(E)
                 actual_max_balls = max(actual_max_balls, len(A))
                 sim_iter += 1
-                model_result = run_opl_model(A, E)
+                model_result = run_gurobi_model(A, E)
                 A, E = model_result["A"], model_result["E"]
                 cpu_time_iter = model_result["cpu_time_iter"]
                 ilp_gap = model_result["ilp_gap"]
                 cpu_time += cpu_time_iter
 
                 log_message(
-                    f"\tfinish running cplex, iteration {sim_iter}, cplex status:{model_result['cplex_status']} LB={model_result['lb_rh']}, ob={model_result['obj_rh']} "
+                    f"\tfinish running gurobi, iteration {sim_iter}, status:{model_result['solver_status_name']} LB={model_result['lb_rh']}, ob={model_result['obj_rh']} "
                     f"flowtime={len(A) * args.epoch + model_result['flowtime_rh']}, open requests: {open_requests}\n"
-                    f"{'****** ' if cpu_time_iter >= time_limit else ''} cpu_time={cpu_time_iter:.2f} "
-                    f"Gap={100 * (model_result['obj_rh'] - model_result['lb_rh']) / max(model_result['obj_rh'], 1):.2f}%\n")
+                    f"{'****** ' if model_result['solver_status'] == GRB.TIME_LIMIT and not model_result['is_optimal_with_tolerance'] else ''} cpu_time={cpu_time_iter:.2f} "
+                    f"Gap={100 * model_result['ilp_gap']:.4f}%\n")
 
                 use_model_solution, unusable_reason = is_usable_model_solution(model_result, old_A, old_E)
                 if use_model_solution:
-                    if cpu_time_iter >= time_limit:
+                    if not model_result["is_optimal_with_tolerance"]:
                         non_optimal += 1
                     NumberOfMovements += model_result["NumberOfMovements_rh"]
                     max_gap = max(max_gap, ilp_gap)

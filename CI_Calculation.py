@@ -254,7 +254,7 @@ if __name__ == "__main__":
 
     header_cols = [
         "Pickle File", "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
-        "Number of outputs", "Number of Escorts",
+        "Number of outputs", "Number of Escorts", "Number of Requests", "Simulation End Time",
         "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Max Balls In Air",
         "Max Opt Gap", "Actual Max Balls", "Non Optimal", "Max Gap", "Heuristic Solutions",
         "Lead Time Mean", "Lead Time CI Half Width 95%",
@@ -290,9 +290,17 @@ if __name__ == "__main__":
                     f"Unsupported raw tuple format in {pickle_file}. Expected length 21 or 22, got {len(raw)}"
                 )
 
-            lead_time = departures - arrivals
-            waiting_time = start_move - arrivals
-            flow_time = departures - start_move
+            simulation_end_time = int(np.max(departures)) if departures.size else 0
+            late_departure_indices = np.flatnonzero(departures > arrivals[-1])
+            if late_departure_indices.size > 0:
+                cooldown_cutoff_arrival_time = arrivals[late_departure_indices[0]]
+                cooldown_trim_mask = arrivals <= cooldown_cutoff_arrival_time
+            else:
+                cooldown_trim_mask = np.ones_like(arrivals, dtype=bool)
+
+            lead_time = (departures - arrivals)[cooldown_trim_mask]
+            waiting_time = (start_move - arrivals)[cooldown_trim_mask]
+            flow_time = (departures - start_move)[cooldown_trim_mask]
 
             lead_stats = summarize_metric(lead_time)
             waiting_stats = summarize_metric(waiting_time)
@@ -303,6 +311,7 @@ if __name__ == "__main__":
 
             row_vals = [
                 pickle_file, alg_name, queue_management, seed, request_rate, pbs_dimensions, f'"{o_str}"', len(O), len(E_orig),
+                len(arrivals), simulation_end_time,
                 fractional_horizon, integer_horizon, exec_horizon, time_limit, max_balls_in_air,
                 max_opt_gap, actual_max_balls, non_optimal, max_gap, heuristic_sol,
                 lead_stats["mean"], lead_stats["half_width_95"],

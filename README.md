@@ -2,22 +2,26 @@
 
 This repository contains simulation and optimization code for retrieval control in a puzzle-based storage (PBS) system with escorts. The main workflow is:
 
-1. run a dynamic simulation with `EscortFlowSim_v6.py`
+1. run a dynamic simulation with `EscortFlowSim_v7.py`
 2. collect steady-state statistics directly into a CSV row
-3. optionally inspect the raw trace with `CI_Calculation.py` or animate it with `PBSAnimation.py`
+3. optionally save a raw trace with `-a/--save_raw` and inspect it with `CI_Calculation.py` or `PBSAnimation.py`
 
-The project mixes Python simulation code with IBM ILOG OPL models (`.mod` / `.dat`) used by the rolling-horizon MILP controller.
+The project now supports two rolling-horizon solver backends:
+
+- `EscortFlowSim_v7.py`: current version, using Gurobi through the Python API
+- `EscortFlowSim_v6.py`: deprecated version, using IBM ILOG OPL / CPLEX
 
 ## Main entry points
 
-- `EscortFlowSim_v6.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and raw pickle export
+- `EscortFlowSim_v7.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
+- `EscortFlowSim_v6.py`: deprecated dynamic simulator retained for reference; same high-level logic as `v7`, but with an OPL / CPLEX backend
 - `EscortFlowStatic.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
 - `load_flow_multi.py`: static load-flow ILP experiment runner for the corresponding benchmark instances
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
-- `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `load_flow_multi.py`, and `EscortFlowSim_v6.py`
+- `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `load_flow_multi.py`, `EscortFlowSim_v6.py`, and `EscortFlowSim_v7.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
 
-`EscortFlowSim_v5.py` is retired. The maintained dynamic simulator is `EscortFlowSim_v6.py`; the old `v5` file has been moved out of the repository into `Junk/` for local reference only.
+`EscortFlowSim_v5.py` is retired. `EscortFlowSim_v6.py` is now deprecated, and `EscortFlowSim_v7.py` is the maintained dynamic simulator. The old `v5` file has been moved out of the repository into `Junk/` for local reference only.
 
 ## Requirements
 
@@ -36,6 +40,7 @@ python3 -m pip install -r requirements.txt
 
 Optimization:
 
+- Gurobi with the Python API installed for `EscortFlowSim_v7.py`
 - IBM ILOG OPL / CPLEX with `oplrun` available on `PATH`
 
 The simulator expects the OPL model files in this repository, especially:
@@ -217,6 +222,40 @@ They are not the main experiment entry points; normally you use them through `Es
 
 ### 1. Run a simulation
 
+#### Current version: `EscortFlowSim_v7.py`
+
+`v7` is the recommended dynamic simulator. It keeps the `v6` control logic and CSV/raw outputs, but replaces the OPL temp-file workflow with an in-process Gurobi model.
+
+Example greedy-only run:
+
+```bash
+python3 EscortFlowSim_v7.py -x 9 -y 5 -O 4 0 -e 4 -R 0.4 \
+  -S 1600 --greedy -f results.csv -H
+```
+
+Example rolling-horizon Gurobi run:
+
+```bash
+python3 EscortFlowSim_v7.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
+  -T 5 -I 1 -E 1 -R 0.2 -M 6 -q spt -L -f results.csv -H
+```
+
+Example hybrid run with multi-step epochs:
+
+```bash
+python3 EscortFlowSim_v7.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
+  -T 6 -I 2 -E 2 -R 0.2 -M 6 --hybrid --hybrid_ratio 1.0 -L -f results.csv -H
+```
+
+Key notes for `v7`:
+
+- `-t` is the per-solve Gurobi time limit
+- `--num_threads` controls Gurobi threads
+- `v7` sets Gurobi feasibility emphasis (`MIPFocus=1`) and a solver MIP gap target of `0.01%`
+- no OPL temp files are created
+
+#### Deprecated version: `EscortFlowSim_v6.py`
+
 Example greedy-only run:
 
 ```bash
@@ -259,6 +298,7 @@ Important options:
 - `--hybrid_ratio`: non-negative real ratio used by `--hybrid` (default `1.0`)
 - `--num_threads`: CPLEX thread count; on macOS the default is `8`, otherwise `0` means machine default
 - `-L`: write a detailed log file
+- `-a`, `--save_raw`: save a raw pickle trace for post-processing and animation
 - `-f`: output CSV file
 - `-H`: write CSV header if needed
 
@@ -272,23 +312,28 @@ Important options:
 
 ## Simulator outputs
 
-Each run of `EscortFlowSim_v6.py` produces:
+Each run of `EscortFlowSim_v7.py` produces the following outputs, and `EscortFlowSim_v6.py` uses the same output formats:
 
 - one appended row in the requested CSV file
-- one raw pickle trace such as `sim_escort_flow_rawYYYY-MM-DD_HHMMSS.p`
+- optionally, when `-a/--save_raw` is set, one raw pickle trace such as `sim_escort_flow_rawYYYY-MM-DD_HHMMSS.p`
 - optionally one log file such as `sim_escort_flow_logYYYY-MM-DD_HHMMSS.txt`
 
 The CSV includes:
 
 - instance and algorithm settings
+- `--number_of_requests` and the actual simulation end time
 - lead time, waiting time, flow time, and excess time estimates
 - confidence-interval half widths
 - batching diagnostics after MSER-5 warmup deletion
 - `cpu_time`
 
+The reported means and confidence intervals exclude the final cooldown tail using an arrival-based cutoff: find the first request whose departure occurs after the last arrival, then remove all requests that arrived after that request.
+
+Before batching and confidence-interval calculation, the remaining request-level observations also go through warmup deletion using MSER-5. This removes an initial prefix of transient requests so the reported steady-state estimates are based on the post-warmup portion of the run.
+
 `cpu_time` means accumulated algorithm compute time:
 
-- for MILP runs: summed solver time reported by OPL/CPLEX
+- for MILP runs: summed solver time reported by Gurobi in `v7` or by OPL/CPLEX in deprecated `v6`
 - for greedy runs: summed time spent inside the greedy heuristic
 - for mixed runs: both combined
 
@@ -314,11 +359,11 @@ This script:
 `PBSAnimation.py` is the unified animation viewer for this repository. It is
 compatible with:
 
-- raw simulation pickles produced by `EscortFlowSim_v6.py`
+- raw simulation pickles produced by `EscortFlowSim_v7.py` and `EscortFlowSim_v6.py`
 - exported animation script pickles produced by `EscortFlowStatic.py` with `-a`
 - exported animation script pickles produced by `load_flow_multi.py` with `-a`
 
-To inspect a raw `EscortFlowSim_v6.py` trace visually:
+To inspect a raw `EscortFlowSim_v7.py` or `EscortFlowSim_v6.py` trace visually:
 
 ```bash
 python3 PBSAnimation.py sim_escort_flow_raw2026-03-15_143541.p

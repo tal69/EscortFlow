@@ -25,6 +25,7 @@ execute {
 		temp = before.getTime();} 
 
 string file_export = ...;
+string end_of_exec_horizon_file = ...;
 
 float distance_penalty = ...; // Penalty for distance  (large surgate c_max)
 float time_penalty = ...; //  Penalty for flowtime (if 1  this is exactly flow time)
@@ -240,7 +241,7 @@ main {
    var CpuTime = (after.getTime() - before.getTime())/1000;
     
    if (success) {
-	   var f  = new IloOplOutputFile("end_of_exec_horizon.txt");
+	   var f  = new IloOplOutputFile(thisOplModel.end_of_exec_horizon_file);
 	   f.write("[");
 	   for (var m in thisOplModel.movesA) {
 	 		if (thisOplModel.xA[thisOplModel.movesA.find(m)][thisOplModel.T_exec] > 0.99) {
@@ -317,7 +318,7 @@ main {
   }  
   else { // could not find a feasible solution
   	  
-	  var f  = new IloOplOutputFile("end_of_exec_horizon.txt");  // write an empty end of horizon file
+	  var f  = new IloOplOutputFile(thisOplModel.end_of_exec_horizon_file);  // write an empty end of horizon file
 	  f.writeln("[]");
 	  f.writeln("[]");
 	  f.writeln(-1);  // in leiu of Cplex staus
