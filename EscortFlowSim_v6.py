@@ -135,9 +135,9 @@ parser.add_argument("--full", action="store_true",
 parser.add_argument("--greedy", action="store_true",
                     help="Use the greedy heuristic only; ignores CPLEX and currently requires --epoch 1")
 parser.add_argument("--hybrid", action="store_true",
-                    help="Use rolling horizon as usual, but switch to a greedy epoch whenever the number of new target loads is at least the number of old target loads times --hybrid_ratio")
+                    help="Use rolling horizon as usual, but switch to a greedy epoch whenever the number of new open requests is at least the number of old open requests times --hybrid_ratio")
 parser.add_argument("--hybrid_ratio", type=float, default=1.0,
-                    help="Ratio for --hybrid: use greedy when number_of_new_target_loads >= number_of_old_target_loads * --hybrid_ratio (default 1.0)")
+                    help="Ratio for --hybrid: use greedy when number_of_new_open_requests >= number_of_old_open_requests * --hybrid_ratio (default 1.0). Must be positive.")
 parser.add_argument("--acyclic", action="store_true",
                     help="Use greedy target order based on target seniority instead of the default dynamic distance-based order. This is inline with our acyclicty proof but it provde poorer result than the distance-based priority rule.")
 
@@ -182,8 +182,8 @@ if args.offline and args.greedy:
     parser.error("--offline cannot be combined with --greedy")
 if args.offline and args.hybrid:
     parser.error("--offline cannot be combined with --hybrid")
-if args.hybrid_ratio < 0:
-    parser.error("--hybrid_ratio must be non-negative")
+if args.hybrid_ratio <= 0:
+    parser.error("--hybrid_ratio must be positive. Use --greedy to run the heuristic at every step")
 
 result_csv_file = args.csv
 csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"
@@ -369,6 +369,11 @@ def collect_target_loads(cutoff_time):
     )
 
 
+def collect_visible_requests(cutoff_time):
+    """Return open requests visible by `cutoff_time`."""
+    return [r for r in open_requests if arrivals[r] <= cutoff_time]
+
+
 def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
     """Plan greedy moves for the next epoch from the current state."""
     global cpu_time, NumberOfMovements, heuristic_sol, actual_max_balls
@@ -502,11 +507,13 @@ while True:
 
     elif curr_t % args.epoch == 0:
         E = set(Locations) - set(load_loc.values())
+        old_visible_requests = collect_visible_requests(curr_t - args.epoch)
+        current_visible_requests = collect_visible_requests(curr_t)
         old_target_loads = collect_target_loads(curr_t - args.epoch)
         current_time_target_loads = collect_target_loads(curr_t)
-        old_target_load_set = set(old_target_loads)
-        new_target_loads = [load_id for load_id in current_time_target_loads if load_id not in old_target_load_set]
-        hybrid_ratio_active = args.hybrid and len(new_target_loads) >= len(old_target_loads) * args.hybrid_ratio
+        old_visible_request_set = set(old_visible_requests)
+        new_visible_requests = [r for r in current_visible_requests if r not in old_visible_request_set]
+        hybrid_ratio_active = args.hybrid and len(new_visible_requests) >= len(old_visible_requests) * args.hybrid_ratio
 
         if args.greedy:
             if current_time_target_loads:
@@ -514,7 +521,7 @@ while True:
         elif hybrid_ratio_active:
             if current_time_target_loads:
                 log_message(
-                    f"\tHybrid mode: using greedy because new target loads={len(new_target_loads)} >= old target loads={len(old_target_loads)} * ratio {args.hybrid_ratio}\n"
+                    f"\tHybrid mode: using greedy because new open requests={len(new_visible_requests)} >= old open requests={len(old_visible_requests)} * ratio {args.hybrid_ratio}\n"
                 )
                 greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, E)
                 hybrid_heuristic_sol += 1
@@ -650,20 +657,22 @@ if max(start_move) == np.iinfo(np.int32).max:
     print(f"{np.where(start_move==np.iinfo(np.int32).max)}")
 
 if args.greedy:
-    alg_name = "Greedy"
+    alg_name = "greedy"
 else:
-    horizon_suffix = "-LPR" if args.fractional_horizon > args.integer_horizon else "-ILP"
+    horizon_suffix = "-PLPR" if args.fractional_horizon > args.integer_horizon else ""
     alg_prefix = f"hybrid{args.hybrid_ratio}-" if args.hybrid else ""
     if not alg_prefix:
-        alg_prefix = "offline-" if args.offline else "realtime-"
+        alg_prefix = "offline-" if args.offline else ""
     alg_name = alg_prefix
-    if args.full:
-        alg_name += "full"
-    else:
+    if not args.full:
         alg_name += "surrogate"
 
-    alg_name += f"Q{args.max_balls_in_air}"
+    if max_balls_in_air_csv != "n/a":
+        alg_name += f"-Q{args.max_balls_in_air}"
     alg_name += horizon_suffix
+
+if alg_name == "":
+    alg_name = "-"
 
 f = open(result_csv_file, 'a')
 script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"

@@ -17,6 +17,8 @@ The project mixes Python simulation code with IBM ILOG OPL models (`.mod` / `.da
 - `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `load_flow_multi.py`, and `EscortFlowSim_v6.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
 
+`EscortFlowSim_v5.py` is retired. The maintained dynamic simulator is `EscortFlowSim_v6.py`; the old `v5` file has been moved out of the repository into `Junk/` for local reference only.
+
 ## Requirements
 
 Python:
@@ -253,7 +255,7 @@ Important options:
 - `-m`, `--offline`: offline rolling horizon for pure ILP mode only; in offline mode the MILP sees requests visible at the current decision time, and the flag cannot be combined with `--greedy` or `--hybrid`
 - `--full`: use the full MILP instead of the surrogate model
 - `--greedy`: greedy heuristic only; skips OPL and currently requires `--epoch 1`
-- `--hybrid`: at each decision epoch, split the currently visible target loads into `old` target loads already visible at the beginning of the previous epoch and `new` target loads that were not visible then; use greedy when `number_of_new_target_loads >= number_of_old_target_loads * --hybrid_ratio`
+- `--hybrid`: at each decision epoch, split the currently open visible requests into `old` requests already visible at the beginning of the previous epoch and `new` requests that were not visible then; use greedy when `number_of_new_open_requests >= number_of_old_open_requests * --hybrid_ratio`
 - `--hybrid_ratio`: non-negative real ratio used by `--hybrid` (default `1.0`)
 - `--num_threads`: CPLEX thread count; on macOS the default is `8`, otherwise `0` means machine default
 - `-L`: write a detailed log file
@@ -265,7 +267,7 @@ Important options:
 - The simulator plans once per epoch and then executes the resulting move list for that entire epoch.
 - MILP visibility is delayed by one epoch: requests must be visible by the beginning of the previous epoch to enter the next MILP solve.
 - With `--offline`, the MILP instead uses the requests visible at the current decision time.
-- In hybrid mode, `old target loads` are the currently open target loads that were already visible at the beginning of the previous epoch, and `new target loads` are the currently open target loads that were not visible then.
+- In hybrid mode, `old requests` are the currently open requests that were already visible at the beginning of the previous epoch, and `new requests` are the currently open requests that were not visible then.
 - If an ILP solution is unusable, `v6` falls back to greedy on all target loads visible at the current decision time and fills the whole epoch greedily.
 
 ## Simulator outputs
