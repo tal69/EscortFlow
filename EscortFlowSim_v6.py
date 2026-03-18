@@ -677,7 +677,7 @@ if alg_name == "":
 
 f = open(result_csv_file, 'a')
 script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
-machine_name = socket.gethostname()
+machine_name = f"{socket.gethostname()}-T{args.num_threads}"
 row_vals = [
     machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
     fallback_heuristic_sol, hybrid_heuristic_sol,

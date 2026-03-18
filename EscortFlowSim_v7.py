@@ -63,8 +63,18 @@ def log_message(*messages, echo_to_screen=False):
         for message in messages:
             log_file.write(message)
 
+
+def print_progress(current, total):
+    """Print a simple one-line progress bar."""
+    bar_width =100
+    filled = bar_width if total == 0 else int(bar_width * current / total)
+    bar = "#" * filled + "-" * (bar_width - filled)
+    print(f"\rProgress [{bar}] {current}/{total}", end="", flush=True)
+    if current >= total:
+        print("")
+
 parser = argparse.ArgumentParser()
-default_num_threads = 8 if sys.platform == "darwin" else 0
+default_num_threads = 0 if sys.platform == "darwin" else 0
 
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
@@ -320,6 +330,11 @@ f.close()  # we want to open and close the file anyway just to make sure that th
 
 req_count = 0
 last_start_sol = 0
+last_progress_served = -1
+
+print(f"Running {os.path.basename(__file__)}")
+for arg_name, arg_value in sorted(vars(args).items()):
+    print(f"  {arg_name} = {arg_value}")
 
 log_message(f"\n{time.ctime()} :Instance {Lx}x{Ly}, O={O}, E={E}\n")
 
@@ -727,6 +742,11 @@ def is_usable_model_solution(model_result, old_A, old_E):
     return True, None
 
 while True:
+    served_requests = req_count - len(open_requests)
+    if not args.log and served_requests != last_progress_served:
+        print_progress(served_requests, number_of_requests)
+        last_progress_served = served_requests
+
     if args.log:
         log_message(f"Time: {curr_t}: \n")
 
@@ -856,6 +876,8 @@ while True:
                 requests_on_load[leaving_load] = []
 
     if curr_t > arrivals[-1] and not open_requests:
+        if not args.log:
+            print_progress(number_of_requests, number_of_requests)
         log_message(
             "Simulation end\n",
             f"Total lead time: {total_lead_time}\n",
@@ -937,7 +959,7 @@ if alg_name == "":
 
 f = open(result_csv_file, 'a')
 script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
-machine_name = socket.gethostname()
+machine_name = f"{socket.gethostname()}-T{args.num_threads}"
 row_vals = [
     machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
     fallback_heuristic_sol, hybrid_heuristic_sol,
