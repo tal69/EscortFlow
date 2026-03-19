@@ -252,7 +252,7 @@ Key notes for `v7`:
 - `-t` is the per-solve Gurobi time limit
 - `--num_threads` controls Gurobi threads
 - `v7` uses balanced Gurobi search by default (`MIPFocus=0`), and switches to optimality emphasis (`MIPFocus=2`) when `--warmstart` is enabled; the solver MIP gap target remains `0.01%`
-- `--warmstart` now accepts explicit modes: `greedy`, `ilp`, or `ilp greedy`; optionally add `zero` to set all unused arc variables to `0`
+- `--warmstart` now accepts explicit modes: `greedy`, `ilp`, or `ilp greedy`; by default all unused arc variables are set to `0`, and `nozero` disables that
 - `--warmstart` is allowed only when `--integer_horizon == --fractional_horizon`; if `--integer_horizon` is omitted, it defaults to `--fractional_horizon`
 - no OPL temp files are created
 

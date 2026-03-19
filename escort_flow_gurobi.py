@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import time
 
 import gurobipy as gp
 from gurobipy import GRB
@@ -52,10 +53,29 @@ class RollingHorizonGurobiSolver:
         self.config = config
         self.output_cells = tuple(config.output_cells)
         self.output_set = set(self.output_cells)
+        self.env = gp.Env(empty=True)
+        self.env.setParam("OutputFlag", 0)
+        self.env.start()
         self.dist_map = OneStepHeuristic_v2.build_dist_map(
             config.Lx, config.Ly, self.output_cells
         )
         self.network = self._build_gurobi_network()
+        self.model = None
+        self.x_a = {}
+        self.x_e = {}
+        self.q_vars = None
+        self.supply_a_constraints = {}
+        self.supply_e_constraints = {}
+        self.retrieve_total_constraint = None
+        self._pending_initial_model_build_time = self._build_persistent_model()
+
+    def _configure_model_parameters(self, model):
+        model.Params.OutputFlag = 0
+        model.Params.TimeLimit = self.config.time_limit
+        model.Params.MIPGap = self.config.optimality_tolerance
+        model.Params.MIPFocus = self.config.mip_focus
+        if self.config.num_threads > 0:
+            model.Params.Threads = self.config.num_threads
 
     def _build_gurobi_network(self):
         locations = [
@@ -177,6 +197,161 @@ class RollingHorizonGurobiSolver:
             "stay_move": stay_move,
             "location_penalty": location_penalty,
         }
+
+    def _build_persistent_model(self):
+        model_build_start = time.perf_counter()
+        model = gp.Model("escort_flow_rh_v7", env=self.env)
+        self._configure_model_parameters(model)
+
+        T = self.config.fractional_horizon
+        x_a = {}
+        x_e = {}
+        for t in range(T + 1):
+            a_vtype = GRB.BINARY if self.config.full or t <= self.config.integer_horizon else GRB.CONTINUOUS
+            e_vtype = GRB.BINARY if self.config.full or t <= self.config.integer_horizon else GRB.CONTINUOUS
+            for move in self.network["moves_a"]:
+                x_a[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=a_vtype)
+            for move in self.network["moves_e"]:
+                x_e[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=e_vtype)
+
+        q_vars = None
+        if self.config.full:
+            q_vars = {output: model.addVar(lb=0.0, vtype=GRB.INTEGER) for output in self.output_cells}
+
+        movement_term = gp.quicksum(
+            self.network["move_cost_e"][move] * x_e[(move, t)]
+            for move in self.network["moves_e"]
+            for t in range(T + 1)
+        )
+        if self.config.full:
+            model.setObjective(
+                gp.quicksum(q_vars[output] for output in self.output_cells)
+                + self.config.gamma * movement_term,
+                GRB.MINIMIZE,
+            )
+        else:
+            surrogate_term = gp.quicksum(
+                self.network["location_penalty"][(move[2], move[3])] * x_a[(move, t)]
+                for move in self.network["moves_a"]
+                for t in range(T + 1)
+            )
+            model.setObjective(
+                self.config.gamma * movement_term + surrogate_term,
+                GRB.MINIMIZE,
+            )
+
+        for t in range(1, T + 1):
+            for loc in self.network["locations"]:
+                model.addConstr(
+                    gp.quicksum(x_e[(move, t - 1)] for move in self.network["incoming_e"][loc]) ==
+                    gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]),
+                    name=f"escort_flow_{loc[0]}_{loc[1]}_t{t}",
+                )
+            for loc in self.network["not_outputs"]:
+                model.addConstr(
+                    gp.quicksum(x_a[(move, t - 1)] for move in self.network["incoming_a"][loc]) ==
+                    gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]),
+                    name=f"target_flow_{loc[0]}_{loc[1]}_t{t}",
+                )
+
+        for output in self.output_cells:
+            nonstay_output_moves = [
+                move for move in self.network["outgoing_a"][output]
+                if (move[0], move[1]) != (move[2], move[3])
+            ]
+            for t in range(T + 1):
+                model.addConstr(
+                    gp.quicksum(x_a[(move, t)] for move in nonstay_output_moves) == 0,
+                    name=f"output_nonstay_{output[0]}_{output[1]}_t{t}",
+                )
+
+        supply_a_constraints = {}
+        supply_e_constraints = {}
+        for loc in self.network["locations"]:
+            supply_a_constraints[loc] = model.addConstr(
+                gp.quicksum(x_a[(move, 0)] for move in self.network["outgoing_a"][loc]) == 0,
+                name=f"supply_a_{loc[0]}_{loc[1]}",
+            )
+            supply_e_constraints[loc] = model.addConstr(
+                gp.quicksum(x_e[(move, 0)] for move in self.network["outgoing_e"][loc]) == 0,
+                name=f"supply_e_{loc[0]}_{loc[1]}",
+            )
+
+        for loc in self.network["locations"]:
+            stay_move = self.network["stay_move"][loc]
+            nonstay_target_moves = [
+                move for move in self.network["outgoing_a"][loc]
+                if move != stay_move
+            ]
+            for t in range(T + 1):
+                model.addConstr(
+                    gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
+                    gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1,
+                    name=f"cap_{loc[0]}_{loc[1]}_t{t}",
+                )
+                model.addConstr(
+                    gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1,
+                    name=f"cell_cover_{loc[0]}_{loc[1]}_t{t}",
+                )
+                model.addConstr(
+                    1 - x_a[(stay_move, t)] >= gp.quicksum(
+                        x_e[(move, t)] for move in self.network["cell_cover"][loc]
+                    ),
+                    name=f"stay_cover_{loc[0]}_{loc[1]}_t{t}",
+                )
+                for move in nonstay_target_moves:
+                    model.addConstr(
+                        x_a[(move, t)] <= gp.quicksum(
+                            x_e[(escort_move, t)]
+                            for escort_move in self.network["move_cover"][move]
+                        ),
+                        name=f"move_cover_{move[0]}_{move[1]}_{move[2]}_{move[3]}_t{t}",
+                    )
+
+        retrieve_total_constraint = None
+        if self.config.full:
+            arrival_moves_to_outputs = [
+                move for move in self.network["moves_a"]
+                if (move[2], move[3]) in self.output_set and (move[0], move[1]) != (move[2], move[3])
+            ]
+            retrieve_total_constraint = model.addConstr(
+                gp.quicksum(
+                    x_a[(move, t)] for move in arrival_moves_to_outputs for t in range(T + 1)
+                ) == 0
+            )
+            for output in self.output_cells:
+                incoming_output_moves = [
+                    move for move in self.network["incoming_a"][output]
+                    if (move[0], move[1]) != (move[2], move[3])
+                ]
+                model.addConstr(
+                    gp.quicksum(
+                        (t + 1) * x_a[(move, t)]
+                        for move in incoming_output_moves
+                        for t in range(T + 1)
+                    ) == q_vars[output]
+                )
+
+        model.update()
+        self.model = model
+        self.x_a = x_a
+        self.x_e = x_e
+        self.q_vars = q_vars
+        self.supply_a_constraints = supply_a_constraints
+        self.supply_e_constraints = supply_e_constraints
+        self.retrieve_total_constraint = retrieve_total_constraint
+        return time.perf_counter() - model_build_start
+
+    def _update_dynamic_model_state(self, target_positions, escort_positions):
+        target_set = set(target_positions)
+        escort_set = set(escort_positions)
+
+        for loc in self.network["locations"]:
+            self.supply_a_constraints[loc].RHS = 1 if loc in target_set else 0
+            self.supply_e_constraints[loc].RHS = 1 if loc in escort_set else 0
+
+        if self.retrieve_total_constraint is not None:
+            self.retrieve_total_constraint.RHS = len(target_set - self.output_set)
 
     def _gurobi_status_name(self, status_code):
         status_names = {
@@ -555,149 +730,18 @@ class RollingHorizonGurobiSolver:
         return " | ".join(line for line in relevant_lines if line)
 
     def run_model(self, target_positions, escort_positions, warmstart_vector=None):
-        model = gp.Model("escort_flow_rh_v7")
-        model.Params.OutputFlag = 0
-        model.Params.TimeLimit = self.config.time_limit
-        model.Params.MIPGap = self.config.optimality_tolerance
-        model.Params.MIPFocus = self.config.mip_focus
-        if self.config.num_threads > 0:
-            model.Params.Threads = self.config.num_threads
-
+        model_build_start = time.perf_counter()
+        model = self.model
+        model.reset(1)
+        self._update_dynamic_model_state(target_positions, escort_positions)
         T = self.config.fractional_horizon
         T_exec = self.config.epoch
-        target_set = set(target_positions)
-        escort_set = set(escort_positions)
-        loads_to_retrieve = len(target_set - self.output_set)
+        x_a = self.x_a
+        x_e = self.x_e
+        q = self.q_vars
 
-        x_a = {}
-        x_e = {}
-        for t in range(T + 1):
-            a_vtype = GRB.BINARY if self.config.full or t <= self.config.integer_horizon else GRB.CONTINUOUS
-            e_vtype = GRB.BINARY if self.config.full or t <= self.config.integer_horizon else GRB.CONTINUOUS
-            for move in self.network["moves_a"]:
-                x_a[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=a_vtype)
-            for move in self.network["moves_e"]:
-                x_e[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=e_vtype)
-
-        q = None
-        if self.config.full:
-            q = {output: model.addVar(lb=0.0, vtype=GRB.INTEGER) for output in self.output_cells}
-
-        model.update()
         warmstart_applied = self._apply_warmstart_vector(model, x_a, x_e, q, warmstart_vector)
-
-        movement_term = gp.quicksum(
-            self.network["move_cost_e"][move] * x_e[(move, t)]
-            for move in self.network["moves_e"]
-            for t in range(T + 1)
-        )
-        if self.config.full:
-            model.setObjective(
-                gp.quicksum(q[output] for output in self.output_cells)
-                + self.config.gamma * movement_term,
-                GRB.MINIMIZE,
-            )
-        else:
-            surrogate_term = gp.quicksum(
-                self.network["location_penalty"][(move[2], move[3])] * x_a[(move, t)]
-                for move in self.network["moves_a"]
-                for t in range(T + 1)
-            )
-            model.setObjective(
-                self.config.gamma * movement_term + surrogate_term,
-                GRB.MINIMIZE,
-            )
-
-        for t in range(1, T + 1):
-            for loc in self.network["locations"]:
-                model.addConstr(
-                    gp.quicksum(x_e[(move, t - 1)] for move in self.network["incoming_e"][loc]) ==
-                    gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]),
-                    name=f"escort_flow_{loc[0]}_{loc[1]}_t{t}",
-                )
-            for loc in self.network["not_outputs"]:
-                model.addConstr(
-                    gp.quicksum(x_a[(move, t - 1)] for move in self.network["incoming_a"][loc]) ==
-                    gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]),
-                    name=f"target_flow_{loc[0]}_{loc[1]}_t{t}",
-                )
-
-        for output in self.output_cells:
-            nonstay_output_moves = [
-                move for move in self.network["outgoing_a"][output]
-                if (move[0], move[1]) != (move[2], move[3])
-            ]
-            for t in range(T + 1):
-                model.addConstr(
-                    gp.quicksum(x_a[(move, t)] for move in nonstay_output_moves) == 0,
-                    name=f"output_nonstay_{output[0]}_{output[1]}_t{t}",
-                )
-
-        for loc in self.network["locations"]:
-            supply_a = 1 if loc in target_set else 0
-            supply_e = 1 if loc in escort_set else 0
-            model.addConstr(
-                gp.quicksum(x_a[(move, 0)] for move in self.network["outgoing_a"][loc]) == supply_a,
-                name=f"supply_a_{loc[0]}_{loc[1]}",
-            )
-            model.addConstr(
-                gp.quicksum(x_e[(move, 0)] for move in self.network["outgoing_e"][loc]) == supply_e,
-                name=f"supply_e_{loc[0]}_{loc[1]}",
-            )
-
-        for loc in self.network["locations"]:
-            stay_move = self.network["stay_move"][loc]
-            nonstay_target_moves = [
-                move for move in self.network["outgoing_a"][loc]
-                if move != stay_move
-            ]
-            for t in range(T + 1):
-                model.addConstr(
-                    gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
-                    gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1,
-                    name=f"cap_{loc[0]}_{loc[1]}_t{t}",
-                )
-                model.addConstr(
-                    gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1,
-                    name=f"cell_cover_{loc[0]}_{loc[1]}_t{t}",
-                )
-                model.addConstr(
-                    1 - x_a[(stay_move, t)] >= gp.quicksum(
-                        x_e[(move, t)] for move in self.network["cell_cover"][loc]
-                    ),
-                    name=f"stay_cover_{loc[0]}_{loc[1]}_t{t}",
-                )
-                for move in nonstay_target_moves:
-                    model.addConstr(
-                        x_a[(move, t)] <= gp.quicksum(
-                            x_e[(escort_move, t)]
-                            for escort_move in self.network["move_cover"][move]
-                        ),
-                        name=f"move_cover_{move[0]}_{move[1]}_{move[2]}_{move[3]}_t{t}",
-                    )
-
-        if self.config.full:
-            arrival_moves_to_outputs = [
-                move for move in self.network["moves_a"]
-                if (move[2], move[3]) in self.output_set and (move[0], move[1]) != (move[2], move[3])
-            ]
-            model.addConstr(
-                gp.quicksum(
-                    x_a[(move, t)] for move in arrival_moves_to_outputs for t in range(T + 1)
-                ) == loads_to_retrieve
-            )
-            for output in self.output_cells:
-                incoming_output_moves = [
-                    move for move in self.network["incoming_a"][output]
-                    if (move[0], move[1]) != (move[2], move[3])
-                ]
-                model.addConstr(
-                    gp.quicksum(
-                        (t + 1) * x_a[(move, t)]
-                        for move in incoming_output_moves
-                        for t in range(T + 1)
-                    ) == q[output]
-                )
+        model.update()
 
         gurobi_messages = []
 
@@ -705,6 +749,10 @@ class RollingHorizonGurobiSolver:
             if where == GRB.Callback.MESSAGE:
                 gurobi_messages.append(cb_model.cbGet(GRB.Callback.MSG_STRING))
 
+        model_construction_time = (
+            time.perf_counter() - model_build_start + self._pending_initial_model_build_time
+        )
+        self._pending_initial_model_build_time = 0.0
         model.optimize(message_callback if warmstart_applied else None)
 
         status_code = model.Status
@@ -714,7 +762,8 @@ class RollingHorizonGurobiSolver:
             "solver_status": status_code,
             "solver_status_name": self._gurobi_status_name(status_code),
             "sol_count": model.SolCount,
-            "cpu_time_iter": model.Runtime,
+            "solver_time_iter": model.Runtime,
+            "model_construction_time_iter": model_construction_time,
             "makespan_rh": 0,
             "flowtime_rh": 0,
             "NumberOfMovements_rh": 0,

@@ -50,11 +50,7 @@ sim_log_file = ""
 
 
 def log_message(*messages, echo_to_screen=False):
-    """Write messages to the log file and optionally echo them to stdout."""
-    if echo_to_screen:
-        for message in messages:
-            print(message, end="")
-
+    """Write messages to the log file only."""
     if not args.log or not sim_log_file:
         return
 
@@ -63,12 +59,25 @@ def log_message(*messages, echo_to_screen=False):
             log_file.write(message)
 
 
-def print_progress(current, total):
+def format_elapsed_wall_time(elapsed_seconds):
+    """Format elapsed wall-clock time as HH:MM:SS."""
+    total_seconds = max(0, int(elapsed_seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def print_progress(current, total, sim_time, elapsed_wall_time):
     """Print a simple one-line progress bar."""
     bar_width =100
     filled = bar_width if total == 0 else int(bar_width * current / total)
     bar = "#" * filled + "-" * (bar_width - filled)
-    print(f"\rProgress [{bar}] {current}/{total}", end="", flush=True)
+    elapsed_label = format_elapsed_wall_time(elapsed_wall_time)
+    print(
+        f"\rProgress [{bar}] {current}/{total} Departurs |  Simulation time={sim_time}  | Elapsed={elapsed_label}",
+        end="",
+        flush=True,
+    )
     if current >= total:
         print("")
 
@@ -78,19 +87,27 @@ def parse_warmstart_spec(tokens, parser_obj):
     if tokens is None:
         return "none", False
 
-    zero_fill = False
+    zero_fill = True
     mode_tokens = []
     seen_modes = set()
+    zero_modifier_seen = False
     for raw_token in tokens:
         token = raw_token.lower()
-        if token in {"zero", "zeros"}:
-            if zero_fill:
-                parser_obj.error("--warmstart accepts at most one zero/zeros token")
+        if token == "zero":
+            if zero_modifier_seen:
+                parser_obj.error("--warmstart accepts at most one zero/nozero token")
             zero_fill = True
+            zero_modifier_seen = True
+            continue
+        if token == "nozero":
+            if zero_modifier_seen:
+                parser_obj.error("--warmstart accepts at most one zero/nozero token")
+            zero_fill = False
+            zero_modifier_seen = True
             continue
         if token not in {"greedy", "ilp"}:
             parser_obj.error(
-                "--warmstart accepts only greedy, ilp, and optional zero/zeros tokens"
+                "--warmstart accepts only greedy, ilp, and optional zero/nozero tokens"
             )
         if token in seen_modes:
             parser_obj.error(f"--warmstart token '{token}' was provided more than once")
@@ -105,7 +122,7 @@ def parse_warmstart_spec(tokens, parser_obj):
         return "ilp-greedy", zero_fill
 
     parser_obj.error(
-        "--warmstart must be one of: greedy, ilp, or ilp greedy; optionally add zero/zeros"
+        "--warmstart must be one of: greedy, ilp, or ilp greedy; optionally add zero/nozero"
     )
 
 
@@ -180,7 +197,7 @@ parser.add_argument("-H", "--header_line", action="store_true",
 parser.add_argument("-a", "--save_raw", action="store_true",
                     help="Save the raw pickle trace used by CI_Calculation.py and PBSAnimation.py")
 parser.add_argument("--warmstart", nargs="+",
-                    help="Warm start Gurobi with one vector: use 'greedy', 'ilp', or 'ilp greedy'; optionally add 'zero' or 'zeros' to set all unspecified arc variables to 0")
+                    help="Warm start Gurobi with one vector: use 'greedy', 'ilp', or 'ilp greedy'; by default unspecified arc variables are set to 0, add 'nozero' to leave them unset")
 parser.add_argument("-M", "--max_balls_in_air", type=int,
                     help="Maximum number of target loads that are considered concurrently; if omitted, all cells are eligible",
                     default=None)
@@ -290,6 +307,7 @@ pickle_file_name = ""
 if args.save_raw:
     pickle_file_name = f"{csv_name_prefix}_raw{time.strftime('%Y-%m-%d_%H%M%S', time.localtime())}.p"
 curr_t = 0
+simulation_wall_start = time.perf_counter()
 np.random.seed(args.seed)
 random.seed(args.seed + 1)
 
@@ -299,6 +317,10 @@ number_of_requests = args.number_of_requests
 max_simulation_length = (int(number_of_requests/args.request_rate)+ 2500)  # +2500 for a good measure to allow cool down period after the arrival of the last request
 moves = [[] for _ in range((int(number_of_requests/args.request_rate)+ 2500))]
 cpu_time = 0
+solver_cpu_time = 0
+heuristic_cpu_time = 0
+model_construction_cpu_time = 0
+warmstart_cpu_time = 0
 total_lead_time = 0
 non_optimal = 0
 heuristic_sol = 0
@@ -374,7 +396,8 @@ header_cols = [
     "Flow Time Lag1 Autocorr", "Flow Time Lag1 Threshold", "Flow Time Batch Means Variance",
     "Excess Time Deleted", "Excess Time Used", "Excess Time Batch Size", "Excess Time Number of Batches",
     "Excess Time Lag1 Autocorr", "Excess Time Lag1 Threshold", "Excess Time Batch Means Variance",
-    "Log File Name", "Raw Pickle File Name"
+    "Log File Name", "Raw Pickle File Name",
+    "Solver Time", "Greedy Heuristic Time", "Model Construction Time", "Warmstart Selection Time"
 ]
 expected_header = ",".join(header_cols)
 write_header = args.header_line or not os.path.exists(result_csv_file) or os.path.getsize(result_csv_file) == 0
@@ -393,12 +416,9 @@ f.close()  # we want to open and close the file anyway just to make sure that th
 req_count = 0
 last_start_sol = 0
 last_progress_served = -1
+last_progress_time = -1
 previous_solver_solution = None
 previous_target_loads = None
-
-print(f"Running {os.path.basename(__file__)}")
-for arg_name, arg_value in sorted(vars(args).items()):
-    print(f"  {arg_name} = {arg_value}")
 
 log_message(f"\n{time.ctime()} :Instance {Lx}x{Ly}, O={O}, E={E}\n")
 
@@ -450,7 +470,7 @@ def collect_visible_requests(cutoff_time):
 
 def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
     """Plan greedy moves for the next epoch from the current state."""
-    global cpu_time, NumberOfMovements, heuristic_sol, actual_max_balls
+    global heuristic_cpu_time, NumberOfMovements, heuristic_sol, actual_max_balls
 
     actual_max_balls = max(actual_max_balls, len(candidate_loads))
     for load_id in candidate_loads:
@@ -469,7 +489,7 @@ def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
         )
         moves[start_time + i] = one_step_move
         NumberOfMovements += len(one_step_move)
-    cpu_time += time.perf_counter() - heuristic_start_time
+    heuristic_cpu_time += time.perf_counter() - heuristic_start_time
     heuristic_sol += 1
     return list(A.keys()), list(E)
 
@@ -491,9 +511,15 @@ def is_usable_model_solution(model_result, old_A, old_E):
 
 while True:
     served_requests = req_count - len(open_requests)
-    if served_requests != last_progress_served:
-        print_progress(served_requests, number_of_requests)
+    if served_requests != last_progress_served or curr_t != last_progress_time:
+        print_progress(
+            served_requests,
+            number_of_requests,
+            curr_t,
+            time.perf_counter() - simulation_wall_start,
+        )
         last_progress_served = served_requests
+        last_progress_time = curr_t
 
     if args.log:
         log_message(f"Time: {curr_t}: \n")
@@ -567,9 +593,14 @@ while True:
                 old_A, old_E = copy.copy(A), copy.copy(E)
                 actual_max_balls = max(actual_max_balls, len(A))
                 sim_iter += 1
-                warmstart_vector = solver.select_warmstart_vector(
-                    A, E, target_loads, previous_solver_solution, previous_target_loads
-                )
+                if args.warmstart_mode != "none":
+                    warmstart_start_time = time.perf_counter()
+                    warmstart_vector = solver.select_warmstart_vector(
+                        A, E, target_loads, previous_solver_solution, previous_target_loads
+                    )
+                    warmstart_cpu_time += time.perf_counter() - warmstart_start_time
+                else:
+                    warmstart_vector = None
                 model_result = solver.run_model(A, E, warmstart_vector=warmstart_vector)
                 if model_result["warmstart_outcome"] == "feasible":
                     warmstart_feasible += 1
@@ -578,9 +609,11 @@ while True:
                 elif model_result["warmstart_outcome"] == "failed":
                     warmstart_failed += 1
                 A, E = model_result["A"], model_result["E"]
-                cpu_time_iter = model_result["cpu_time_iter"]
+                solver_time_iter = model_result["solver_time_iter"]
+                model_construction_time_iter = model_result["model_construction_time_iter"]
                 ilp_gap = model_result["ilp_gap"]
-                cpu_time += cpu_time_iter
+                solver_cpu_time += solver_time_iter
+                model_construction_cpu_time += model_construction_time_iter
                 if model_result["warmstart_log_excerpt"]:
                     log_message(
                         f"\twarmstart[{model_result['warmstart_source']}] {model_result['warmstart_outcome']}: "
@@ -590,7 +623,8 @@ while True:
                 log_message(
                     f"\tfinish running gurobi, iteration {sim_iter}, status:{model_result['solver_status_name']} LB={model_result['lb_rh']}, ob={model_result['obj_rh']} "
                     f"flowtime={len(A) * args.epoch + model_result['flowtime_rh']}, open requests: {open_requests}\n"
-                    f"{'****** ' if model_result['solver_status'] == GRB.TIME_LIMIT and not model_result['is_optimal_with_tolerance'] else ''} cpu_time={cpu_time_iter:.2f} "
+                    f"{'****** ' if model_result['solver_status'] == GRB.TIME_LIMIT and not model_result['is_optimal_with_tolerance'] else ''} "
+                    f"solver_time={solver_time_iter:.2f} model_construction_time={model_construction_time_iter:.2f} "
                     f"Gap={100 * model_result['ilp_gap']:.4f}%\n")
 
                 use_model_solution, unusable_reason = is_usable_model_solution(model_result, old_A, old_E)
@@ -648,7 +682,12 @@ while True:
                 requests_on_load[leaving_load] = []
 
     if curr_t > arrivals[-1] and not open_requests:
-        print_progress(number_of_requests, number_of_requests)
+        print_progress(
+            number_of_requests,
+            number_of_requests,
+            curr_t,
+            time.perf_counter() - simulation_wall_start,
+        )
         log_message(
             "Simulation end\n",
             f"Total lead time: {total_lead_time}\n",
@@ -731,6 +770,7 @@ if alg_name == "":
 f = open(result_csv_file, 'a')
 script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
 machine_name = f"{socket.gethostname()}-T{args.num_threads}"
+cpu_time = solver_cpu_time + heuristic_cpu_time + model_construction_cpu_time + warmstart_cpu_time
 row_vals = [
     machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
     fallback_heuristic_sol, hybrid_heuristic_sol,
@@ -752,6 +792,8 @@ row_vals = [
     excess_stats["obs_deleted"], excess_stats["obs_used"], excess_stats["batch_size"], excess_stats["num_batches"],
     excess_stats["lag1_autocorr"], excess_stats["lag1_threshold"], excess_stats["batch_means_variance"],
     sim_log_file, pickle_file_name,
+    f"{solver_cpu_time:.2f}", f"{heuristic_cpu_time:.2f}",
+    f"{model_construction_cpu_time:.2f}", f"{warmstart_cpu_time:.2f}",
 ]
 f.write(",".join(CI_Calculation.csv_cell(v) for v in row_vals) + "\n")
 f.close()
