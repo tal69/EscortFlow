@@ -65,7 +65,7 @@ def log_message(*messages, echo_to_screen=False):
             log_file.write(message)
 
 parser = argparse.ArgumentParser()
-default_num_threads = 8 if sys.platform == "darwin" else 0
+default_num_threads = 8 if sys.platform == "darwin" else 12 if sys.platform.startswith("linux") else 0
 
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
@@ -85,7 +85,7 @@ parser.add_argument("--time_penalty", type=float,
                     default=1)
 parser.add_argument("--num_threads", type=int,
                     help=f"Number of threads to be used by the MIP solver. 0 means use machine default (default {default_num_threads})", default=default_num_threads)
-# On macOS, 8 threads is a safer default than the machine-wide CPLEX default.
+# Default to 8 threads on macOS and 12 on Linux.
 
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)

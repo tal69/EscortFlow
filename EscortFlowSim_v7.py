@@ -39,15 +39,14 @@ import sys
 import socket
 import numpy as np
 import argparse
-import gurobipy as gp
 from gurobipy import GRB
 
 import OneStepHeuristic_v2
 from PBSCom import *
 import CI_Calculation
+from escort_flow_gurobi import RollingHorizonGurobiSolver, SolverConfig
 
 sim_log_file = ""
-OPTIMALITY_TOLERANCE = 1e-4  # 0.01%
 
 
 def log_message(*messages, echo_to_screen=False):
@@ -73,8 +72,53 @@ def print_progress(current, total):
     if current >= total:
         print("")
 
+
+def parse_warmstart_spec(tokens, parser_obj):
+    """Parse the --warmstart token list into a mode and zero-fill flag."""
+    if tokens is None:
+        return "none", False
+
+    zero_fill = False
+    mode_tokens = []
+    seen_modes = set()
+    for raw_token in tokens:
+        token = raw_token.lower()
+        if token in {"zero", "zeros"}:
+            if zero_fill:
+                parser_obj.error("--warmstart accepts at most one zero/zeros token")
+            zero_fill = True
+            continue
+        if token not in {"greedy", "ilp"}:
+            parser_obj.error(
+                "--warmstart accepts only greedy, ilp, and optional zero/zeros tokens"
+            )
+        if token in seen_modes:
+            parser_obj.error(f"--warmstart token '{token}' was provided more than once")
+        seen_modes.add(token)
+        mode_tokens.append(token)
+
+    if mode_tokens == ["greedy"]:
+        return "greedy", zero_fill
+    if mode_tokens == ["ilp"]:
+        return "ilp", zero_fill
+    if len(mode_tokens) == 2 and set(mode_tokens) == {"greedy", "ilp"}:
+        return "ilp-greedy", zero_fill
+
+    parser_obj.error(
+        "--warmstart must be one of: greedy, ilp, or ilp greedy; optionally add zero/zeros"
+    )
+
+
+def warmstart_label(mode, zero_fill):
+    if mode == "none":
+        return "none"
+    return f"{mode}-zero" if zero_fill else mode
+
+
 parser = argparse.ArgumentParser()
-default_num_threads = 8
+default_num_threads = 8 if sys.platform == "darwin" else 12 if sys.platform.startswith("linux") else 8
+# This is based on trial an error on machines: Mac Studio M3 Ultra and AMD Ryzen 9 5950X running with Linux.
+# To "optimize" performance fine tune the --num_threads CLI argument on yours
 
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
@@ -94,7 +138,7 @@ parser.add_argument("--time_penalty", type=float,
                     default=1)
 parser.add_argument("--num_threads", type=int,
                     help=f"Number of threads to be used by the MIP solver. 0 means use machine default (default {default_num_threads})", default=default_num_threads)
-# On macOS, 8 threads is a safer default than the machine-wide solver default.
+# Default to 8 threads on macOS and 12 on Linux.
 
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)
@@ -102,7 +146,7 @@ parser.add_argument("-T", "--fractional_horizon", type=int,
                     help="Number of fractional periods in model (default: max(--epoch + 4, --integer_horizon))",
                     default=None)
 parser.add_argument("-I", "--integer_horizon", type=int,
-                    help="Number of periods in the planning horizon represented by boolean variables (default: --epoch)",
+                    help="Number of periods in the planning horizon represented by boolean variables (default: --epoch, or --fractional_horizon when --warmstart is used)",
                     default=None)
 parser.add_argument("-E", "--epoch", type=int,
                     help="Number of periods in the execution epoch (default 1)",
@@ -135,8 +179,8 @@ parser.add_argument("-H", "--header_line", action="store_true",
                     help="Print header line in result csv file; a new or empty file gets a header automatically")
 parser.add_argument("-a", "--save_raw", action="store_true",
                     help="Save the raw pickle trace used by CI_Calculation.py and PBSAnimation.py")
-parser.add_argument("--warmstart", action="store_true",
-                    help="Warm start Gurobi from the previous epoch solution when possible; otherwise use a greedy warm start")
+parser.add_argument("--warmstart", nargs="+",
+                    help="Warm start Gurobi with one vector: use 'greedy', 'ilp', or 'ilp greedy'; optionally add 'zero' or 'zeros' to set all unspecified arc variables to 0")
 parser.add_argument("-M", "--max_balls_in_air", type=int,
                     help="Maximum number of target loads that are considered concurrently; if omitted, all cells are eligible",
                     default=None)
@@ -147,9 +191,17 @@ parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
 
 
 args = parser.parse_args()
+args.warmstart_mode, args.warmstart_zero_fill = parse_warmstart_spec(args.warmstart, parser)
+args.warmstart_label = warmstart_label(args.warmstart_mode, args.warmstart_zero_fill)
+args.mip_focus = 2 if args.warmstart_mode != "none" else 0
 
 if args.integer_horizon is None:
-    args.integer_horizon = args.epoch
+    if args.warmstart_mode != "none":
+        if args.fractional_horizon is None:
+            args.fractional_horizon = args.epoch + 4
+        args.integer_horizon = args.fractional_horizon
+    else:
+        args.integer_horizon = args.epoch
 if args.time_limit is None:
     args.time_limit = args.epoch
 if args.fractional_horizon is None:
@@ -161,6 +213,8 @@ if args.fractional_horizon < args.integer_horizon:
     parser.error("--fractional_horizon must be at least --integer_horizon")
 if args.greedy and args.epoch != 1:
     parser.error("--greedy requires --epoch == 1")
+if args.greedy and args.warmstart_mode != "none":
+    parser.error("--warmstart cannot be combined with --greedy")
 if args.greedy and args.full:
     parser.error("--greedy cannot be combined with --full")
 if args.greedy and args.hybrid:
@@ -171,6 +225,8 @@ if args.offline and args.hybrid:
     parser.error("--offline cannot be combined with --hybrid")
 if args.hybrid_ratio <= 0:
     parser.error("--hybrid_ratio must be positive. Use --greedy to run the heuristic at every step")
+if args.warmstart_mode != "none" and args.integer_horizon < args.fractional_horizon:
+    parser.error("--warmstart requires an all-integer model, so --integer_horizon must equal --fractional_horizon")
 
 result_csv_file = args.csv
 csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"
@@ -248,7 +304,9 @@ non_optimal = 0
 heuristic_sol = 0
 fallback_heuristic_sol = 0
 hybrid_heuristic_sol = 0
-successful_warmstarts = 0
+warmstart_feasible = 0
+warmstart_repaired = 0
+warmstart_failed = 0
 sim_iter = 0
 NumberOfMovements = 0
 idle_takt = 0
@@ -298,7 +356,8 @@ orig_distance = np.zeros(number_of_requests, dtype=np.int32)  # the distance of 
 
 header_cols = [
     "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs",
-    "Fallback Greedy Runs", "Hybrid-Ratio Greedy Runs", "Successful Warmstarts",
+    "Fallback Greedy Runs", "Hybrid-Ratio Greedy Runs",
+    "Warmstart Mechanism", "Warmstart Feasible", "Warmstart Repaired", "Warmstart Failed",
     "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
     "Number of outputs", "Number of Escorts", "Number of Requests", "Simulation End Time",
     "Fractional Horizon", "Integer Horizon", "Epoch", "Time Limit", "Max Balls In Air",
@@ -335,7 +394,7 @@ req_count = 0
 last_start_sol = 0
 last_progress_served = -1
 previous_solver_solution = None
-warmstart_force_greedy = True
+previous_target_loads = None
 
 print(f"Running {os.path.basename(__file__)}")
 for arg_name, arg_value in sorted(vars(args).items()):
@@ -345,7 +404,27 @@ log_message(f"\n{time.ctime()} :Instance {Lx}x{Ly}, O={O}, E={E}\n")
 
 open_requests = []
 
-dist_map = OneStepHeuristic_v2.build_dist_map(Lx, Ly, O)  # for the greedy heuristic
+solver = RollingHorizonGurobiSolver(
+    SolverConfig(
+        Lx=Lx,
+        Ly=Ly,
+        output_cells=tuple(O),
+        distance_penalty=args.distance_penalty,
+        time_penalty=args.time_penalty,
+        gamma=gamma,
+        full=args.full,
+        acyclic=args.acyclic,
+        fractional_horizon=args.fractional_horizon,
+        integer_horizon=args.integer_horizon,
+        epoch=args.epoch,
+        time_limit=time_limit,
+        num_threads=args.num_threads,
+        mip_focus=args.mip_focus,
+        warmstart_mode=args.warmstart_mode,
+        warmstart_zero_fill=args.warmstart_zero_fill,
+    )
+)
+dist_map = solver.dist_map
 
 
 def collect_target_loads(cutoff_time):
@@ -367,127 +446,6 @@ def collect_target_loads(cutoff_time):
 def collect_visible_requests(cutoff_time):
     """Return open requests visible by `cutoff_time`."""
     return [r for r in open_requests if arrivals[r] <= cutoff_time]
-
-
-def build_gurobi_network():
-    locations = list(Locations)
-    output_set = set(O)
-    not_outputs = [loc for loc in locations if loc not in output_set]
-
-    na = {loc: [loc] for loc in locations}
-    ne = {loc: [] for loc in locations}
-    moves_a = []
-    moves_e = []
-    move_cost_e = {}
-    outgoing_a = {loc: [] for loc in locations}
-    incoming_a = {loc: [] for loc in locations}
-    outgoing_e = {loc: [] for loc in locations}
-    incoming_e = {loc: [] for loc in locations}
-    stay_move = {}
-
-    location_penalty = {
-        loc: args.time_penalty + (Lx + Ly + 1) * args.distance_penalty
-        for loc in locations
-    }
-    for loc in locations:
-        for output in O:
-            distance = abs(output[0] - loc[0]) + abs(output[1] - loc[1])
-            location_penalty[loc] = min(
-                location_penalty[loc],
-                args.time_penalty + args.distance_penalty * distance,
-            )
-        if loc in output_set:
-            location_penalty[loc] = 0
-
-    for x, y in locations:
-        move = (x, y, x, y)
-        moves_a.append(move)
-        outgoing_a[(x, y)].append(move)
-        incoming_a[(x, y)].append(move)
-        stay_move[(x, y)] = move
-
-        if x < Lx - 1:
-            move = (x, y, x + 1, y)
-            na[(x, y)].append((x + 1, y))
-            moves_a.append(move)
-            outgoing_a[(x, y)].append(move)
-            incoming_a[(x + 1, y)].append(move)
-        if y < Ly - 1:
-            move = (x, y, x, y + 1)
-            na[(x, y)].append((x, y + 1))
-            moves_a.append(move)
-            outgoing_a[(x, y)].append(move)
-            incoming_a[(x, y + 1)].append(move)
-        if x > 0:
-            move = (x, y, x - 1, y)
-            na[(x, y)].append((x - 1, y))
-            moves_a.append(move)
-            outgoing_a[(x, y)].append(move)
-            incoming_a[(x - 1, y)].append(move)
-        if y > 0:
-            move = (x, y, x, y - 1)
-            na[(x, y)].append((x, y - 1))
-            moves_a.append(move)
-            outgoing_a[(x, y)].append(move)
-            incoming_a[(x, y - 1)].append(move)
-
-        for x1 in range(Lx):
-            move = (x, y, x1, y)
-            ne[(x, y)].append((x1, y))
-            moves_e.append(move)
-            move_cost_e[move] = abs(x - x1)
-            outgoing_e[(x, y)].append(move)
-            incoming_e[(x1, y)].append(move)
-        for y1 in range(Ly):
-            if y1 == y:
-                continue
-            move = (x, y, x, y1)
-            ne[(x, y)].append((x, y1))
-            moves_e.append(move)
-            move_cost_e[move] = abs(y - y1)
-            outgoing_e[(x, y)].append(move)
-            incoming_e[(x, y1)].append(move)
-
-    cell_cover = {loc: [] for loc in locations}
-    move_cover = {move: [] for move in moves_a}
-    for move in moves_e:
-        orig_x, orig_y, dest_x, dest_y = move
-        if orig_y == dest_y:
-            for x in range(min(orig_x, dest_x), max(orig_x, dest_x) + 1):
-                cell_cover[(x, orig_y)].append(move)
-            for x in range(orig_x, dest_x):
-                move_cover[(x + 1, orig_y, x, orig_y)].append(move)
-            for x in range(orig_x, dest_x, -1):
-                move_cover[(x - 1, orig_y, x, orig_y)].append(move)
-        else:
-            for y in range(min(orig_y, dest_y), max(orig_y, dest_y) + 1):
-                cell_cover[(orig_x, y)].append(move)
-            for y in range(orig_y, dest_y):
-                move_cover[(orig_x, y + 1, orig_x, y)].append(move)
-            for y in range(orig_y, dest_y, -1):
-                move_cover[(orig_x, y - 1, orig_x, y)].append(move)
-
-    return {
-        "locations": locations,
-        "output_set": output_set,
-        "not_outputs": not_outputs,
-        "na": na,
-        "ne": ne,
-        "moves_a": moves_a,
-        "moves_e": moves_e,
-        "move_cost_e": move_cost_e,
-        "outgoing_a": outgoing_a,
-        "incoming_a": incoming_a,
-        "outgoing_e": outgoing_e,
-        "incoming_e": incoming_e,
-        "cell_cover": cell_cover,
-        "move_cover": move_cover,
-        "stay_move": stay_move,
-        "location_penalty": location_penalty,
-    }
-
-
-NETWORK = build_gurobi_network()
 
 
 def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
@@ -514,403 +472,6 @@ def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
     cpu_time += time.perf_counter() - heuristic_start_time
     heuristic_sol += 1
     return list(A.keys()), list(E)
-
-
-def gurobi_status_name(status_code):
-    status_names = {
-        GRB.LOADED: "LOADED",
-        GRB.OPTIMAL: "OPTIMAL",
-        GRB.INFEASIBLE: "INFEASIBLE",
-        GRB.INF_OR_UNBD: "INF_OR_UNBD",
-        GRB.UNBOUNDED: "UNBOUNDED",
-        GRB.CUTOFF: "CUTOFF",
-        GRB.ITERATION_LIMIT: "ITERATION_LIMIT",
-        GRB.NODE_LIMIT: "NODE_LIMIT",
-        GRB.TIME_LIMIT: "TIME_LIMIT",
-        GRB.SOLUTION_LIMIT: "SOLUTION_LIMIT",
-        GRB.INTERRUPTED: "INTERRUPTED",
-        GRB.NUMERIC: "NUMERIC",
-        GRB.SUBOPTIMAL: "SUBOPTIMAL",
-        GRB.INPROGRESS: "INPROGRESS",
-        GRB.USER_OBJ_LIMIT: "USER_OBJ_LIMIT",
-        GRB.WORK_LIMIT: "WORK_LIMIT",
-        GRB.MEM_LIMIT: "MEM_LIMIT",
-    }
-    return status_names.get(status_code, str(status_code))
-
-
-def extract_planned_moves(x_e_vars):
-    planned_moves = []
-    for t in range(args.epoch):
-        one_step_moves = []
-        for move in NETWORK["moves_e"]:
-            if x_e_vars[(move, t)].X <= 0.99:
-                continue
-            orig_x, orig_y, dest_x, dest_y = move
-            if orig_x == dest_x and orig_y == dest_y:
-                continue
-
-            if dest_x < orig_x:
-                for x in range(dest_x, orig_x):
-                    one_step_moves.append(((x, dest_y), (x + 1, orig_y)))
-            elif dest_x > orig_x:
-                for x in range(orig_x, dest_x):
-                    one_step_moves.append(((x + 1, dest_y), (x, orig_y)))
-            elif dest_y < orig_y:
-                for y in range(dest_y, orig_y):
-                    one_step_moves.append(((dest_x, y), (orig_x, y + 1)))
-            elif dest_y > orig_y:
-                for y in range(orig_y, dest_y):
-                    one_step_moves.append(((dest_x, y + 1), (orig_x, y)))
-
-        planned_moves.append(one_step_moves)
-    return planned_moves
-
-
-def infer_escort_moves_from_step_moves(step_moves):
-    """Reconstruct escort moves from the realized one-step load movements."""
-    if not step_moves:
-        return []
-
-    escort_moves = []
-    buckets = {}
-    for src, dst in step_moves:
-        if src[1] == dst[1]:
-            direction = dst[0] - src[0]
-            buckets.setdefault(("h", src[1], direction), []).append((src, dst))
-        else:
-            direction = dst[1] - src[1]
-            buckets.setdefault(("v", src[0], direction), []).append((src, dst))
-
-    for (axis, line, direction), bucket_moves in buckets.items():
-        if axis == "h" and direction == -1:  # loads move left, escort moves right
-            ordered = sorted(bucket_moves, key=lambda mv: mv[1][0])
-            chains = []
-            chain = [ordered[0]]
-            for mv in ordered[1:]:
-                if mv[1][0] == chain[-1][1][0] + 1:
-                    chain.append(mv)
-                else:
-                    chains.append(chain)
-                    chain = [mv]
-            chains.append(chain)
-            for chain in chains:
-                escort_moves.append((chain[0][1][0], line, chain[-1][0][0], line))
-
-        elif axis == "h" and direction == 1:  # loads move right, escort moves left
-            ordered = sorted(bucket_moves, key=lambda mv: mv[0][0])
-            chains = []
-            chain = [ordered[0]]
-            for mv in ordered[1:]:
-                if mv[0][0] == chain[-1][0][0] + 1:
-                    chain.append(mv)
-                else:
-                    chains.append(chain)
-                    chain = [mv]
-            chains.append(chain)
-            for chain in chains:
-                escort_moves.append((chain[-1][1][0], line, chain[0][0][0], line))
-
-        elif axis == "v" and direction == -1:  # loads move down, escort moves up
-            ordered = sorted(bucket_moves, key=lambda mv: mv[1][1])
-            chains = []
-            chain = [ordered[0]]
-            for mv in ordered[1:]:
-                if mv[1][1] == chain[-1][1][1] + 1:
-                    chain.append(mv)
-                else:
-                    chains.append(chain)
-                    chain = [mv]
-            chains.append(chain)
-            for chain in chains:
-                escort_moves.append((line, chain[0][1][1], line, chain[-1][0][1]))
-
-        elif axis == "v" and direction == 1:  # loads move up, escort moves down
-            ordered = sorted(bucket_moves, key=lambda mv: mv[0][1])
-            chains = []
-            chain = [ordered[0]]
-            for mv in ordered[1:]:
-                if mv[0][1] == chain[-1][0][1] + 1:
-                    chain.append(mv)
-                else:
-                    chains.append(chain)
-                    chain = [mv]
-            chains.append(chain)
-            for chain in chains:
-                escort_moves.append((line, chain[-1][1][1], line, chain[0][0][1]))
-
-    return escort_moves
-
-
-def build_greedy_warmstart(target_positions, escort_positions):
-    """Build a full-horizon warm start from the greedy heuristic."""
-    start_values = {}
-    A_state = {loc: idx for idx, loc in enumerate(sorted(target_positions), start=1)}
-    E_state = set(escort_positions)
-
-    for t in range(args.fractional_horizon + 1):
-        if A_state:
-            A_next, E_next, step_moves = OneStepHeuristic_v2.OneStep(
-                Lx, Ly, set(O), A_state, set(E_state), dist_map, acyclic=args.acyclic
-            )
-        else:
-            A_next, E_next, step_moves = {}, set(E_state), []
-
-        escort_moves = infer_escort_moves_from_step_moves(step_moves)
-        moved_escort_origins = {(move[0], move[1]) for move in escort_moves}
-        for move in escort_moves:
-            start_values[("e", move, t)] = 1.0
-        for escort in E_state:
-            if escort not in moved_escort_origins:
-                start_values[("e", (escort[0], escort[1], escort[0], escort[1]), t)] = 1.0
-
-        next_loc_by_target_id = {target_id: loc for loc, target_id in A_next.items()}
-        for orig_loc, target_id in A_state.items():
-            next_loc = next_loc_by_target_id.get(target_id, orig_loc)
-            start_values[("a", (orig_loc[0], orig_loc[1], next_loc[0], next_loc[1]), t)] = 1.0
-
-        A_state = A_next
-        E_state = E_next
-
-    return start_values
-
-
-def add_shifted_start_value(start_values, key_prefix, move, new_t, value):
-    if args.full or new_t <= args.integer_horizon:
-        if value >= 0.99:
-            start_values[(key_prefix, move, new_t)] = 1.0
-    elif value > 1e-9:
-        start_values[(key_prefix, move, new_t)] = float(value)
-
-
-def build_shifted_previous_start(previous_solution):
-    """Shift the previous solver solution forward by one executed epoch."""
-    start_values = {}
-    for (move, old_t), value in previous_solution["x_a"].items():
-        if old_t < args.epoch:
-            continue
-        add_shifted_start_value(start_values, "a", move, old_t - args.epoch, value)
-    for (move, old_t), value in previous_solution["x_e"].items():
-        if old_t < args.epoch:
-            continue
-        add_shifted_start_value(start_values, "e", move, old_t - args.epoch, value)
-    return start_values
-
-
-def merge_shifted_with_greedy_tail(shifted_start, greedy_start):
-    """Fill the new tail periods with greedy values when there is no shifted value."""
-    tail_start = max(0, args.fractional_horizon - args.epoch + 1)
-    merged = dict(shifted_start)
-    for key, value in greedy_start.items():
-        _, _, t = key
-        if t >= tail_start and key not in merged:
-            merged[key] = value
-    return merged
-
-
-def apply_warmstart_vectors(model, x_a, x_e, start_vectors):
-    """Attach one or more MIP starts to the Gurobi model."""
-    if not start_vectors:
-        return 0
-
-    model.NumStart = len(start_vectors)
-    populated_starts = 0
-    for start_number, start_values in enumerate(start_vectors):
-        if not start_values:
-            continue
-        model.Params.StartNumber = start_number
-        for (kind, move, t), value in start_values.items():
-            if kind == "a":
-                x_a[(move, t)].Start = value
-            else:
-                x_e[(move, t)].Start = value
-        populated_starts += 1
-    model.Params.StartNumber = 0
-    return populated_starts
-
-
-def run_gurobi_model(target_positions, escort_positions, start_vectors=None):
-    """Solve the current rolling-horizon model directly in Gurobi."""
-    model = gp.Model("escort_flow_rh_v7")
-    model.Params.OutputFlag = 0
-    model.Params.TimeLimit = time_limit
-    model.Params.MIPGap = OPTIMALITY_TOLERANCE
-    model.Params.MIPFocus = 1
-    if args.num_threads > 0:
-        model.Params.Threads = args.num_threads
-
-    T = args.fractional_horizon
-    T_exec = args.epoch
-    output_set = NETWORK["output_set"]
-    target_set = set(target_positions)
-    escort_set = set(escort_positions)
-    loads_to_retrieve = len(target_set - output_set)
-
-    x_a = {}
-    x_e = {}
-    for t in range(T + 1):
-        a_vtype = GRB.BINARY if args.full or t <= args.integer_horizon else GRB.CONTINUOUS
-        e_vtype = GRB.BINARY if args.full or t <= args.integer_horizon else GRB.CONTINUOUS
-        for move in NETWORK["moves_a"]:
-            x_a[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=a_vtype)
-        for move in NETWORK["moves_e"]:
-            x_e[(move, t)] = model.addVar(lb=0.0, ub=1.0, vtype=e_vtype)
-
-    q = None
-    if args.full:
-        q = {output: model.addVar(lb=0.0, vtype=GRB.INTEGER) for output in O}
-
-    model.update()
-    populated_warmstarts = 0
-    if args.warmstart:
-        populated_warmstarts = apply_warmstart_vectors(model, x_a, x_e, start_vectors or [])
-
-    movement_term = gp.quicksum(
-        NETWORK["move_cost_e"][move] * x_e[(move, t)]
-        for move in NETWORK["moves_e"]
-        for t in range(T + 1)
-    )
-    if args.full:
-        model.setObjective(gp.quicksum(q[output] for output in O) + gamma * movement_term, GRB.MINIMIZE)
-    else:
-        surrogate_term = gp.quicksum(
-            NETWORK["location_penalty"][(move[2], move[3])] * x_a[(move, t)]
-            for move in NETWORK["moves_a"]
-            for t in range(T + 1)
-        )
-        model.setObjective(gamma * movement_term + surrogate_term, GRB.MINIMIZE)
-
-    for t in range(1, T + 1):
-        for loc in NETWORK["locations"]:
-            model.addConstr(
-                gp.quicksum(x_e[(move, t - 1)] for move in NETWORK["incoming_e"][loc]) ==
-                gp.quicksum(x_e[(move, t)] for move in NETWORK["outgoing_e"][loc])
-            )
-        for loc in NETWORK["not_outputs"]:
-            model.addConstr(
-                gp.quicksum(x_a[(move, t - 1)] for move in NETWORK["incoming_a"][loc]) ==
-                gp.quicksum(x_a[(move, t)] for move in NETWORK["outgoing_a"][loc])
-            )
-
-    for output in O:
-        nonstay_output_moves = [
-            move for move in NETWORK["outgoing_a"][output]
-            if (move[0], move[1]) != (move[2], move[3])
-        ]
-        for t in range(T + 1):
-            model.addConstr(gp.quicksum(x_a[(move, t)] for move in nonstay_output_moves) == 0)
-
-    for loc in NETWORK["locations"]:
-        supply_a = 1 if loc in target_set else 0
-        supply_e = 1 if loc in escort_set else 0
-        model.addConstr(gp.quicksum(x_a[(move, 0)] for move in NETWORK["outgoing_a"][loc]) == supply_a)
-        model.addConstr(gp.quicksum(x_e[(move, 0)] for move in NETWORK["outgoing_e"][loc]) == supply_e)
-
-    for loc in NETWORK["locations"]:
-        stay_move = NETWORK["stay_move"][loc]
-        nonstay_target_moves = [
-            move for move in NETWORK["outgoing_a"][loc]
-            if move != stay_move
-        ]
-        for t in range(T + 1):
-            model.addConstr(
-                gp.quicksum(x_a[(move, t)] for move in NETWORK["outgoing_a"][loc]) +
-                gp.quicksum(x_e[(move, t)] for move in NETWORK["outgoing_e"][loc]) <= 1
-            )
-            model.addConstr(gp.quicksum(x_e[(move, t)] for move in NETWORK["cell_cover"][loc]) <= 1)
-            model.addConstr(
-                1 - x_a[(stay_move, t)] >= gp.quicksum(x_e[(move, t)] for move in NETWORK["cell_cover"][loc])
-            )
-            for move in nonstay_target_moves:
-                model.addConstr(
-                    x_a[(move, t)] <= gp.quicksum(x_e[(escort_move, t)] for escort_move in NETWORK["move_cover"][move])
-                )
-
-    if args.full:
-        arrival_moves_to_outputs = [
-            move for move in NETWORK["moves_a"]
-            if (move[2], move[3]) in output_set and (move[0], move[1]) != (move[2], move[3])
-        ]
-        model.addConstr(
-            gp.quicksum(x_a[(move, t)] for move in arrival_moves_to_outputs for t in range(T + 1)) == loads_to_retrieve
-        )
-        for output in O:
-            incoming_output_moves = [
-                move for move in NETWORK["incoming_a"][output]
-                if (move[0], move[1]) != (move[2], move[3])
-            ]
-            model.addConstr(
-                gp.quicksum((t + 1) * x_a[(move, t)] for move in incoming_output_moves for t in range(T + 1)) == q[output]
-            )
-
-    model.optimize()
-
-    status_code = model.Status
-    result = {
-        "A": [],
-        "E": [],
-        "solver_status": status_code,
-        "solver_status_name": gurobi_status_name(status_code),
-        "sol_count": model.SolCount,
-        "cpu_time_iter": model.Runtime,
-        "makespan_rh": 0,
-        "flowtime_rh": 0,
-        "NumberOfMovements_rh": 0,
-        "obj_rh": 0.0,
-        "lb_rh": 0.0,
-        "planned_moves": [],
-        "ilp_gap": 1.0,
-        "is_optimal_with_tolerance": False,
-        "solution_snapshot": None,
-        "warmstart_applied": populated_warmstarts > 0,
-    }
-
-    if model.SolCount <= 0:
-        return result
-
-    result["A"] = [
-        (move[0], move[1]) for move in NETWORK["moves_a"] if x_a[(move, T_exec)].X > 0.99
-    ]
-    result["E"] = [
-        (move[0], move[1]) for move in NETWORK["moves_e"] if x_e[(move, T_exec)].X > 0.99
-    ]
-    result["planned_moves"] = extract_planned_moves(x_e)
-    result["NumberOfMovements_rh"] = round(sum(
-        NETWORK["move_cost_e"][move] * x_e[(move, t)].X
-        for move in NETWORK["moves_e"]
-        for t in range(T_exec)
-    ))
-    result["makespan_rh"] = round(max(
-        [(t + 1) * x_a[(move, t)].X for move in NETWORK["moves_a"] for t in range(T_exec) if (move[0], move[1]) not in output_set] or [0]
-    ))
-    result["flowtime_rh"] = round(sum(
-        (t + 1) * x_a[(move, t)].X
-        for move in NETWORK["moves_a"]
-        for t in range(T_exec)
-        if (move[2], move[3]) in output_set and (move[0], move[1]) != (move[2], move[3])
-    ))
-    result["obj_rh"] = model.ObjVal
-    result["lb_rh"] = model.ObjBound
-    result["ilp_gap"] = model.MIPGap if model.IsMIP else 0.0
-    result["is_optimal_with_tolerance"] = (
-        result["solver_status"] == GRB.OPTIMAL or result["ilp_gap"] <= OPTIMALITY_TOLERANCE
-    )
-    if args.warmstart:
-        result["solution_snapshot"] = {
-            "x_a": {
-                (move, t): x_a[(move, t)].X
-                for move in NETWORK["moves_a"]
-                for t in range(T + 1)
-                if x_a[(move, t)].X > 1e-9
-            },
-            "x_e": {
-                (move, t): x_e[(move, t)].X
-                for move in NETWORK["moves_e"]
-                for t in range(T + 1)
-                if x_e[(move, t)].X > 1e-9
-            },
-        }
-    return result
 
 
 def is_usable_model_solution(model_result, old_A, old_E):
@@ -964,8 +525,8 @@ while True:
     if not open_requests:
         log_message(f"    Skipping an idle takt @ {curr_t}\n")
         idle_takt += 1
-        warmstart_force_greedy = True
         previous_solver_solution = None
+        previous_target_loads = None
 
     elif curr_t % args.epoch == 0:
         E = set(Locations) - set(load_loc.values())
@@ -980,8 +541,8 @@ while True:
         if args.greedy:
             if current_time_target_loads:
                 schedule_greedy_epoch(curr_t, current_time_target_loads, E)
-                warmstart_force_greedy = True
                 previous_solver_solution = None
+                previous_target_loads = None
         elif hybrid_ratio_active:
             if current_time_target_loads:
                 log_message(
@@ -989,8 +550,8 @@ while True:
                 )
                 greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, E)
                 hybrid_heuristic_sol += 1
-                warmstart_force_greedy = True
                 previous_solver_solution = None
+                previous_target_loads = None
                 log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
         else:  # run the ILP model
@@ -1006,27 +567,25 @@ while True:
                 old_A, old_E = copy.copy(A), copy.copy(E)
                 actual_max_balls = max(actual_max_balls, len(A))
                 sim_iter += 1
-                start_vectors = []
-                if args.warmstart:
-                    greedy_start = build_greedy_warmstart(A, E)
-                    if warmstart_force_greedy or previous_solver_solution is None:
-                        if greedy_start:
-                            start_vectors = [greedy_start]
-                    else:
-                        shifted_start = build_shifted_previous_start(previous_solver_solution)
-                        merged_start = merge_shifted_with_greedy_tail(shifted_start, greedy_start)
-                        if merged_start:
-                            start_vectors.append(merged_start)
-                        if greedy_start:
-                            start_vectors.append(greedy_start)
-
-                model_result = run_gurobi_model(A, E, start_vectors=start_vectors)
-                if args.warmstart and model_result["warmstart_applied"] and model_result["sol_count"] > 0:
-                    successful_warmstarts += 1
+                warmstart_vector = solver.select_warmstart_vector(
+                    A, E, target_loads, previous_solver_solution, previous_target_loads
+                )
+                model_result = solver.run_model(A, E, warmstart_vector=warmstart_vector)
+                if model_result["warmstart_outcome"] == "feasible":
+                    warmstart_feasible += 1
+                elif model_result["warmstart_outcome"] == "repaired":
+                    warmstart_repaired += 1
+                elif model_result["warmstart_outcome"] == "failed":
+                    warmstart_failed += 1
                 A, E = model_result["A"], model_result["E"]
                 cpu_time_iter = model_result["cpu_time_iter"]
                 ilp_gap = model_result["ilp_gap"]
                 cpu_time += cpu_time_iter
+                if model_result["warmstart_log_excerpt"]:
+                    log_message(
+                        f"\twarmstart[{model_result['warmstart_source']}] {model_result['warmstart_outcome']}: "
+                        f"{model_result['warmstart_log_excerpt']}\n"
+                    )
 
                 log_message(
                     f"\tfinish running gurobi, iteration {sim_iter}, status:{model_result['solver_status_name']} LB={model_result['lb_rh']}, ob={model_result['obj_rh']} "
@@ -1038,8 +597,8 @@ while True:
                 if use_model_solution:
                     if not model_result["is_optimal_with_tolerance"]:
                         non_optimal += 1
-                    previous_solver_solution = model_result["solution_snapshot"] if args.warmstart else None
-                    warmstart_force_greedy = False
+                    previous_solver_solution = model_result["solution_snapshot"] if args.warmstart_mode != "none" else None
+                    previous_target_loads = set(target_loads) if args.warmstart_mode != "none" else None
                     NumberOfMovements += model_result["NumberOfMovements_rh"]
                     max_gap = max(max_gap, ilp_gap)
                     log_message(f"State after: E = {E}, A = {A}\n")
@@ -1054,8 +613,8 @@ while True:
                     )
                     greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, old_E)
                     fallback_heuristic_sol += 1
-                    warmstart_force_greedy = True
                     previous_solver_solution = None
+                    previous_target_loads = None
                     log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
     # Apply the move already planned for the current takt, even if the next solve is scheduled for later.
@@ -1174,7 +733,8 @@ script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:
 machine_name = f"{socket.gethostname()}-T{args.num_threads}"
 row_vals = [
     machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
-    fallback_heuristic_sol, hybrid_heuristic_sol, successful_warmstarts,
+    fallback_heuristic_sol, hybrid_heuristic_sol,
+    args.warmstart_label, warmstart_feasible, warmstart_repaired, warmstart_failed,
     alg_name, args.queue_management, args.seed, args.request_rate, f"{Lx}x{Ly}", tuple_opl(O),
     len(O), len(E_orig), args.number_of_requests, simulation_end_time,
     args.fractional_horizon, args.integer_horizon, args.epoch, time_limit,

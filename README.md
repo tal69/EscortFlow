@@ -251,7 +251,9 @@ Key notes for `v7`:
 
 - `-t` is the per-solve Gurobi time limit
 - `--num_threads` controls Gurobi threads
-- `v7` sets Gurobi feasibility emphasis (`MIPFocus=1`) and a solver MIP gap target of `0.01%`
+- `v7` uses balanced Gurobi search by default (`MIPFocus=0`), and switches to optimality emphasis (`MIPFocus=2`) when `--warmstart` is enabled; the solver MIP gap target remains `0.01%`
+- `--warmstart` now accepts explicit modes: `greedy`, `ilp`, or `ilp greedy`; optionally add `zero` to set all unused arc variables to `0`
+- `--warmstart` is allowed only when `--integer_horizon == --fractional_horizon`; if `--integer_horizon` is omitted, it defaults to `--fractional_horizon`
 - no OPL temp files are created
 
 #### Deprecated version: `EscortFlowSim_v6.py`
@@ -296,7 +298,7 @@ Important options:
 - `--greedy`: greedy heuristic only; skips OPL and currently requires `--epoch 1`
 - `--hybrid`: at each decision epoch, split the currently open visible requests into `old` requests already visible at the beginning of the previous epoch and `new` requests that were not visible then; use greedy when `number_of_new_open_requests >= number_of_old_open_requests * --hybrid_ratio`
 - `--hybrid_ratio`: non-negative real ratio used by `--hybrid` (default `1.0`)
-- `--num_threads`: CPLEX thread count; on macOS the default is `8`, otherwise `0` means machine default
+- `--num_threads`: CPLEX thread count; the default is `8` on macOS and `12` on Linux
 - `-L`: write a detailed log file
 - `-a`, `--save_raw`: save a raw pickle trace for post-processing and animation
 - `-f`: output CSV file
