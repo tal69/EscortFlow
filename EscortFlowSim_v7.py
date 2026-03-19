@@ -37,6 +37,7 @@ import time
 import os
 import sys
 import socket
+import shutil
 import numpy as np
 import argparse
 from gurobipy import GRB
@@ -47,6 +48,7 @@ import CI_Calculation
 from escort_flow_gurobi import RollingHorizonGurobiSolver, SolverConfig
 
 sim_log_file = ""
+last_progress_line_length = 0
 
 
 def log_message(*messages, echo_to_screen=False):
@@ -67,19 +69,55 @@ def format_elapsed_wall_time(elapsed_seconds):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def print_progress(current, total, sim_time, elapsed_wall_time):
-    """Print a simple one-line progress bar."""
-    bar_width =100
-    filled = bar_width if total == 0 else int(bar_width * current / total)
-    bar = "#" * filled + "-" * (bar_width - filled)
+def print_progress(arrived, departed, total, sim_time, elapsed_wall_time):
+    """Print a simple portable one-line progress bar."""
+    global last_progress_line_length
+
     elapsed_label = format_elapsed_wall_time(elapsed_wall_time)
+    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    suffix_options = [
+        f" Arrivals {arrived}/{total} | Departures {departed}/{total} | Simulation time={sim_time} | Elapsed={elapsed_label}",
+        f" A {arrived}/{total} | D {departed}/{total} | Sim {sim_time} | Elapsed {elapsed_label}",
+        f" A {arrived}/{total} D {departed}/{total} T={sim_time} Elap={elapsed_label}",
+    ]
+    min_bar_width = 10
+    suffix = suffix_options[-1]
+    bar_width = min_bar_width
+    for candidate in suffix_options:
+        candidate_bar_width = terminal_width - len(candidate) - len("Progress []")
+        if candidate_bar_width >= min_bar_width:
+            suffix = candidate
+            bar_width = min(40, candidate_bar_width)
+            break
+
+    progress = 0.0 if total == 0 else min(1.0, max(0.0, departed / total))
+    filled = bar_width if total == 0 else int(bar_width * progress)
+    bar = "#" * filled + "-" * (bar_width - filled)
+    line = f"Progress [{bar}]{suffix}"
+
+    if len(line) > terminal_width:
+        line = line[:max(1, terminal_width - 1)]
+
+    padded_line = line.ljust(last_progress_line_length)
+    end = "\n" if departed >= total else ""
+    sys.stdout.write(f"\r{padded_line}{end}")
+    sys.stdout.flush()
+    last_progress_line_length = 0 if departed >= total else len(line)
+
+
+def print_raw_truncated_lead_time(lead_times, lead_stats):
+    """Print the raw lead-time average after cooldown and warmup deletion."""
+    warmup_deleted = int(lead_stats["obs_deleted"]) if np.isfinite(lead_stats["obs_deleted"]) else 0
+    raw_truncated_lead_times = lead_times[warmup_deleted:]
+    if raw_truncated_lead_times.size == 0:
+        print("Average lead time (raw, cooldown+warmup truncated): n/a")
+        return
+
+    raw_mean = float(np.mean(raw_truncated_lead_times))
     print(
-        f"\rProgress [{bar}] {current}/{total} Departurs |  Simulation time={sim_time}  | Elapsed={elapsed_label}",
-        end="",
-        flush=True,
+        "Average lead time (raw, cooldown+warmup truncated): "
+        f"{raw_mean:.6g} (n={raw_truncated_lead_times.size})"
     )
-    if current >= total:
-        print("")
 
 
 def parse_warmstart_spec(tokens, parser_obj):
@@ -400,18 +438,9 @@ header_cols = [
     "Solver Time", "Greedy Heuristic Time", "Model Construction Time", "Warmstart Selection Time"
 ]
 expected_header = ",".join(header_cols)
-write_header = args.header_line or not os.path.exists(result_csv_file) or os.path.getsize(result_csv_file) == 0
-if not write_header:
-    with open(result_csv_file, "r") as existing_csv:
-        first_line = existing_csv.readline().strip()
-    write_header = first_line != expected_header
-
-f = open(result_csv_file, 'a')
+write_header = not csv_file_contains_row(result_csv_file, expected_header)
 if write_header:
-    f.write(",".join(header_cols) + "\n")
-
-
-f.close()  # we want to open and close the file anyway just to make sure that the file is available for writing.
+    append_csv_text(result_csv_file, expected_header + "\n", ensure_record_start=True)
 
 req_count = 0
 last_start_sol = 0
@@ -510,15 +539,16 @@ def is_usable_model_solution(model_result, old_A, old_E):
     return True, None
 
 while True:
-    served_requests = req_count - len(open_requests)
-    if served_requests != last_progress_served or curr_t != last_progress_time:
+    departed_requests = req_count - len(open_requests)
+    if departed_requests != last_progress_served or curr_t != last_progress_time:
         print_progress(
-            served_requests,
+            req_count,
+            departed_requests,
             number_of_requests,
             curr_t,
             time.perf_counter() - simulation_wall_start,
         )
-        last_progress_served = served_requests
+        last_progress_served = departed_requests
         last_progress_time = curr_t
 
     if args.log:
@@ -537,8 +567,6 @@ while True:
             log_message(
                 f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]}\n")
             enter_via_cell.append(load_loc[req2load[req_count]])
-            # if ll not in O:
-            #     moves[curr_t].insert(0,(ll,ll))  # change the color of the load
         else:  # request happened to be for a load located on an output cell
             enter_via_cell.append(load_loc[req2load[req_count]])
             log_message(
@@ -683,6 +711,7 @@ while True:
 
     if curr_t > arrivals[-1] and not open_requests:
         print_progress(
+            req_count,
             number_of_requests,
             number_of_requests,
             curr_t,
@@ -736,6 +765,8 @@ for metric_name, stats in [
             echo_to_screen=True,
         )
 
+print_raw_truncated_lead_time(lead_times, lead_stats)
+
 
 # just for debugging
 if min(departures - arrivals) < 0 and args.log:
@@ -767,7 +798,6 @@ else:
 if alg_name == "":
     alg_name = "-"
 
-f = open(result_csv_file, 'a')
 script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
 machine_name = f"{socket.gethostname()}-T{args.num_threads}"
 cpu_time = solver_cpu_time + heuristic_cpu_time + model_construction_cpu_time + warmstart_cpu_time
@@ -795,8 +825,11 @@ row_vals = [
     f"{solver_cpu_time:.2f}", f"{heuristic_cpu_time:.2f}",
     f"{model_construction_cpu_time:.2f}", f"{warmstart_cpu_time:.2f}",
 ]
-f.write(",".join(CI_Calculation.csv_cell(v) for v in row_vals) + "\n")
-f.close()
+append_csv_text(
+    result_csv_file,
+    ",".join(CI_Calculation.csv_cell(v) for v in row_vals) + "\n",
+    ensure_record_start=True,
+)
 
 
 if args.save_raw:
