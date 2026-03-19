@@ -280,8 +280,11 @@ if args.offline and args.hybrid:
     parser.error("--offline cannot be combined with --hybrid")
 if args.hybrid_ratio <= 0:
     parser.error("--hybrid_ratio must be positive. Use --greedy to run the heuristic at every step")
-if args.warmstart_mode != "none" and args.integer_horizon < args.fractional_horizon:
-    parser.error("--warmstart requires an all-integer model, so --integer_horizon must equal --fractional_horizon")
+if args.warmstart_mode in {"ilp", "ilp-greedy"} and args.integer_horizon < args.fractional_horizon:
+    parser.error(
+        "--warmstart ilp and --warmstart ilp greedy require an all-integer model, "
+        "so --integer_horizon must equal --fractional_horizon"
+    )
 
 result_csv_file = args.csv
 csv_name_prefix = os.path.splitext(os.path.basename(result_csv_file))[0] or "sim"

@@ -13,6 +13,7 @@
 #              14/12/2023 adding lp relaxation with "--lp" switch
 #              20/12/2025 (v3) adding cuts as described in the revised paper, removing support for external network, SLM, removing makespan objective (alpha)
 #              17/3/2026 Rename to EscortFlowStatic.py and add support for the GreedyHeurisitc
+#              19/3/2026 Add optional Gurobi API backend with --gurobi
 #
 # Copyright:   (c) Tal Raviv 2020, 2023, 2025, 2026
 # Licence:     Free but please let me know that you are using it
@@ -66,6 +67,8 @@ parser.add_argument("--lp", action="store_true",
                     help="Run lp relaxation work only with bm movement regime (default False)")
 parser.add_argument("--greedy", action="store_true",
                     help="Solve the static instance with OneStepHeuristic_v2.SolveGreedy instead of OPL")
+parser.add_argument("--gurobi", action="store_true",
+                    help="Solve the static model with the Gurobi Python API instead of oplrun/CPLEX")
 
 args = parser.parse_args()
 result_csv_file = args.csv
@@ -298,7 +301,7 @@ f.close()
 header_line = (
     "date, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
     f"Target Loads, beta, gamma, seed, T, dp-{k_prime}' makespan, dp-{k_prime}' movements , "
-    "ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Cplex Status"
+    "ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Solver Status"
 )
 if not csv_file_contains_row(result_csv_file, header_line):
     append_csv_text(result_csv_file, header_line + "\n", ensure_record_start=True)
@@ -308,75 +311,123 @@ if dp_file:
     S = pickle.load(open(dp_file, "rb"))
     print("Done", flush=True)
 
-for escort_num in escorts_range:
-    for rep in reps_range:
-        random.seed(rep)
-        R, E = GeneretaeRandomInstance(rep, Locations, escort_num, load_num)
+model_name = "Greedy"
+if not args.greedy:
+    if args.gurobi:
+        model_name = "LP-Gurobi" if args.lp else "ILP-Gurobi"
+    else:
+        model_name = "LP" if args.lp else "ILP"
 
-        if dp_file:
-            moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, k_prime, False)
-            T = len(moves)
-        else:  # just guess T
-            moves = []  # so it prints 0
-            T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
+gurobi_solver = None
+if args.gurobi and not args.greedy:
+    try:
+        from escort_flow_static_gurobi import StaticGurobiConfig, StaticEscortFlowGurobiSolver
+    except ModuleNotFoundError as exc:
+        if exc.name == "gurobipy":
+            print("Panic: --gurobi requires the gurobipy package. Install it or run without --gurobi.")
+            exit(1)
+        raise
 
-        f = open(dat_file, "w")
-        f.write('file_export = "%s";\n' % file_export)
-        f.write(f'file_res = "{result_csv_file}";\n')
-        f.write('time_limit = %d;\n' % time_limit)
-        f.write('beta=%f;\n' % beta)
-        f.write('gamma=%f;\n' % gamma)
-        f.write('Lx=%d;\n' % Lx)
-        f.write('Ly=%d;\n' % Ly)
-        f.write(f'T={T};\n')
-        f.write('E=%s;\n' % tuple_opl(E))
-        f.write('A=%s;\n' % tuple_opl(R))
-        f.write('O=%s;\n' % tuple_opl(O))
-        f.write(f'retrieval_mode = "{args.retrieval_mode}";\n')
-        f.close()
-
-        append_csv_text(
-            result_csv_file,
-            f"{time.ctime()},BM, {'Greedy' if args.greedy else ('LP' if args.lp else 'ILP')},"
-            f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
-            f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {len(moves)}, "
-            f"{sum([len(x) for x in moves])}",
-            ensure_record_start=True,
+    gurobi_solver = StaticEscortFlowGurobiSolver(
+        StaticGurobiConfig(
+            Lx=Lx,
+            Ly=Ly,
+            output_cells=tuple(O),
+            retrieval_mode=args.retrieval_mode,
+            beta=beta,
+            gamma=gamma,
+            time_limit=time_limit,
+            lp=args.lp,
         )
+    )
 
-        if args.greedy:
-            max_steps = max(T, (Lx + Ly) * len(R) * 20 // max(len(E), 1))
-            greedy_start_time = time.perf_counter()
-            makespan, flowtime, movements, greedy_moves = OneStepHeuristic_v2.SolveGreedy(
-                Lx, Ly, set(O), set(R), set(E), verbal=False, max_steps=max_steps, return_moves=True,
-                retrieval_mode=args.retrieval_mode
-            )
-            cpu_time = time.perf_counter() - greedy_start_time
+try:
+    for escort_num in escorts_range:
+        for rep in reps_range:
+            random.seed(rep)
+            R, E = GeneretaeRandomInstance(rep, Locations, escort_num, load_num)
 
-            if file_export != "":
-                pickle.dump((Lx, Ly, O, E, R, greedy_moves),
-                            open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p", "wb"))
+            if dp_file:
+                moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, k_prime, False)
+                T = len(moves)
+            else:  # just guess T
+                moves = []  # so it prints 0
+                T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
+
+            if not args.greedy and not args.gurobi:
+                f = open(dat_file, "w")
+                f.write('file_export = "%s";\n' % file_export)
+                f.write(f'file_res = "{result_csv_file}";\n')
+                f.write('time_limit = %d;\n' % time_limit)
+                f.write('beta=%f;\n' % beta)
+                f.write('gamma=%f;\n' % gamma)
+                f.write('Lx=%d;\n' % Lx)
+                f.write('Ly=%d;\n' % Ly)
+                f.write(f'T={T};\n')
+                f.write('E=%s;\n' % tuple_opl(E))
+                f.write('A=%s;\n' % tuple_opl(R))
+                f.write('O=%s;\n' % tuple_opl(O))
+                f.write(f'retrieval_mode = "{args.retrieval_mode}";\n')
+                f.close()
 
             append_csv_text(
                 result_csv_file,
-                f",{makespan}, {flowtime}, {movements}, {beta * flowtime + gamma * movements}, , {cpu_time:.4f}, Greedy"
+                f"{time.ctime()},BM, {model_name},"
+                f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
+                f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {len(moves)}, "
+                f"{sum([len(x) for x in moves])}",
+                ensure_record_start=True,
             )
-        else:
-            try:
-                if args.lp:
-                    subprocess.run(["oplrun", "pbs_escorts_bm_lp_v3.mod", dat_file, network_file], check=True)
-                else:
-                    subprocess.run(["oplrun", "pbs_escorts_bm_v3.mod", dat_file, network_file], check=True)
 
-            except:
-                print("Could not solve the model")
-            else:
-                # Create script file
+            if args.greedy:
+                max_steps = max(T, (Lx + Ly) * len(R) * 20 // max(len(E), 1))
+                greedy_start_time = time.perf_counter()
+                makespan, flowtime, movements, greedy_moves = OneStepHeuristic_v2.SolveGreedy(
+                    Lx, Ly, set(O), set(R), set(E), verbal=False, max_steps=max_steps, return_moves=True,
+                    retrieval_mode=args.retrieval_mode
+                )
+                cpu_time = time.perf_counter() - greedy_start_time
+
                 if file_export != "":
-                    f = open(file_export)
-                    s = f.readlines()
-                    moves = eval(s[-1])  # read moves in the current horizon
-                    f.close()
-                    pickle.dump((Lx, Ly, O, E, R, moves),
-                                open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p","wb"))
-        append_csv_text(result_csv_file, "\n")
+                    pickle.dump((Lx, Ly, O, E, R, greedy_moves),
+                                open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p", "wb"))
+
+                append_csv_text(
+                    result_csv_file,
+                    f",{makespan}, {flowtime}, {movements}, {beta * flowtime + gamma * movements}, , {cpu_time:.4f}, Greedy"
+                )
+            elif args.gurobi:
+                try:
+                    result = gurobi_solver.solve(R, E, T)
+                except Exception as exc:
+                    print(f"Could not solve the model with Gurobi: {exc}")
+                    append_csv_text(result_csv_file, ",-,-,-,-,-,-, ERROR")
+                else:
+                    if file_export != "" and result["has_solution"]:
+                        pickle.dump(
+                            (Lx, Ly, O, E, R, result["animation_moves"]),
+                            open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p", "wb")
+                        )
+                    append_csv_text(result_csv_file, gurobi_solver.build_csv_suffix(result))
+            else:
+                try:
+                    if args.lp:
+                        subprocess.run(["oplrun", "pbs_escorts_bm_lp_v3.mod", dat_file, network_file], check=True)
+                    else:
+                        subprocess.run(["oplrun", "pbs_escorts_bm_v3.mod", dat_file, network_file], check=True)
+
+                except:
+                    print("Could not solve the model")
+                else:
+                    # Create script file
+                    if file_export != "":
+                        f = open(file_export)
+                        s = f.readlines()
+                        moves = eval(s[-1])  # read moves in the current horizon
+                        f.close()
+                        pickle.dump((Lx, Ly, O, E, R, moves),
+                                    open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p", "wb"))
+            append_csv_text(result_csv_file, "\n")
+finally:
+    if gurobi_solver is not None:
+        gurobi_solver.close()
