@@ -212,11 +212,6 @@ def DOHueristicBM(S, I, E, Lx , Ly, Terminals,k, chat=True ):
             print_state_snapshot(t, [load for _, load in active_loads], E_local)
 
 
-        # ez = ShortestPath(I,E_local,Terminals)  # check if we can reuse this in the future
-        # if ez:
-        #     print("*****  Finish with shortest path shortcut ******")
-        #     return moves+[ [a] for a in ez]
-
         period_loads = copy.copy(active_loads)
         period_load_positions = [load for _, load in period_loads]
         period_escorts = sorted(copy.copy(E_local))

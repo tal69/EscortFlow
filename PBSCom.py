@@ -13,6 +13,7 @@ import copy
 import math
 import itertools
 import random
+import os
 
 
 # The general function in this file are used also by other programs
@@ -220,14 +221,98 @@ def GeneretaeRandomInstance(seed, Locations, num_escorts, num_load=1):
     return sorted(ez[:num_load]), sorted(ez[num_load:(num_load + num_escorts)])
 
 
+def csv_file_contains_row(path, expected_row):
+    """Return whether the CSV already contains the exact row text."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return False
+
+    with open(path, "r", newline="") as csv_file:
+        return any(line.rstrip("\r\n") == expected_row for line in csv_file)
+
+
+def ensure_csv_record_boundary(path):
+    """Ensure the next appended CSV record starts on a new line."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return
+
+    with open(path, "rb") as csv_file:
+        csv_file.seek(-1, os.SEEK_END)
+        last_byte = csv_file.read(1)
+
+    if last_byte not in (b"\n", b"\r"):
+        with open(path, "a", newline="") as csv_file:
+            csv_file.write("\n")
+
+
+def append_csv_text(path, text, ensure_record_start=False):
+    """Append text to a CSV file, optionally starting on a fresh record."""
+    if ensure_record_start:
+        ensure_csv_record_boundary(path)
+
+    with open(path, "a", newline="") as csv_file:
+        csv_file.write(text)
+
+
 def str2range(s):
+    """Parse inclusive range strings used by the CLI helpers.
+
+    Supported formats:
+    - `n`
+    - `start-end`
+    - `start:end`
+    - `start-end-step`
+    - `start:step:end`
+    """
+
+    def parse_int_token(token, original_value):
+        try:
+            return int(token)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid range '{original_value}': '{token}' is not an integer"
+            ) from exc
+
+    def inclusive_range(start, end, step):
+        if step == 0:
+            raise ValueError(
+                f"Invalid range '{s}': step must be non-zero"
+            )
+        stop = end + (1 if step > 0 else -1)
+        return range(start, stop, step)
+
+    if ":" in s:
+        parts = s.split(":")
+        if len(parts) == 2:
+            start = parse_int_token(parts[0], s)
+            end = parse_int_token(parts[1], s)
+            step = 1 if end >= start else -1
+            return inclusive_range(start, end, step)
+        if len(parts) == 3:
+            start = parse_int_token(parts[0], s)
+            step = parse_int_token(parts[1], s)
+            end = parse_int_token(parts[2], s)
+            return inclusive_range(start, end, step)
+        raise ValueError(
+            f"Invalid range '{s}': expected 'n', 'start:end', or 'start:step:end'"
+        )
+
     a = s.split('-')
     if len(a) == 1:
-        return range(int(a[0]), int(a[0]) + 1)
-    elif len(a) == 2:
-        return range(int(a[0]), int(a[1]) + 1)
-    elif len(a) == 3:
-        return range(int(a[0]), int(a[1]) + 1, int(a[2]))
+        start = parse_int_token(a[0], s)
+        return range(start, start + 1)
+    if len(a) == 2:
+        start = parse_int_token(a[0], s)
+        end = parse_int_token(a[1], s)
+        step = 1 if end >= start else -1
+        return inclusive_range(start, end, step)
+    if len(a) == 3:
+        start = parse_int_token(a[0], s)
+        end = parse_int_token(a[1], s)
+        step = parse_int_token(a[2], s)
+        return inclusive_range(start, end, step)
+    raise ValueError(
+        f"Invalid range '{s}': expected 'n', 'start-end', 'start-end-step', 'start:end', or 'start:step:end'"
+    )
 
 
 """  obtained  initial location of target loads+escorts and list of load moves 
@@ -250,62 +335,3 @@ def play_moves(init_R, init_E, mv):
                 r_index = R.index(mv[i][j][0])
                 R[r_index] = mv[i][j][1]
     return R, E
-
-
-""" Return all the target loads induced by escort movements """
-
-
-# def target_load_path(init_R, init_E, mv):
-#     A = copy.copy(init_R)
-#     E = copy.copy(init_E)
-#     moves_tup = []
-#
-#     for t in range(len(mv)):
-#         for j in range(len(mv[t])):
-#             e_index = E.index(mv[t][j][1])
-#             E[e_index] = mv[t][j][0]
-#             moves_tup.append((mv[t][j][1][0], mv[t][j][1][1], mv[t][j][0][0], mv[t][j][0][1], t, 2))
-#             if mv[t][j][0] in A:
-#                 r_index = A.index(mv[t][j][0])
-#                 A[r_index] = mv[t][j][1]
-#                 moves_tup.append((mv[t][j][0][0], mv[t][j][0][1], mv[t][j][1][0], mv[t][j][1][1], t, 1))
-#     return moves_tup
-
-
-def warm_start_movements(init_R, init_E, mv, T=0):
-    R = copy.copy(init_R)
-    E = copy.copy(init_E)
-    moves_tup = []
-
-    for t in range(len(mv)):
-        for i in range(len(E)):
-            e = E[i]
-            em = [x for x in mv[t] if x[1] == e]
-            if em:
-                moves_tup.append((em[0][1][0], em[0][1][1], em[0][0][0], em[0][0][1], t, 2))
-                E[i] = em[0][0]
-            else:
-                moves_tup.append((e[0], e[1], e[0], e[1], t, 2))
-
-        for i in range(len(R)):
-            r = R[i]
-            rm = [x for x in mv[t] if x[0] == r]
-            if rm:
-                moves_tup.append((rm[0][0][0], rm[0][0][1], rm[0][1][0], rm[0][1][1], t, 1))
-                R[i] = rm[0][1]
-            else:
-                moves_tup.append((r[0], r[1], r[0], r[1], t, 1))
-
-    # sometimes we want T > len(mv) to give the search process some slack
-    while t < T:
-        t += 1
-        for i in range(len(E)):
-            e = E[i]
-            moves_tup.append((e[0], e[1], e[0], e[1], t, 2))
-        for i in range(len(R)):
-            r = R[i]
-            moves_tup.append((r[0], r[1], r[0], r[1], t, 1))
-
-    return moves_tup
-
-

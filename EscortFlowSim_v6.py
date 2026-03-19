@@ -483,8 +483,6 @@ while True:
             log_message(
                 f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]}\n")
             enter_via_cell.append(load_loc[req2load[req_count]])
-            # if ll not in O:
-            #     moves[curr_t].insert(0,(ll,ll))  # change the color of the load
         else:  # request happened to be for a load located on an output cell
             enter_via_cell.append(load_loc[req2load[req_count]])
             log_message(

@@ -295,10 +295,13 @@ for x in range(Lx):
 f.write("];\n")
 f.close()
 
-f = open(result_csv_file, 'a')
-f.write(
-    f"\ndate, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, beta, gamma, seed, T, dp-{k_prime}' makespan, dp-{k_prime}' movements , ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Cplex Status\n")
-f.close()
+header_line = (
+    "date, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
+    f"Target Loads, beta, gamma, seed, T, dp-{k_prime}' makespan, dp-{k_prime}' movements , "
+    "ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Cplex Status"
+)
+if not csv_file_contains_row(result_csv_file, header_line):
+    append_csv_text(result_csv_file, header_line + "\n", ensure_record_start=True)
 
 if dp_file:
     print(f"Loading DP file {dp_file}...", flush=True)
@@ -332,13 +335,14 @@ for escort_num in escorts_range:
         f.write(f'retrieval_mode = "{args.retrieval_mode}";\n')
         f.close()
 
-        f = open(result_csv_file, 'a')
-        f.write(
+        append_csv_text(
+            result_csv_file,
             f"{time.ctime()},BM, {'Greedy' if args.greedy else ('LP' if args.lp else 'ILP')},"
             f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
             f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {len(moves)}, "
-            f"{sum([len(x) for x in moves])}")
-        f.close()
+            f"{sum([len(x) for x in moves])}",
+            ensure_record_start=True,
+        )
 
         if args.greedy:
             max_steps = max(T, (Lx + Ly) * len(R) * 20 // max(len(E), 1))
@@ -353,11 +357,10 @@ for escort_num in escorts_range:
                 pickle.dump((Lx, Ly, O, E, R, greedy_moves),
                             open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p", "wb"))
 
-            f = open(result_csv_file, 'a')
-            f.write(
+            append_csv_text(
+                result_csv_file,
                 f",{makespan}, {flowtime}, {movements}, {beta * flowtime + gamma * movements}, , {cpu_time:.4f}, Greedy"
             )
-            f.close()
         else:
             try:
                 if args.lp:
@@ -376,6 +379,4 @@ for escort_num in escorts_range:
                     f.close()
                     pickle.dump((Lx, Ly, O, E, R, moves),
                                 open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p","wb"))
-        f = open(result_csv_file, 'a')
-        f.write("\n")
-        f.close()
+        append_csv_text(result_csv_file, "\n")

@@ -105,7 +105,6 @@ class PathAnimation:
     def draw_initial(self):
 
         # Draw regular loads in blue and store load initial references
-        # count_load = 0
         for x in range(self.Lx):
             for y in range(self.Ly):
                 if self.LoadsRef[x][y] != None:
@@ -201,17 +200,6 @@ class PathAnimation:
             else:
                 dirL.append((mv[1][0] - mv[0][0], mv[1][1] - mv[0][1]))
             Load_handle.append(self.LoadsRef[mv[0][0]][mv[0][1]])
-
-            # target item leaves output cell and turn from red to blue
-            # implemented on 5/12/2023 to allow for continue retrieval mode in multi-load problems
-            # Check that it does not have adverse effect elsewhere
-            # if mv[0] in O and mv[1] != mv[0] and mv[1] != (None, None) :
-            #     self.cnvs.itemconfig(Load_handle[-1], fill='blue')
-
-            # #  New version 22/12/23  - target loads turn blue when they enter the output cell (better for 'continue')
-            # if mv[1] in O and mv[1] != mv[0]:
-            #     self.cnvs.itemconfig(Load_handle[-1], fill='blue')
-
 
             # a load became target load marked in the file as a movement from the a location to itself and appear in the list
             # before the actual movement
