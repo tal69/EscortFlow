@@ -451,6 +451,7 @@ last_progress_served = -1
 last_progress_time = -1
 previous_solver_solution = None
 previous_target_loads = None
+interrupted = False
 
 log_message(f"\n{time.ctime()} :Instance {Lx}x{Ly}, O={O}, E={E}\n")
 
@@ -541,201 +542,215 @@ def is_usable_model_solution(model_result, old_A, old_E):
 
     return True, None
 
-while True:
-    departed_requests = req_count - len(open_requests)
-    if departed_requests != last_progress_served or curr_t != last_progress_time:
-        print_progress(
-            req_count,
-            departed_requests,
-            number_of_requests,
-            curr_t,
-            time.perf_counter() - simulation_wall_start,
-        )
-        last_progress_served = departed_requests
-        last_progress_time = curr_t
+try:
+    while True:
+        departed_requests = req_count - len(open_requests)
+        if departed_requests != last_progress_served or curr_t != last_progress_time:
+            print_progress(
+                req_count,
+                departed_requests,
+                number_of_requests,
+                curr_t,
+                time.perf_counter() - simulation_wall_start,
+            )
+            last_progress_served = departed_requests
+            last_progress_time = curr_t
 
-    if args.log:
-        log_message(f"Time: {curr_t}: \n")
+        if args.log:
+            log_message(f"Time: {curr_t}: \n")
 
-        if curr_t > max_simulation_length:
-            log_message(f"Panic: stop because get stuck for more than {max_simulation_length} taktst\n")
-            exit(1)
+            if curr_t > max_simulation_length:
+                log_message(f"Panic: stop because get stuck for more than {max_simulation_length} taktst\n")
+                exit(1)
 
-    # extract all requests that arrive at this takt
-    while req_count < number_of_requests and arrivals[req_count] <= curr_t:
-        orig_distance[req_count] = dist[load_loc[req2load[req_count]][0], load_loc[req2load[req_count]][1]]
-        if orig_distance[req_count] > 0:  # request is not for a load currently located on an output
-            requests_on_load[req2load[req_count]].append(req_count)
-            open_requests.append(req_count)
-            log_message(
-                f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]}\n")
-            enter_via_cell.append(load_loc[req2load[req_count]])
-        else:  # request happened to be for a load located on an output cell
-            enter_via_cell.append(load_loc[req2load[req_count]])
-            log_message(
-                f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]} - will be removed immediately\n")
-            departures[req_count] = curr_t
-            start_move[req_count] = curr_t
-        req_count += 1
-
-    # idle takt
-    if not open_requests:
-        log_message(f"    Skipping an idle takt @ {curr_t}\n")
-        idle_takt += 1
-        previous_solver_solution = None
-        previous_target_loads = None
-
-    elif curr_t % args.epoch == 0:
-        E = set(Locations) - set(load_loc.values())
-        old_visible_requests = collect_visible_requests(curr_t - args.epoch)
-        current_visible_requests = collect_visible_requests(curr_t)
-        old_target_loads = collect_target_loads(curr_t - args.epoch)
-        current_time_target_loads = collect_target_loads(curr_t)
-        old_visible_request_set = set(old_visible_requests)
-        new_visible_requests = [r for r in current_visible_requests if r not in old_visible_request_set]
-        hybrid_ratio_active = args.hybrid and len(new_visible_requests) >= len(old_visible_requests) * args.hybrid_ratio
-
-        if args.greedy:
-            if current_time_target_loads:
-                schedule_greedy_epoch(curr_t, current_time_target_loads, E)
-                previous_solver_solution = None
-                previous_target_loads = None
-        elif hybrid_ratio_active:
-            if current_time_target_loads:
+        # extract all requests that arrive at this takt
+        while req_count < number_of_requests and arrivals[req_count] <= curr_t:
+            orig_distance[req_count] = dist[load_loc[req2load[req_count]][0], load_loc[req2load[req_count]][1]]
+            if orig_distance[req_count] > 0:  # request is not for a load currently located on an output
+                requests_on_load[req2load[req_count]].append(req_count)
+                open_requests.append(req_count)
                 log_message(
-                    f"\tHybrid mode: using greedy because new open requests={len(new_visible_requests)} >= old open requests={len(old_visible_requests)} * ratio {args.hybrid_ratio}\n"
-                )
-                greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, E)
-                hybrid_heuristic_sol += 1
-                previous_solver_solution = None
-                previous_target_loads = None
-                log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
-
-        else:  # run the ILP model
-            eligible_target_loads = current_time_target_loads if args.offline else old_target_loads
-            target_loads = eligible_target_loads[:args.max_balls_in_air]
-
-            for l in target_loads:
-                for r in requests_on_load[l]:
-                    start_move[r] = min(start_move[r], curr_t)
-
-            A = set(load_loc[ll] for ll in target_loads)
-            if set(A) - set(O):
-                old_A, old_E = copy.copy(A), copy.copy(E)
-                actual_max_balls = max(actual_max_balls, len(A))
-                sim_iter += 1
-                if args.warmstart_mode != "none":
-                    warmstart_start_time = time.perf_counter()
-                    warmstart_vector = solver.select_warmstart_vector(
-                        A, E, target_loads, previous_solver_solution, previous_target_loads
-                    )
-                    warmstart_cpu_time += time.perf_counter() - warmstart_start_time
-                else:
-                    warmstart_vector = None
-                model_result = solver.run_model(A, E, warmstart_vector=warmstart_vector)
-                if model_result["warmstart_outcome"] == "feasible":
-                    warmstart_feasible += 1
-                elif model_result["warmstart_outcome"] == "repaired":
-                    warmstart_repaired += 1
-                elif model_result["warmstart_outcome"] == "failed":
-                    warmstart_failed += 1
-                A, E = model_result["A"], model_result["E"]
-                solver_time_iter = model_result["solver_time_iter"]
-                model_construction_time_iter = model_result["model_construction_time_iter"]
-                ilp_gap = model_result["ilp_gap"]
-                solver_cpu_time += solver_time_iter
-                model_construction_cpu_time += model_construction_time_iter
-                if model_result["warmstart_log_excerpt"]:
-                    log_message(
-                        f"\twarmstart[{model_result['warmstart_source']}] {model_result['warmstart_outcome']}: "
-                        f"{model_result['warmstart_log_excerpt']}\n"
-                    )
-
+                    f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]}\n")
+                enter_via_cell.append(load_loc[req2load[req_count]])
+            else:  # request happened to be for a load located on an output cell
+                enter_via_cell.append(load_loc[req2load[req_count]])
                 log_message(
-                    f"\tfinish running gurobi, iteration {sim_iter}, status:{model_result['solver_status_name']} LB={model_result['lb_rh']}, ob={model_result['obj_rh']} "
-                    f"flowtime={len(A) * args.epoch + model_result['flowtime_rh']}, open requests: {open_requests}\n"
-                    f"{'****** ' if model_result['solver_status'] == GRB.TIME_LIMIT and not model_result['is_optimal_with_tolerance'] else ''} "
-                    f"solver_time={solver_time_iter:.2f} model_construction_time={model_construction_time_iter:.2f} "
-                    f"Gap={100 * model_result['ilp_gap']:.4f}%\n")
+                    f"\trequest #{req_count} arrive, load:{req2load[req_count]}, currently @ {load_loc[req2load[req_count]]} - will be removed immediately\n")
+                departures[req_count] = curr_t
+                start_move[req_count] = curr_t
+            req_count += 1
 
-                use_model_solution, unusable_reason = is_usable_model_solution(model_result, old_A, old_E)
-                if use_model_solution:
-                    if not model_result["is_optimal_with_tolerance"]:
-                        non_optimal += 1
-                    previous_solver_solution = model_result["solution_snapshot"] if args.warmstart_mode != "none" else None
-                    previous_target_loads = set(target_loads) if args.warmstart_mode != "none" else None
-                    NumberOfMovements += model_result["NumberOfMovements_rh"]
-                    max_gap = max(max_gap, ilp_gap)
-                    log_message(f"State after: E = {E}, A = {A}\n")
-                    if model_result["planned_moves"]:
-                        for i, one_step_move in enumerate(model_result["planned_moves"][:args.epoch]):
-                            moves[curr_t + i] = one_step_move
-                else:
+        # idle takt
+        if not open_requests:
+            log_message(f"    Skipping an idle takt @ {curr_t}\n")
+            idle_takt += 1
+            previous_solver_solution = None
+            previous_target_loads = None
+
+        elif curr_t % args.epoch == 0:
+            E = set(Locations) - set(load_loc.values())
+            old_visible_requests = collect_visible_requests(curr_t - args.epoch)
+            current_visible_requests = collect_visible_requests(curr_t)
+            old_target_loads = collect_target_loads(curr_t - args.epoch)
+            current_time_target_loads = collect_target_loads(curr_t)
+            old_visible_request_set = set(old_visible_requests)
+            new_visible_requests = [r for r in current_visible_requests if r not in old_visible_request_set]
+            hybrid_ratio_active = args.hybrid and len(new_visible_requests) >= len(old_visible_requests) * args.hybrid_ratio
+
+            if args.greedy:
+                if current_time_target_loads:
+                    schedule_greedy_epoch(curr_t, current_time_target_loads, E)
+                    previous_solver_solution = None
+                    previous_target_loads = None
+            elif hybrid_ratio_active:
+                if current_time_target_loads:
                     log_message(
-                        f"Did not use ILP model solution because {unusable_reason}\n"
-                        "Running *** greedy *** heuristic on all target loads visible at the current decision time\n",
-                        echo_to_screen=True,
+                        f"\tHybrid mode: using greedy because new open requests={len(new_visible_requests)} >= old open requests={len(old_visible_requests)} * ratio {args.hybrid_ratio}\n"
                     )
-                    greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, old_E)
-                    fallback_heuristic_sol += 1
+                    greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, E)
+                    hybrid_heuristic_sol += 1
                     previous_solver_solution = None
                     previous_target_loads = None
                     log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
-    # Apply the move already planned for the current takt, even if the next solve is scheduled for later.
-    if moves[curr_t]:
-        for (loc1, loc2) in moves[curr_t]:
-            if loc1 != loc2:  # can happen that they are equal because of changing color for the animation
-                load_loc[pbs[loc1[0], loc1[1]]] = loc2
-                log_message(
-                    f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
+            else:  # run the ILP model
+                eligible_target_loads = current_time_target_loads if args.offline else old_target_loads
+                target_loads = eligible_target_loads[:args.max_balls_in_air]
 
-        pbs = np.zeros((Lx, Ly), dtype=int)
-        for l, loc in load_loc.items():
-            pbs[loc[0], loc[1]] = l
+                for l in target_loads:
+                    for r in requests_on_load[l]:
+                        start_move[r] = min(start_move[r], curr_t)
 
-        for loc in O:
-            if pbs[loc[0], loc[1]] != 0:
-                leaving_load = pbs[loc[0], loc[1]]
-                for req in requests_on_load[leaving_load]:
-                    departures[req] = curr_t + 1
-                    total_lead_time += (departures[req] - arrivals[req])
-                    start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
+                A = set(load_loc[ll] for ll in target_loads)
+                if set(A) - set(O):
+                    old_A, old_E = copy.copy(A), copy.copy(E)
+                    actual_max_balls = max(actual_max_balls, len(A))
+                    sim_iter += 1
+                    if args.warmstart_mode != "none":
+                        warmstart_start_time = time.perf_counter()
+                        warmstart_vector = solver.select_warmstart_vector(
+                            A, E, target_loads, previous_solver_solution, previous_target_loads
+                        )
+                        warmstart_cpu_time += time.perf_counter() - warmstart_start_time
+                    else:
+                        warmstart_vector = None
+                    model_result = solver.run_model(A, E, warmstart_vector=warmstart_vector)
+                    if model_result["solver_status"] == GRB.INTERRUPTED:
+                        raise KeyboardInterrupt
+                    if model_result["warmstart_outcome"] == "feasible":
+                        warmstart_feasible += 1
+                    elif model_result["warmstart_outcome"] == "repaired":
+                        warmstart_repaired += 1
+                    elif model_result["warmstart_outcome"] == "failed":
+                        warmstart_failed += 1
+                    A, E = model_result["A"], model_result["E"]
+                    solver_time_iter = model_result["solver_time_iter"]
+                    model_construction_time_iter = model_result["model_construction_time_iter"]
+                    ilp_gap = model_result["ilp_gap"]
+                    solver_cpu_time += solver_time_iter
+                    model_construction_cpu_time += model_construction_time_iter
+                    if model_result["warmstart_log_excerpt"]:
+                        log_message(
+                            f"\twarmstart[{model_result['warmstart_source']}] {model_result['warmstart_outcome']}: "
+                            f"{model_result['warmstart_log_excerpt']}\n"
+                        )
 
-                    open_requests.remove(req)
                     log_message(
-                        f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
-                    #  For QA
-                    if departures[req] - arrivals[req] < orig_distance[req]:
-                        log_message("Panic: lead time is smaller than distance\n", echo_to_screen=True)
-                        exit(1)
+                        f"\tfinish running gurobi, iteration {sim_iter}, status:{model_result['solver_status_name']} LB={model_result['lb_rh']}, ob={model_result['obj_rh']} "
+                        f"flowtime={len(A) * args.epoch + model_result['flowtime_rh']}, open requests: {open_requests}\n"
+                        f"{'****** ' if model_result['solver_status'] == GRB.TIME_LIMIT and not model_result['is_optimal_with_tolerance'] else ''} "
+                        f"solver_time={solver_time_iter:.2f} model_construction_time={model_construction_time_iter:.2f} "
+                        f"Gap={100 * model_result['ilp_gap']:.4f}%\n")
 
-                requests_on_load[leaving_load] = []
+                    use_model_solution, unusable_reason = is_usable_model_solution(model_result, old_A, old_E)
+                    if use_model_solution:
+                        if not model_result["is_optimal_with_tolerance"]:
+                            non_optimal += 1
+                        previous_solver_solution = model_result["solution_snapshot"] if args.warmstart_mode != "none" else None
+                        previous_target_loads = set(target_loads) if args.warmstart_mode != "none" else None
+                        NumberOfMovements += model_result["NumberOfMovements_rh"]
+                        max_gap = max(max_gap, ilp_gap)
+                        log_message(f"State after: E = {E}, A = {A}\n")
+                        if model_result["planned_moves"]:
+                            for i, one_step_move in enumerate(model_result["planned_moves"][:args.epoch]):
+                                moves[curr_t + i] = one_step_move
+                    else:
+                        log_message(
+                            f"Did not use ILP model solution because {unusable_reason}\n"
+                            "Running *** greedy *** heuristic on all target loads visible at the current decision time\n",
+                            echo_to_screen=True,
+                        )
+                        greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, old_E)
+                        fallback_heuristic_sol += 1
+                        previous_solver_solution = None
+                        previous_target_loads = None
+                        log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
 
-    if curr_t > arrivals[-1] and not open_requests:
-        print_progress(
-            req_count,
-            number_of_requests,
-            number_of_requests,
-            curr_t,
-            time.perf_counter() - simulation_wall_start,
-        )
-        log_message(
-            "Simulation end\n",
-            f"Total lead time: {total_lead_time}\n",
-            f"Mean lead time: {total_lead_time / req_count:.2f}\n",
-            echo_to_screen=True,
-        )
-        break
+        # Apply the move already planned for the current takt, even if the next solve is scheduled for later.
+        if moves[curr_t]:
+            for (loc1, loc2) in moves[curr_t]:
+                if loc1 != loc2:  # can happen that they are equal because of changing color for the animation
+                    load_loc[pbs[loc1[0], loc1[1]]] = loc2
+                    log_message(
+                        f"\tload {pbs[loc1[0], loc1[1]]} moves {loc1}->{loc2} \n")
 
-    if idle_takt > max_simulation_length:
-        log_message(
-            "Error: simulation got stuck on idle state. Stopping and reporting results for debugging only\n",
-            echo_to_screen=True,
-        )
-        break
+            pbs = np.zeros((Lx, Ly), dtype=int)
+            for l, loc in load_loc.items():
+                pbs[loc[0], loc[1]] = l
 
-    curr_t += 1  # advance the clock one takt
+            for loc in O:
+                if pbs[loc[0], loc[1]] != 0:
+                    leaving_load = pbs[loc[0], loc[1]]
+                    for req in requests_on_load[leaving_load]:
+                        departures[req] = curr_t + 1
+                        total_lead_time += (departures[req] - arrivals[req])
+                        start_move[req] = min(curr_t+1,start_move[req])  # just in case the request arrive by chance before starting to be handled by the optimization
+
+                        open_requests.remove(req)
+                        log_message(
+                            f"\trequest #{req} departs via ({loc[0]}, {loc[1]}) with load {leaving_load} at the end of the takt (time  {departures[req]})\n")
+                        #  For QA
+                        if departures[req] - arrivals[req] < orig_distance[req]:
+                            log_message("Panic: lead time is smaller than distance\n", echo_to_screen=True)
+                            exit(1)
+
+                    requests_on_load[leaving_load] = []
+
+        if curr_t > arrivals[-1] and not open_requests:
+            print_progress(
+                req_count,
+                number_of_requests,
+                number_of_requests,
+                curr_t,
+                time.perf_counter() - simulation_wall_start,
+            )
+            log_message(
+                "Simulation end\n",
+                f"Total lead time: {total_lead_time}\n",
+                f"Mean lead time: {total_lead_time / req_count:.2f}\n",
+                echo_to_screen=True,
+            )
+            break
+
+        if idle_takt > max_simulation_length:
+            log_message(
+                "Error: simulation got stuck on idle state. Stopping and reporting results for debugging only\n",
+                echo_to_screen=True,
+            )
+            break
+
+        curr_t += 1  # advance the clock one takt
+except KeyboardInterrupt:
+    interrupted = True
+    if last_progress_line_length:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        last_progress_line_length = 0
+    print("Interrupted by user", flush=True)
+    log_message("Interrupted by user\n")
+
+if interrupted:
+    raise SystemExit(130)
 
 arrivals = np.array(arrivals, dtype=int) # convert to np vector
 simulation_end_time = int(np.max(departures)) if departures.size else 0

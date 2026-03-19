@@ -27,7 +27,10 @@ def build_dist_map(Lx, Ly, O):
     return dist_map
 
 
-def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue"):
+def OneStep(
+    Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue",
+    return_escort_moves=False, return_target_moves=False
+):
     """Advance the heuristic by one takt.
 
     Args:
@@ -46,7 +49,10 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
     Returns:
         Tuple ``(A, E, moves)`` where ``A`` maps updated target locations to
         target ids, ``E`` is the updated escort set, and ``moves`` is the list
-        of movements executed during the current time step.
+        of target-load movements executed during the current time step. When
+        requested, the tuple also includes the escort movements as
+        ``(orig_x, orig_y, dest_x, dest_y)`` tuples and/or the exact target-id
+        move map for the current step.
     """
 
     def check_move(x0, y0, x1, y1):
@@ -73,6 +79,7 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
     def move_escort(x0, y0, x1, y1):
         E.remove((x0, y0))
         E_new.add((x1, y1))
+        escort_moves.append((x0, y0, x1, y1))
         dir_x, dir_y = int(np.sign(x1 - x0)), int(np.sign(y1 - y0))
 
         x, y = x0, y0
@@ -84,6 +91,7 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
                 target_id = A.pop((x + dir_x, y + dir_y))
                 A_new[(x, y)] = target_id
                 moved_target_ids.add(target_id)
+                target_move_map[target_id] = ((x + dir_x, y + dir_y), (x, y))
             x += dir_x
             y += dir_y
 
@@ -285,6 +293,8 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
     A = dict(_A)  # to make sure we are not changing the argument outside
     E = set(_E)
     moves = []
+    escort_moves = []
+    target_move_map = {}
 
     for a in list(_A):
         if a in O:
@@ -293,6 +303,13 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
                 E.add(a)
 
     if len(A) == 0:
+        extras = []
+        if return_escort_moves:
+            extras.append(escort_moves)
+        if return_target_moves:
+            extras.append(target_move_map)
+        if extras:
+            return (A, E, moves, *extras)
         return A, E, moves
 
     if dist_map is None:
@@ -398,19 +415,32 @@ def OneStep(Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue
             move_escort(x_escort, y_escort, x1, y1)
 
     A.update(A_new)
+    extras = []
+    if return_escort_moves:
+        extras.append(escort_moves)
+    if return_target_moves:
+        extras.append(target_move_map)
+    if extras:
+        return (A, E | E_new, moves, *extras)
     return A, E | E_new, moves
 
 
 def SolveGreedy(
     Lx, Ly, O, _A, _E, verbal=False, max_steps=500, acyclic=False, return_moves=False,
-    retrieval_mode="continue"
+    retrieval_mode="continue", return_trace=False
 ):
     """Repeatedly apply ``OneStep`` until all target loads are retrieved."""
     ordered_targets = sorted(
         set(_A),
         key=lambda a: (min(abs(a[0] - o[0]) + abs(a[1] - o[1]) for o in O), a[0], a[1]),
     )
-    A = {loc: idx + 1 for idx, loc in enumerate(ordered_targets)}
+    all_targets = {loc: idx + 1 for idx, loc in enumerate(ordered_targets)}
+    if retrieval_mode == "leave":
+        A = {loc: target_id for loc, target_id in all_targets.items() if loc not in O}
+        output_wait_buffer = {loc: target_id for loc, target_id in all_targets.items() if loc in O}
+    else:
+        A = dict(all_targets)
+        output_wait_buffer = {}
     E = set(_E)
 
     dist_map = build_dist_map(Lx, Ly, O)
@@ -423,13 +453,31 @@ def SolveGreedy(
     makespan = 0
     movements = 0
     move_history = []
+    escort_move_history = []
+    target_move_history = []
     while A:
         flow_time += len(A)
 
-        A, E, mv = OneStep(
-            Lx, Ly, O, A, E, dist_map, acyclic=acyclic, retrieval_mode=retrieval_mode
+        one_step_retrieval_mode = "continue" if retrieval_mode == "leave" else retrieval_mode
+        step_result = OneStep(
+            Lx, Ly, O, A, E, dist_map, acyclic=acyclic, retrieval_mode=one_step_retrieval_mode,
+            return_escort_moves=return_trace, return_target_moves=return_trace
         )
-        if return_moves:
+        if return_trace:
+            next_A, next_E, mv, escort_mv, target_mv = step_result
+            escort_move_history.append(escort_mv)
+            target_move_history.append(target_mv)
+        else:
+            next_A, next_E, mv = step_result
+
+        if retrieval_mode == "leave":
+            A = {loc: target_id for loc, target_id in next_A.items() if loc not in O}
+            E = set(next_E) | set(output_wait_buffer)
+            output_wait_buffer = {loc: target_id for loc, target_id in next_A.items() if loc in O}
+        else:
+            A, E = next_A, next_E
+
+        if return_moves or return_trace:
             move_history.append(mv)
         if verbal:
             print(f"After step: {makespan}")
@@ -443,6 +491,9 @@ def SolveGreedy(
         if makespan >= max_steps:
             print(f"Panic: could not solve in {max_steps} steps")
             exit(1)
+
+    if return_trace:
+        return makespan, flow_time, movements, move_history, escort_move_history, target_move_history
 
     if return_moves:
         return makespan, flow_time, movements, move_history

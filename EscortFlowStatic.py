@@ -69,6 +69,8 @@ parser.add_argument("--greedy", action="store_true",
                     help="Solve the static instance with OneStepHeuristic_v2.SolveGreedy instead of OPL")
 parser.add_argument("--gurobi", action="store_true",
                     help="Solve the static model with the Gurobi Python API instead of oplrun/CPLEX")
+parser.add_argument("--warmstart", action="store_true",
+                    help="Use a heuristic MIP start with the Gurobi static backend (default False)")
 
 args = parser.parse_args()
 result_csv_file = args.csv
@@ -128,6 +130,26 @@ if args.greedy and args.lp:
 
 if args.greedy and args.retrieval_mode not in ["continue", "leave"]:
     print("Panic: --greedy currently supports only --retrieval_mode continue or leave")
+    exit(1)
+
+if args.warmstart and not args.gurobi:
+    print("Panic: --warmstart is supported only together with --gurobi")
+    exit(1)
+
+if args.warmstart and args.greedy:
+    print("Panic: --warmstart cannot be combined with --greedy")
+    exit(1)
+
+if args.warmstart and args.lp:
+    print("Panic: --warmstart is supported only for integer Gurobi solves, not with --lp")
+    exit(1)
+
+if args.warmstart and args.retrieval_mode not in ["continue", "leave"]:
+    print("Panic: --warmstart currently supports only --retrieval_mode continue or leave")
+    exit(1)
+
+if args.warmstart and dp_file:
+    print("Panic: --warmstart is currently supported only on the greedy Gurobi upper-bound path, not with --dp_file")
     exit(1)
 
 Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
@@ -214,45 +236,7 @@ for x in range(Lx):
 f.write("];\n")
 
 
-f.write('Conflicts = [ \n')
-# Horizontal movements
-for y in range(Ly):
-    for x_end in range(Lx):
-        for x_start in range(x_end):
-            f.write("{")
-            # Horizontal conflicts with horizontal movements
-            for x1 in range(x_end+1):
-                for x2 in range(x1+1, Lx):
-                    f.write(f"<{x1} {y} {x2} {y}> ")
-                    f.write(f"<{x2} {y} {x1} {y}> ")
-            # Vertical conflicts with horizontal movements
-            for x in range(x_start, x_end+1):
-                for y1 in range(y+1):
-                    for y2 in range(y, Ly):
-                        if y1 != y2:
-                            f.write(f"<{x} {y1} {x} {y2}> ")
-                            f.write(f"<{x} {y2} {x} {y1}> ")
-            f.write("}\n")
-
-# Vertical movements
-for x in range(Ly):
-    for y_end in range(Ly):
-        for y_start in range(y_end):
-            f.write("{")
-            # Vertical conflicts with vertical movements
-            for y1 in range(y_end + 1):
-                for y2 in range(y1+1, Ly):
-                    f.write(f"<{x} {y1}  {x} {y2} > ")
-                    f.write(f"<{x} {y2} {x} {y1}> ")
-            # Horizontal conflicts with vertical movements
-            for y in range(y_start, y_end + 1):
-                for x1 in range(x + 1):
-                    for x2 in range(x, Lx):
-                        if x1 != x2:
-                            f.write(f"<{x1} {y} {x2} {y} > ")
-                            f.write(f"<{x2} {y} {x1} {y} > ")
-            f.write("}\n")
-f.write("];\n")
+# Conflict-pair generation is disabled; the static models rely on CellCover/avoid_conflicts.
 
 
 f.write('MoveCover = [')
@@ -300,7 +284,7 @@ f.close()
 
 header_line = (
     "date, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
-    f"Target Loads, beta, gamma, seed, T, dp-{k_prime}' makespan, dp-{k_prime}' movements , "
+    "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , "
     "ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Solver Status"
 )
 if not csv_file_contains_row(result_csv_file, header_line):
@@ -341,15 +325,66 @@ if args.gurobi and not args.greedy:
         )
     )
 
+
+def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_warmstart=False):
+    max_steps = max(1, (Lx + Ly) * len(target_positions) * 20 // max(len(escort_positions), 1))
+    need_trace = build_warmstart and args.retrieval_mode != "leave"
+    greedy_result = OneStepHeuristic_v2.SolveGreedy(
+        Lx,
+        Ly,
+        set(O),
+        set(target_positions),
+        set(escort_positions),
+        verbal=False,
+        max_steps=max_steps,
+        return_trace=need_trace,
+        retrieval_mode=args.retrieval_mode,
+    )
+    if need_trace:
+        makespan, _, movements, _, escort_moves, target_moves = greedy_result
+    else:
+        makespan, _, movements = greedy_result
+        escort_moves = None
+        target_moves = None
+    warmstart = None
+    if build_warmstart and gurobi_solver is not None and not args.lp:
+        if args.retrieval_mode == "leave":
+            makespan, warmstart = gurobi_solver.build_feasible_leave_warmstart(
+                target_positions,
+                escort_positions,
+            )
+        else:
+            warmstart = gurobi_solver.build_warmstart_from_trace(
+                target_positions,
+                escort_positions,
+                makespan,
+                target_moves,
+                escort_moves,
+            )
+    return makespan, movements, warmstart
+
 try:
     for escort_num in escorts_range:
         for rep in reps_range:
             random.seed(rep)
             R, E = GeneretaeRandomInstance(rep, Locations, escort_num, load_num)
+            heuristic_ub_makespan = 0
+            heuristic_ub_movements = 0
+            warmstart = None
 
             if dp_file:
                 moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, k_prime, False)
                 T = len(moves)
+                heuristic_ub_makespan = len(moves)
+                heuristic_ub_movements = sum(len(step) for step in moves)
+            elif args.gurobi and args.retrieval_mode in ["continue", "leave"]:
+                moves = []
+                heuristic_ub_makespan, heuristic_ub_movements, warmstart = greedy_upper_bound_and_warmstart(
+                    R,
+                    E,
+                    build_warmstart=args.warmstart,
+                )
+                T = heuristic_ub_makespan
             else:  # just guess T
                 moves = []  # so it prints 0
                 T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
@@ -374,8 +409,8 @@ try:
                 result_csv_file,
                 f"{time.ctime()},BM, {model_name},"
                 f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
-                f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {len(moves)}, "
-                f"{sum([len(x) for x in moves])}",
+                f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {heuristic_ub_makespan}, "
+                f"{heuristic_ub_movements}",
                 ensure_record_start=True,
             )
 
@@ -398,7 +433,7 @@ try:
                 )
             elif args.gurobi:
                 try:
-                    result = gurobi_solver.solve(R, E, T)
+                    result = gurobi_solver.solve(R, E, T, warmstart=warmstart)
                 except Exception as exc:
                     print(f"Could not solve the model with Gurobi: {exc}")
                     append_csv_text(result_csv_file, ",-,-,-,-,-,-, ERROR")

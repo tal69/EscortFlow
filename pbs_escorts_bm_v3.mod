@@ -38,13 +38,9 @@ int Lx = ...;
 int Ly = ...;
 int T  = ...;
 
-int num_of_pairs = Ly*Lx*(Lx+Ly-2) div 2;
-
 range Tr = 0..T;
 range Xr = 0..Lx-1;
 range Yr = 0..Ly-1;
-//range pairs = 1..int(Ly*Lx*(Lx-1)/2+ Lx*Ly(Ly-1)/2);
-range pairs = 1..num_of_pairs;
 
 
 {Loc} locations = ...; // L in the paper
@@ -67,8 +63,6 @@ int loads_to_retrieve = card(A diff O);
 
 {Move} CellCover[locations] = ...;
 {Move} MoveCover[movesA] = ...;
-
-{Move} Conflicts[pairs] = ...;
 
 
 
@@ -149,7 +143,7 @@ subject to
   	sum(l2 in NA[l1]) xA[<l1.x, l1.y, l2.x, l2.y>,t]  + sum(l2 in NE[l1]) xE[<l1.x, l1.y, l2.x, l2.y>,t]  <= 1;
   
   
-    // (7) in the paper - constraint - avoid conflicts - redundant now due to the conflict cuts
+    // (7) in the paper - constraint - avoid conflicts
   
 	avoid_conflicts: forall ( l in locations, t in Tr)  sum(m in CellCover[l]) xE[m,t] <= 1;
 	
@@ -170,8 +164,8 @@ subject to
 	forall(l2 in O ) sum(t in Tr, l1 in NA[l2]: l1 != l2) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y> ,t] == q[l2]; 
 
 
-	// Conflicts cut
-	conflict_cut: forall ( m in pairs, t in Tr)  sum(m in Conflicts[m]) xE[m,t] <= 1;
+		// Explicit conflict cuts are disabled; rely on avoid_conflicts above.
+		// conflict_cut: forall ( m in pairs, t in Tr)  sum(m in Conflicts[m]) xE[m,t] <= 1;
 
 
 }

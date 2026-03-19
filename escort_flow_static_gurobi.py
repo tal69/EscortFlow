@@ -24,7 +24,7 @@ class StaticEscortFlowGurobiSolver:
         self.output_cells = tuple(config.output_cells)
         self.output_set = set(self.output_cells)
         self.env = gp.Env(empty=True)
-        self.env.setParam("OutputFlag", 0)
+        self.env.setParam("OutputFlag", 1)
         self.env.start()
         self.network = self._build_network()
 
@@ -119,41 +119,6 @@ class StaticEscortFlowGurobiSolver:
                 for y in range(orig_y, dest_y, -1):
                     move_cover[(orig_x, y - 1, orig_x, y)].append(move)
 
-        moves_e_set = set(moves_e)
-        conflicts = []
-
-        for y in range(self.config.Ly):
-            for x_end in range(self.config.Lx):
-                for x_start in range(x_end):
-                    conflict_moves = set()
-                    for x1 in range(x_end + 1):
-                        for x2 in range(x1 + 1, self.config.Lx):
-                            conflict_moves.add((x1, y, x2, y))
-                            conflict_moves.add((x2, y, x1, y))
-                    for x in range(x_start, x_end + 1):
-                        for y1 in range(y + 1):
-                            for y2 in range(y, self.config.Ly):
-                                if y1 != y2:
-                                    conflict_moves.add((x, y1, x, y2))
-                                    conflict_moves.add((x, y2, x, y1))
-                    conflicts.append(sorted(conflict_moves & moves_e_set))
-
-        for x in range(self.config.Lx):
-            for y_end in range(self.config.Ly):
-                for y_start in range(y_end):
-                    conflict_moves = set()
-                    for y1 in range(y_end + 1):
-                        for y2 in range(y1 + 1, self.config.Ly):
-                            conflict_moves.add((x, y1, x, y2))
-                            conflict_moves.add((x, y2, x, y1))
-                    for y in range(y_start, y_end + 1):
-                        for x1 in range(x + 1):
-                            for x2 in range(x, self.config.Lx):
-                                if x1 != x2:
-                                    conflict_moves.add((x1, y, x2, y))
-                                    conflict_moves.add((x2, y, x1, y))
-                    conflicts.append(sorted(conflict_moves & moves_e_set))
-
         incoming_output_moves = {
             output: [
                 move for move in incoming_a[output]
@@ -189,7 +154,6 @@ class StaticEscortFlowGurobiSolver:
             "move_cost_e": move_cost_e,
             "cell_cover": cell_cover,
             "move_cover": move_cover,
-            "conflicts": conflicts,
             "incoming_output_moves": incoming_output_moves,
             "nonstay_outgoing_a": nonstay_outgoing_a,
             "arrival_moves": arrival_moves,
@@ -230,7 +194,7 @@ class StaticEscortFlowGurobiSolver:
         return str(value)
 
     def _extract_animation_moves(self, x_a, x_e, calc_makespan):
-        export_horizon = int(math.floor(calc_makespan + 1e-9))
+        export_horizon = max(0, int(math.ceil(calc_makespan - 1e-9)) - 1)
         moves = []
 
         for t in range(export_horizon + 1):
@@ -269,15 +233,217 @@ class StaticEscortFlowGurobiSolver:
 
         return moves
 
-    def solve(self, target_positions, escort_positions, T):
+    def build_warmstart_from_trace(self, target_positions, escort_positions, T, target_move_history, escort_move_history):
+        warmstart = {
+            "x_a": {},
+            "x_e": {},
+            "q": {output: 0.0 for output in self.output_cells},
+        }
+
+        active_targets = {loc for loc in target_positions if loc not in self.output_set}
+        current_output_stays = {loc for loc in target_positions if loc in self.output_set}
+        active_escorts = set(escort_positions)
+
+        for t in range(T + 1):
+            step_target_moves = target_move_history[t] if t < len(target_move_history) else {}
+            step_escort_moves = escort_move_history[t] if t < len(escort_move_history) else []
+
+            load_dest_by_source = {
+                source: dest
+                for source, dest in step_target_moves.values()
+            }
+            escort_dest_by_source = {
+                (orig_x, orig_y): (dest_x, dest_y)
+                for orig_x, orig_y, dest_x, dest_y in step_escort_moves
+            }
+
+            for loc in current_output_stays:
+                warmstart["x_a"][(self.network["stay_move"][loc], t)] = 1.0
+
+            for loc in active_targets:
+                dest = load_dest_by_source.get(loc, loc)
+                warmstart["x_a"][((loc[0], loc[1], dest[0], dest[1]), t)] = 1.0
+
+            for loc in active_escorts:
+                dest = escort_dest_by_source.get(loc, loc)
+                warmstart["x_e"][((loc[0], loc[1], dest[0], dest[1]), t)] = 1.0
+
+            next_targets = set()
+            next_output_stays = set()
+
+            for loc in active_targets:
+                dest = load_dest_by_source.get(loc, loc)
+                if dest in self.output_set and dest != loc:
+                    warmstart["q"][dest] += t + 1
+                    if self.config.retrieval_mode == "stay":
+                        next_targets.add(dest)
+                    elif self.config.retrieval_mode == "leave":
+                        next_output_stays.add(dest)
+                else:
+                    next_targets.add(dest)
+
+            next_escorts = {
+                escort_dest_by_source.get(loc, loc)
+                for loc in active_escorts
+            }
+            if self.config.retrieval_mode == "leave":
+                next_escorts.update(current_output_stays)
+            elif self.config.retrieval_mode == "stay":
+                next_output_stays.update(current_output_stays)
+
+            active_targets = next_targets
+            current_output_stays = next_output_stays
+            active_escorts = next_escorts
+
+        return self._densify_warmstart(warmstart, T)
+
+    def build_feasible_leave_warmstart(self, target_positions, escort_positions):
+        import OneStepHeuristic_v2
+
+        warmstart = {
+            "x_a": {},
+            "x_e": {},
+            "q": {output: 0.0 for output in self.output_cells},
+        }
+
+        ordered_targets = sorted(
+            set(target_positions),
+            key=lambda a: (min(abs(a[0] - o[0]) + abs(a[1] - o[1]) for o in self.output_cells), a[0], a[1]),
+        )
+        all_targets = {loc: idx + 1 for idx, loc in enumerate(ordered_targets)}
+        active_targets = {loc: target_id for loc, target_id in all_targets.items() if loc not in self.output_set}
+        current_output_stays = {loc: target_id for loc, target_id in all_targets.items() if loc in self.output_set}
+        active_escorts = set(escort_positions)
+        dist_map = OneStepHeuristic_v2.build_dist_map(self.config.Lx, self.config.Ly, self.output_cells)
+
+        def move_touches_blocked_cells(move, blocked_cells):
+            if move is None or not blocked_cells:
+                return False
+            orig_x, orig_y, dest_x, dest_y = move
+            dir_x = int(math.copysign(1, dest_x - orig_x)) if dest_x != orig_x else 0
+            dir_y = int(math.copysign(1, dest_y - orig_y)) if dest_y != orig_y else 0
+            x, y = orig_x, orig_y
+            while True:
+                if (x, y) in blocked_cells:
+                    return True
+                if (x, y) == (dest_x, dest_y):
+                    return False
+                x += dir_x
+                y += dir_y
+
+        t = 0
+        while active_targets or current_output_stays:
+            moving_escort = None
+            if active_targets:
+                step_result = OneStepHeuristic_v2.OneStep(
+                    self.config.Lx,
+                    self.config.Ly,
+                    set(self.output_cells),
+                    active_targets,
+                    active_escorts,
+                    dist_map,
+                    retrieval_mode="continue",
+                    return_escort_moves=True,
+                )
+                _, _, _, escort_moves = step_result
+                if not escort_moves and not current_output_stays:
+                    raise RuntimeError("Greedy leave warmstart got stuck without an escort move")
+                for escort_move in escort_moves:
+                    if not move_touches_blocked_cells(escort_move, current_output_stays.keys()):
+                        moving_escort = escort_move
+                        break
+                if moving_escort is None and not current_output_stays:
+                    raise RuntimeError("Greedy leave warmstart could not find a feasible escort move")
+
+            escort_dest_by_source = {}
+            target_dest_by_source = {}
+
+            if moving_escort is not None:
+                orig_x, orig_y, dest_x, dest_y = moving_escort
+                escort_dest_by_source[(orig_x, orig_y)] = (dest_x, dest_y)
+
+                dir_x = int(math.copysign(1, dest_x - orig_x)) if dest_x != orig_x else 0
+                dir_y = int(math.copysign(1, dest_y - orig_y)) if dest_y != orig_y else 0
+
+                x, y = orig_x, orig_y
+                while (x, y) != (dest_x, dest_y):
+                    next_loc = (x + dir_x, y + dir_y)
+                    if next_loc in active_targets:
+                        target_dest_by_source[next_loc] = (x, y)
+                    x, y = next_loc
+
+            for loc in current_output_stays:
+                warmstart["x_a"][(self.network["stay_move"][loc], t)] = 1.0
+
+            for loc in active_targets:
+                dest = target_dest_by_source.get(loc, loc)
+                warmstart["x_a"][((loc[0], loc[1], dest[0], dest[1]), t)] = 1.0
+
+            for loc in active_escorts:
+                dest = escort_dest_by_source.get(loc, loc)
+                warmstart["x_e"][((loc[0], loc[1], dest[0], dest[1]), t)] = 1.0
+
+            next_targets = {}
+            next_output_stays = {}
+            for loc, target_id in active_targets.items():
+                dest = target_dest_by_source.get(loc, loc)
+                if dest in self.output_set and dest != loc:
+                    warmstart["q"][dest] += t + 1
+                    next_output_stays[dest] = target_id
+                else:
+                    next_targets[dest] = target_id
+
+            next_escorts = {
+                escort_dest_by_source.get(loc, loc)
+                for loc in active_escorts
+            }
+            next_escorts.update(current_output_stays.keys())
+
+            active_targets = next_targets
+            current_output_stays = next_output_stays
+            active_escorts = next_escorts
+            t += 1
+
+        T = max(0, t - 1)
+        return T, self._densify_warmstart(warmstart, T)
+
+    def _densify_warmstart(self, warmstart, T):
+        dense_warmstart = {
+            "x_a": {},
+            "x_e": {},
+            "q": {},
+        }
+
+        for t in range(T + 1):
+            for move in self.network["moves_a"]:
+                dense_warmstart["x_a"][(move, t)] = warmstart["x_a"].get((move, t), 0.0)
+            for move in self.network["moves_e"]:
+                dense_warmstart["x_e"][(move, t)] = warmstart["x_e"].get((move, t), 0.0)
+
+        for output in self.output_cells:
+            dense_warmstart["q"][output] = warmstart["q"].get(output, 0.0)
+
+        return dense_warmstart
+
+    @staticmethod
+    def _apply_warmstart(x_a, x_e, q, warmstart):
+        for key, var in x_a.items():
+            var.Start = warmstart["x_a"].get(key, 0.0)
+        for key, var in x_e.items():
+            var.Start = warmstart["x_e"].get(key, 0.0)
+        for output, var in q.items():
+            var.Start = warmstart["q"].get(output, 0.0)
+
+    def solve(self, target_positions, escort_positions, T, warmstart=None):
         target_set = set(target_positions)
         escort_set = set(escort_positions)
         loads_to_retrieve = len(target_set - self.output_set)
 
         solve_start = time.perf_counter()
         model = gp.Model("escort_flow_static", env=self.env)
-        model.Params.OutputFlag = 0
+        model.Params.OutputFlag = 1
         model.Params.TimeLimit = self.config.time_limit
+        model.Params.StartNodeLimit = 100000
 
         load_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
         escort_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
@@ -413,13 +579,11 @@ class StaticEscortFlowGurobiSolver:
                 ) == q[output]
             )
 
-        for conflict_set in self.network["conflicts"]:
-            for t in tr:
-                model.addConstr(
-                    gp.quicksum(x_e[(move, t)] for move in conflict_set) <= 1
-                )
+        # Explicit conflict cuts are disabled; rely on the cell-cover constraints above.
 
         model.update()
+        if warmstart is not None and not self.config.lp:
+            self._apply_warmstart(x_a, x_e, q, warmstart)
         model.optimize()
         cpu_time = time.perf_counter() - solve_start
 
