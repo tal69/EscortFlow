@@ -15,6 +15,7 @@ class StaticGurobiConfig:
     beta: float
     gamma: float
     time_limit: int
+    work_limit: float | None = None
     lp: bool = False
 
 
@@ -444,6 +445,8 @@ class StaticEscortFlowGurobiSolver:
         model.Params.OutputFlag = 1
         model.Params.TimeLimit = self.config.time_limit
         model.Params.StartNodeLimit = 100000
+        if self.config.work_limit is not None:
+            model.Params.WorkLimit = self.config.work_limit
 
         load_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
         escort_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
@@ -477,6 +480,7 @@ class StaticEscortFlowGurobiSolver:
         )
 
         if self.config.retrieval_mode == "stay":
+            # Flow conservation at nodes for escorts and target loads in stay mode.
             for loc in self.network["locations"]:
                 for t in range(1, T + 1):
                     model.addConstr(
@@ -488,12 +492,14 @@ class StaticEscortFlowGurobiSolver:
                         gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc])
                     )
         elif self.config.retrieval_mode == "continue":
+            # Flow conservation at nodes for escorts in continue mode.
             for loc in self.network["locations"]:
                 for t in range(1, T + 1):
                     model.addConstr(
                         gp.quicksum(x_e[(move, t - 1)] for move in self.network["incoming_e"][loc]) ==
                         gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc])
                     )
+            # Flow conservation at non-output nodes for target loads in continue mode.
             for loc in self.network["not_outputs"]:
                 for t in range(1, T + 1):
                     model.addConstr(
@@ -501,6 +507,7 @@ class StaticEscortFlowGurobiSolver:
                         gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc])
                     )
         elif self.config.retrieval_mode == "leave":
+            # Leave mode at outputs: arrivals become one-period load stays, then convert into escorts.
             for output in self.output_cells:
                 stay_move = self.network["stay_move"][output]
                 incoming_output_moves = self.network["incoming_output_moves"][output]
@@ -514,6 +521,7 @@ class StaticEscortFlowGurobiSolver:
                         gp.quicksum(x_e[(move, t - 1)] for move in self.network["incoming_e"][output]) ==
                         gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][output])
                     )
+            # Leave mode away from outputs: standard flow conservation for target loads and escorts.
             for loc in self.network["not_outputs"]:
                 for t in range(1, T + 1):
                     model.addConstr(
@@ -527,6 +535,7 @@ class StaticEscortFlowGurobiSolver:
         else:
             raise ValueError(f"Unsupported retrieval_mode '{self.config.retrieval_mode}'")
 
+        # (3) in the paper: target loads stay once they reach an output cell.
         for output in self.output_cells:
             nonstay_output_moves = self.network["nonstay_outgoing_a"][output]
             for t in tr:
@@ -534,6 +543,7 @@ class StaticEscortFlowGurobiSolver:
                     gp.quicksum(x_a[(move, t)] for move in nonstay_output_moves) == 0
                 )
 
+        # (4) and (5) in the paper: supply at the initial locations of target loads and escorts.
         for loc in self.network["locations"]:
             supply_a = 1 if loc in target_set else 0
             supply_e = 1 if loc in escort_set else 0
@@ -548,28 +558,37 @@ class StaticEscortFlowGurobiSolver:
             stay_move = self.network["stay_move"][loc]
             nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
             for t in tr:
+                # Generalized capacity constraint, (6) in the paper
                 model.addConstr(
                     gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
                     gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1
                 )
+
+                # Escort conflict avoidance constraint, (7)
                 model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1
                 )
+
+                # A target load must move if crossed by an escort (9)
                 model.addConstr(
                     1 - x_a[(stay_move, t)] >=
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc])
                 )
+
+                # A target load cannot move unless crossed by an escort (8)
                 for move in nonstay_target_moves:
                     model.addConstr(
                         x_a[(move, t)] <=
                         gp.quicksum(x_e[(escort_move, t)] for escort_move in self.network["move_cover"][move])
                     )
 
+        # (10) in the paper: every target load must eventually arrive at an output cell.
         model.addConstr(
             gp.quicksum(x_a[(move, t)] for move in self.network["arrival_moves"] for t in tr) ==
             loads_to_retrieve
         )
 
+        # Integrality "cut": q stores the summed arrival times at each output cell.  (15)
         for output in self.output_cells:
             model.addConstr(
                 gp.quicksum(
@@ -595,6 +614,8 @@ class StaticEscortFlowGurobiSolver:
             "has_solution": has_solution,
             "status_name": status_name,
             "cpu_time": cpu_time,
+            "user_cut_time": 0.0,
+            "work": getattr(model, "Work", None),
             "best_bound": best_bound,
             "makespan": None,
             "flowtime": None,
@@ -641,10 +662,12 @@ class StaticEscortFlowGurobiSolver:
                 f"{self._format_result_value(result['movements'])}, "
                 f"{self._format_result_value(result['objective'])}, "
                 f"{self._format_result_value(result['best_bound'])}, "
-                f"{result['cpu_time']:.4f}, {result['status_name']}"
+                f"{result['cpu_time']:.4f}, {self._format_result_value(result.get('work'))}, "
+                f"{result.get('user_cut_time', 0.0):.4f}, {result['status_name']}"
             )
 
         return (
             f",-,-,-,-,{self._format_result_value(result['best_bound'])}, "
-            f"{result['cpu_time']:.4f}, {result['status_name']}"
+            f"{result['cpu_time']:.4f}, {self._format_result_value(result.get('work'))}, "
+            f"{result.get('user_cut_time', 0.0):.4f}, {result['status_name']}"
         )

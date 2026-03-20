@@ -27,6 +27,8 @@ import itertools
 import subprocess
 import pickle
 import time
+import os
+import socket
 
 import numpy as np
 
@@ -56,6 +58,8 @@ parser.add_argument("-T", "--T_factor", type=float,
                     help="multiplier of the planning horizon length when no heuristic is used to create an upper bound (default 2.0)",
                     default=1.6)
 parser.add_argument("-t", "--time_limit", type=int, help="Time limit for CPLEX (default 300)", default=300)
+parser.add_argument("--work_limit", type=float,
+                    help="Work limit for Gurobi solves in work units (default none)", default=None)
 parser.add_argument("--dp_file",
                     help="Dynamic programming file for upper bound and warm start (only relevant for single target load for now)",
                     default="")
@@ -71,8 +75,15 @@ parser.add_argument("--gurobi", action="store_true",
                     help="Solve the static model with the Gurobi Python API instead of oplrun/CPLEX")
 parser.add_argument("--warmstart", action="store_true",
                     help="Use a heuristic MIP start with the Gurobi static backend (default False)")
+parser.add_argument("--lazy", nargs="?", const=0, default=None, type=int,
+                    help="Use the lazy-constraint Gurobi static backend; optional value is the number of initial time steps kept in the master problem, default 0; implies --gurobi")
+parser.add_argument("--bnc", nargs="?", const=-1, default=None, type=int,
+                    help="Use the branch-and-cut Gurobi static backend; optional value is the maximum number of user cuts added per separated node, default 2*T when omitted; implies --gurobi")
 
 args = parser.parse_args()
+if args.lazy is not None or args.bnc:
+    args.gurobi = True
+
 result_csv_file = args.csv
 file_export = "out.txt" if args.export_animation else ""
 
@@ -130,6 +141,38 @@ if args.greedy and args.lp:
 
 if args.greedy and args.retrieval_mode not in ["continue", "leave"]:
     print("Panic: --greedy currently supports only --retrieval_mode continue or leave")
+    exit(1)
+
+if args.work_limit is not None and args.work_limit <= 0:
+    print("Panic: --work_limit must be positive")
+    exit(1)
+
+if args.lazy is not None and args.lazy < 0:
+    print("Panic: --lazy must be a nonnegative integer")
+    exit(1)
+
+if args.bnc is not None and args.bnc < -1:
+    print("Panic: --bnc must be a nonnegative integer")
+    exit(1)
+
+if args.lazy is not None and args.bnc:
+    print("Panic: --lazy and --bnc cannot be combined")
+    exit(1)
+
+if args.lazy is not None and args.greedy:
+    print("Panic: --lazy cannot be combined with --greedy")
+    exit(1)
+
+if args.lazy is not None and args.lp:
+    print("Panic: --lazy is supported only for integer Gurobi solves, not with --lp")
+    exit(1)
+
+if args.bnc and args.greedy:
+    print("Panic: --bnc cannot be combined with --greedy")
+    exit(1)
+
+if args.bnc and args.lp:
+    print("Panic: --bnc is supported only for integer Gurobi solves, not with --lp")
     exit(1)
 
 if args.warmstart and not args.gurobi:
@@ -283,47 +326,70 @@ f.write("];\n")
 f.close()
 
 header_line = (
-    "date, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
+    "Machine Name, Time Stamp, version, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
     "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , "
-    "ILP makespan, ILP flowtime, #load movements, obj, LB, CPU time, Solver Status"
+    "ILP makespan, ILP flowtime, #load movements, obj, LB, Wall Clock Time, Work, User Cut Time, Solver Status"
 )
 if not csv_file_contains_row(result_csv_file, header_line):
     append_csv_text(result_csv_file, header_line + "\n", ensure_record_start=True)
+
+script_version = f"{os.path.basename(__file__)} ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(__file__)))})"
+machine_name = socket.gethostname()
 
 if dp_file:
     print(f"Loading DP file {dp_file}...", flush=True)
     S = pickle.load(open(dp_file, "rb"))
     print("Done", flush=True)
 
-model_name = "Greedy"
-if not args.greedy:
+def model_name_for_instance(T):
+    if args.greedy:
+        return "Greedy"
     if args.gurobi:
-        model_name = "LP-Gurobi" if args.lp else "ILP-Gurobi"
-    else:
-        model_name = "LP" if args.lp else "ILP"
+        if args.bnc is not None:
+            bnc_limit = 2 * T if args.bnc == -1 else args.bnc
+            return f"ILP-Gurobi-BnC-{bnc_limit}"
+        if args.lazy is not None:
+            return "ILP-Gurobi-Lazy"
+        return "LP-Gurobi" if args.lp else "ILP-Gurobi"
+    return "LP" if args.lp else "ILP"
 
 gurobi_solver = None
 if args.gurobi and not args.greedy:
     try:
-        from escort_flow_static_gurobi import StaticGurobiConfig, StaticEscortFlowGurobiSolver
+        if args.bnc:
+            from escort_flow_static_bnc import StaticGurobiConfig, BnCStaticEscortFlowGurobiSolver
+        elif args.lazy is not None:
+            from escort_flow_static_lazy import StaticGurobiConfig, LazyStaticEscortFlowGurobiSolver
+        else:
+            from escort_flow_static_gurobi import StaticGurobiConfig, StaticEscortFlowGurobiSolver
     except ModuleNotFoundError as exc:
         if exc.name == "gurobipy":
             print("Panic: --gurobi requires the gurobipy package. Install it or run without --gurobi.")
             exit(1)
         raise
 
-    gurobi_solver = StaticEscortFlowGurobiSolver(
-        StaticGurobiConfig(
-            Lx=Lx,
-            Ly=Ly,
-            output_cells=tuple(O),
-            retrieval_mode=args.retrieval_mode,
-            beta=beta,
-            gamma=gamma,
-            time_limit=time_limit,
-            lp=args.lp,
-        )
+    if args.bnc is not None:
+        solver_class = BnCStaticEscortFlowGurobiSolver
+    elif args.lazy is not None:
+        solver_class = LazyStaticEscortFlowGurobiSolver
+    else:
+        solver_class = StaticEscortFlowGurobiSolver
+    config_kwargs = dict(
+        Lx=Lx,
+        Ly=Ly,
+        output_cells=tuple(O),
+        retrieval_mode=args.retrieval_mode,
+        beta=beta,
+        gamma=gamma,
+        time_limit=time_limit,
+        work_limit=args.work_limit,
+        lp=args.lp,
     )
+    if args.lazy is not None:
+        config_kwargs["lazy_master_steps"] = args.lazy
+    if args.bnc is not None:
+        config_kwargs["bnc_cut_limit"] = None if args.bnc == -1 else args.bnc
+    gurobi_solver = solver_class(StaticGurobiConfig(**config_kwargs))
 
 
 def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_warmstart=False):
@@ -389,6 +455,8 @@ try:
                 moves = []  # so it prints 0
                 T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
 
+            model_name = model_name_for_instance(T)
+
             if not args.greedy and not args.gurobi:
                 f = open(dat_file, "w")
                 f.write('file_export = "%s";\n' % file_export)
@@ -407,7 +475,7 @@ try:
 
             append_csv_text(
                 result_csv_file,
-                f"{time.ctime()},BM, {model_name},"
+                f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name},"
                 f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
                 f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {heuristic_ub_makespan}, "
                 f"{heuristic_ub_movements}",
@@ -429,14 +497,14 @@ try:
 
                 append_csv_text(
                     result_csv_file,
-                    f",{makespan}, {flowtime}, {movements}, {beta * flowtime + gamma * movements}, , {cpu_time:.4f}, Greedy"
+                    f",{makespan}, {flowtime}, {movements}, {beta * flowtime + gamma * movements}, , {cpu_time:.4f}, , 0.0000, Greedy"
                 )
             elif args.gurobi:
                 try:
                     result = gurobi_solver.solve(R, E, T, warmstart=warmstart)
                 except Exception as exc:
                     print(f"Could not solve the model with Gurobi: {exc}")
-                    append_csv_text(result_csv_file, ",-,-,-,-,-,-, ERROR")
+                    append_csv_text(result_csv_file, ",-,-,-,-,-,-,-,0.0000, ERROR")
                 else:
                     if file_export != "" and result["has_solution"]:
                         pickle.dump(

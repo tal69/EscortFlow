@@ -163,11 +163,6 @@ subject to
 	// Integrality cut 
 	forall(l2 in O ) sum(t in Tr, l1 in NA[l2]: l1 != l2) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y> ,t] == q[l2]; 
 
-
-		// Explicit conflict cuts are disabled; rely on avoid_conflicts above.
-		// conflict_cut: forall ( m in pairs, t in Tr)  sum(m in Conflicts[m]) xE[m,t] <= 1;
-
-
 }
 
 
@@ -227,13 +222,13 @@ main {
 	
 	
 	f_res.write( ",", thisOplModel.FlowTime, ",", thisOplModel.NumberOfMovements,",", 
-	cplex.getObjValue(), ",",cplex.getBestObjValue(),",",CpuTime, ",",cplex.getCplexStatus() );
+	cplex.getObjValue(), ",",cplex.getBestObjValue(),",",CpuTime, ",,", 0, ",",cplex.getCplexStatus() );
 
   
   }  
   else { // could not find a feasible solution
   
-	  f_res.write(",-,-,-,-,",cplex.getBestObjValue(),",",CpuTime,  ",",cplex.getCplexStatus()  );	
+	  f_res.write(",-,-,-,-,",cplex.getBestObjValue(),",",CpuTime, ",,", 0, ",",cplex.getCplexStatus()  );	
 	
   } 
   f_res.close(); 

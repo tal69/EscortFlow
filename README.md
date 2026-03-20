@@ -105,12 +105,15 @@ Common arguments:
 - `--gamma`: movement weight, default `0.01`
 - `-T`: legacy horizon scaling factor, default `1.6`; retained in the CLI but retired from the normal static workflow
 - `-t`: solver time limit, default `300`
+- `--work_limit`: Gurobi work limit in work units, default none
 - `--dp_file`: DP table file for the single-load case, default empty
 - `-k`: `k'` parameter used with the DP heuristic, default `0`
 - `--lp`: LP relaxation option, default off
 - `--greedy`: solve the static instance with the greedy heuristic instead of OPL, default off; currently supported for `continue` and `leave` modes. In `leave` mode, a target load that reached an output cell becomes an escort at the beginning of the next step
 - `--gurobi`: solve with the Gurobi Python API instead of `oplrun` / CPLEX, default off
 - `--warmstart`: enable heuristic MIP start with the static Gurobi backend, default off
+- `--lazy` or `--lazy N`: use the lazy-constraint Gurobi backend, default off; a bare `--lazy` means `0`, and `N` is the number of initial time steps kept in the master problem
+- `--bnc` or `--bnc N`: use the branch-and-cut Gurobi backend, default off; a bare `--bnc` means a per-node user-cut cap of `2*T`, and `N` sets that cap explicitly
 - `-a`: export animation trace, default off
 
 Range syntax:
@@ -120,9 +123,24 @@ Range syntax:
 
 Notes:
 
+- if `--gurobi` is omitted, the default solver path is CPLEX through `oplrun`
 - for `stay` mode, the number of output cells must be at least the number of target loads
 - the DP-based upper bound currently applies only to the single-load case
 - without `--dp_file`, the static horizon upper bound is taken from the greedy heuristic
+- on the standard `--gurobi` path, the full static escort-flow model is built explicitly in the master problem
+- `--lazy` selects a separate Gurobi backend that keeps the flow/supply structure in the master and enforces the target-movement coupling constraints lazily; if you pass `--lazy N`, the first `N` time steps of that coupling family stay in the master
+- `--bnc` selects a separate branch-and-cut backend; the cheap strong constraints stay in the master, while the target-movement coupling constraints are separated by enumeration in callbacks
+- in the current BnC implementation, user cuts are generated only at the root node, with a configurable cap from `--bnc N`; if the value is omitted, the default cap is `2*T` for that instance, and incumbent violations are still rejected with lazy constraints
+- `--lazy`, `--bnc`, and `--work_limit` all imply or apply only to the Gurobi backend
+- `--lazy` and `--bnc` are integer-only MILP options; they cannot be combined with `--lp`, `--greedy`, or with each other
+
+Static CSV output:
+
+- each row now begins with `Machine Name`, `Time Stamp`, and `version`, mirroring the dynamic simulator
+- `Wall Clock Time` is the elapsed solve time measured by Python around the backend call
+- `Work` is the Gurobi work value when a Gurobi backend is used; it is blank for the OPL/CPLEX path
+- `User Cut Time` is nonzero only for the BnC backend and measures time spent inside the callback separation logic
+- for the BnC backend, the `Model` field records the resolved cut cap, for example `ILP-Gurobi-BnC-20`
 
 Single-load examples:
 
@@ -143,6 +161,22 @@ python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8:4:20 
 ```
 
 For multi-load experiments, drop `-k` and `--dp_file`. The horizon upper bound is then taken from the greedy heuristic.
+
+Gurobi backend examples:
+
+```bash
+python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -e 12 -l 4 -m leave -r 11 --gurobi
+```
+
+```bash
+python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -e 12 -l 4 -m leave -r 11 --lazy 2
+```
+
+```bash
+python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -e 12 -l 4 -m leave -r 11 --bnc 10 --work_limit 500
+```
+
+With bare `--bnc`, the per-node user-cut cap defaults to `2*T`, where `T` is the horizon selected for that instance.
 
 ### `LoadFlowStatic.py`
 
@@ -187,6 +221,7 @@ Common arguments:
 
 Notes:
 
+- if `--gurobi` is omitted, the default solver path is CPLEX through `oplrun`
 - the script header says only `leave` is supported at present; that is the safe mode to use
 - as in `EscortFlowStatic.py`, the DP table route is for the single-load case
 - without `--dp_file`, BM runs in `leave` and `continue` mode use `OneStepHeuristic_v2` to get an upper bound on `T`
