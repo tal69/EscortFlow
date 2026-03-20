@@ -1,10 +1,12 @@
-# Escort Flow Simulation
+# Escort Flow Optimization and Simulation
 
-This repository contains simulation and optimization code for retrieval control in a puzzle-based storage (PBS) system with escorts. The main workflow is:
+The repository accompany the working paper by Tal Raviv and Yossi bukchin "Escort-Flow Approach for the Multi-Load Retrieval in Puzzle-Based Storage: Static and Dynamic Approach."  
 
-1. run a dynamic simulation with `EscortFlowSim_v7.py`
-2. collect steady-state statistics directly into a CSV row
-3. optionally save a raw trace with `-a/--save_raw` and inspect it with `CI_Calculation.py` or `PBSAnimation.py`
+This repository contains simulation and optimization code for retrieval control in a puzzle-based storage (PBS) system with escorts in static and dynamic environment. The main workflow is:
+
+1. run a dynamic simulation with `EscortFlowSim_v7.py` and collect steady-state statistics directly into a CSV row
+2. or run a static optimization instance with `EscortFlowStatic.py` or `LoadFlowStatic.py` to solve a fixed retrieval problem
+3. optionally save a raw simulation trace with `-a/--save_raw` and inspect it with `CI_Calculation.py` or `PBSAnimation.py`
 
 The project currently uses `EscortFlowSim_v7.py` as its rolling-horizon dynamic simulator, with Gurobi accessed through the Python API.
 
@@ -12,9 +14,9 @@ The project currently uses `EscortFlowSim_v7.py` as its rolling-horizon dynamic 
 
 - `EscortFlowSim_v7.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
 - `EscortFlowStatic.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
-- `load_flow_multi.py`: static load-flow ILP experiment runner for the corresponding benchmark instances
+- `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and `--gurobi` uses the Gurobi Python API
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
-- `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `load_flow_multi.py`, and `EscortFlowSim_v7.py`
+- `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v7.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
 
 `EscortFlowSim_v5.py` is retired, and the old `v5` file has been moved out of the repository into `Junk/` for local reference only.
@@ -47,11 +49,11 @@ The simulator expects the OPL model files in this repository, especially:
 The static experiment scripts additionally depend on:
 
 - `pbs_escorts_bm_v3.mod` and related escort-flow OPL files used by `EscortFlowStatic.py`
-- `pbs_load_flow_multi.mod` and `pbs_load_flow_multi_lp.mod` used by `load_flow_multi.py`
+- `pbs_load_flow_multi.mod` and `pbs_load_flow_multi_lp.mod` used by `LoadFlowStatic.py`
 - `PBSCom.py` for common instance-generation and formatting helpers
 - `PBS_DPHeuristic_bm.py` and `PBS_DPHeuristic_lm.py` when a DP-based upper bound is requested
 
-For the single-load experiments described in the paper, large DP table files are also required. The appendix in the linked paper source refers to:
+For the single-load static experiments, large DP table files are also required:
 
 - `BM_set10x10_k3_corner.p`
 - `BM_set16x10_k3_2centers.p`
@@ -66,12 +68,12 @@ Place the extracted `.p` files in the project directory when using the single-lo
 
 ## Static optimization scripts
 
-The repository contains two older but still useful experiment runners for the static setting:
+The repository contains two static experiment runners:
 
 - `EscortFlowStatic.py`: escort-flow formulation
-- `load_flow_multi.py`: load-flow formulation
+- `LoadFlowStatic.py`: load-flow formulation
 
-These scripts are the ones used to reproduce the static benchmark experiments discussed in Appendix D of the paper source.
+These scripts are the main entry points for the static benchmark experiments in this repository.
 
 ### `EscortFlowStatic.py`
 
@@ -92,20 +94,24 @@ Key dependencies:
 
 Common arguments:
 
-- `-x`, `-y`: PBS dimensions
-- `-O`: output cells as coordinate pairs
-- `-e`: escort-count range
-- `-r`: replication/seed range
-- `-l`: number of target loads
-- `-m`: retrieval mode, one of `stay`, `leave`, `continue`
-- `-f`: CSV result file
-- `-T`: horizon scaling factor when no DP upper bound is provided
-- `-t`: solver time limit
-- `--dp_file`: DP table file for the single-load case
-- `-k`: `k'` parameter used with the DP heuristic
-- `--lp`: LP relaxation option
-- `--greedy`: solve the static instance with the greedy heuristic instead of OPL; currently supported for `continue` and `leave` modes. In `leave` mode, a target load that reached an output cell becomes an escort at the beginning of the next step
-- `-a`: export animation trace
+- `-x`, `-y`: PBS dimensions, required
+- `-O`: output cells as coordinate pairs, required
+- `-e`: escort-count range, default `5`
+- `-r`: replication/seed range, default `1`
+- `-l`: number of target loads, default `1`
+- `-m`: retrieval mode, one of `stay`, `leave`, `continue`, default `leave`
+- `-f`: CSV result file, default `res_escort_flow.csv`
+- `--beta`: flowtime weight, default `1.0`
+- `--gamma`: movement weight, default `0.01`
+- `-T`: legacy horizon scaling factor, default `1.6`; retained in the CLI but retired from the normal static workflow
+- `-t`: solver time limit, default `300`
+- `--dp_file`: DP table file for the single-load case, default empty
+- `-k`: `k'` parameter used with the DP heuristic, default `0`
+- `--lp`: LP relaxation option, default off
+- `--greedy`: solve the static instance with the greedy heuristic instead of OPL, default off; currently supported for `continue` and `leave` modes. In `leave` mode, a target load that reached an output cell becomes an escort at the beginning of the next step
+- `--gurobi`: solve with the Gurobi Python API instead of `oplrun` / CPLEX, default off
+- `--warmstart`: enable heuristic MIP start with the static Gurobi backend, default off
+- `-a`: export animation trace, default off
 
 Range syntax:
 
@@ -116,35 +122,37 @@ Notes:
 
 - for `stay` mode, the number of output cells must be at least the number of target loads
 - the DP-based upper bound currently applies only to the single-load case
-- for multi-load runs, the script guesses the horizon length from the instance dimensions and a scaling factor
+- without `--dp_file`, the static horizon upper bound is taken from the greedy heuristic
 
-Single-load examples from the appendix:
+Single-load examples:
 
 ```bash
 python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -r 1-100 -m leave -e 3-8 -k 3 \
-  --dp_file BM_set10x10_k3_corner.p -b
+  --dp_file BM_set10x10_k3_corner.p
 ```
 
 ```bash
 python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -k 3 \
-  --dp_file BM_set16x10_k3_2centers.p -b
+  --dp_file BM_set16x10_k3_2centers.p
 ```
 
 Multi-load example:
 
 ```bash
-python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -l 4
+python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8:4:20 -l 4
 ```
 
-For multi-load experiments, drop `-k` and `--dp_file`. If the guessed time horizon is too small and the model becomes infeasible, increase `-T`.
+For multi-load experiments, drop `-k` and `--dp_file`. The horizon upper bound is then taken from the greedy heuristic.
 
-### `load_flow_multi.py`
+### `LoadFlowStatic.py`
 
 Purpose:
 
 - runs the static load-flow formulation
 - supports the same benchmark family as `EscortFlowStatic.py`
 - can solve the ILP or LP relaxation
+- defaults to BM and switches to LM only with `--lm` or `--LM`
+- can use the Gurobi Python API with `--gurobi`
 - can also export animation traces
 
 Key dependencies:
@@ -158,46 +166,50 @@ Key dependencies:
 
 Common arguments:
 
-- `-x`, `-y`: PBS dimensions
-- `-O`: output cells as coordinate pairs
-- `-e`: escort-count range
-- `-r`: replication/seed range
-- `-l`: number of target loads
-- `-m`: retrieval mode
-- `-f`: CSV result file
-- `-T`: horizon scaling factor
-- `-t`: solver time limit
-- `-b`: block-movement regime
-- `--dp_file`: DP table file for single-load upper bounds
-- `-k`: `k'` parameter for the DP heuristic
-- `--lp`: solve the LP relaxation instead of the ILP
-- `-a`: export animation trace
+- `-x`, `-y`: PBS dimensions, required
+- `-O`: output cells as coordinate pairs, required
+- `-e`: escort-count range, default `5`
+- `-r`: replication/seed range, default `1`
+- `-l`: number of target loads, default `1`
+- `-m`: retrieval mode, default `leave`
+- `-f`: CSV result file, default `res_load_flow.csv`
+- `--alpha`: makespan weight, default `0.0`
+- `--beta`: flowtime weight, default `1.0`
+- `--gamma`: movement weight, default `0.01`
+- `-T`: legacy horizon scaling factor, default `2.0`; retained in the CLI but retired from the documented BM workflow
+- `-t`: solver time limit, default `300`
+- `--lm` or `--LM`: run LM instead of the default BM mode, default off
+- `--dp_file`: DP table file for single-load upper bounds, default empty
+- `-k`: `k'` parameter for the DP heuristic, default `0`
+- `--lp`: solve the LP relaxation instead of the ILP, default off
+- `--gurobi`: solve with the Gurobi Python API instead of `oplrun`, default off
+- `-a`: export animation trace, default off
 
 Notes:
 
 - the script header says only `leave` is supported at present; that is the safe mode to use
 - as in `EscortFlowStatic.py`, the DP table route is for the single-load case
-- without a DP table, the script guesses a time horizon from the problem dimensions and `-T`
+- without `--dp_file`, BM runs in `leave` and `continue` mode use `OneStepHeuristic_v2` to get an upper bound on `T`
 
-Single-load examples from the appendix:
+Single-load examples:
 
 ```bash
-python3 load_flow_multi.py -x 10 -y 10 -O 0 0 -r 1-100 -m leave -e 3-8 -k 3 \
-  --dp_file BM_set10x10_k3_corner.p -b
+python3 LoadFlowStatic.py -x 10 -y 10 -O 0 0 -r 1-100 -m leave -e 3-8 -k 3 \
+  --dp_file BM_set10x10_k3_corner.p
 ```
 
 ```bash
-python3 load_flow_multi.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -k 3 \
-  --dp_file BM_set16x10_k3_2centers.p -b
+python3 LoadFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -k 3 \
+  --dp_file BM_set16x10_k3_2centers.p
 ```
 
 Multi-load example:
 
 ```bash
-python3 load_flow_multi.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -l 4
+python3 LoadFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8-20-4 -l 4
 ```
 
-To solve the LP relaxation for either static model, add `--lp`. As noted in the appendix, using a larger horizon can make the LP lower bound slightly weaker.
+To solve the LP relaxation for either static model, add `--lp`. Using a larger horizon can make the LP lower bound slightly weaker.
 
 ### DP helper modules
 
@@ -212,7 +224,7 @@ These helpers depend on:
 - `PBSCom.py`
 - a compatible DP table pickle
 
-They are not the main experiment entry points; normally you use them through `EscortFlowStatic.py` or `load_flow_multi.py`.
+They are not the main experiment entry points; normally you use them through `EscortFlowStatic.py` or `LoadFlowStatic.py`.
 
 ## Typical workflow
 
@@ -257,27 +269,34 @@ Key notes for `v7`:
 
 Important options:
 
-- `-x`, `-y`: PBS dimensions
-- `-O`: output cells in pairs of coordinates; ranges are supported through `PBSCom` formatting
-- `-e`: number of escorts
-- `-S`: number of requests in the simulation
-- `-R`: Poisson request arrival rate per time step
-- `-E`, `--epoch`: execution epoch length
-- `-T`: fractional horizon for the MILP; defaults to `max(--epoch + 4, --integer_horizon)`
-- `-I`: integer horizon for the MILP
-- `-t`: per-solve Gurobi time limit in seconds
-- `-M`: maximum number of target loads considered concurrently; if omitted it defaults internally to `Lx*Ly`
-- `-q`: queue management, either `fifo` or `spt`
-- `-m`, `--offline`: offline rolling horizon for pure ILP mode only; in offline mode the MILP sees requests visible at the current decision time, and the flag cannot be combined with `--greedy` or `--hybrid`
-- `--full`: use the full MILP instead of the surrogate model
-- `--greedy`: greedy heuristic only; currently requires `--epoch 1`
-- `--hybrid`: at each decision epoch, split the currently open visible requests into `old` requests already visible at the beginning of the previous epoch and `new` requests that were not visible then; use greedy when `number_of_new_open_requests >= number_of_old_open_requests * --hybrid_ratio`
-- `--hybrid_ratio`: non-negative real ratio used by `--hybrid` (default `1.0`)
-- `--num_threads`: Gurobi thread count; the default is `8` on macOS and `12` on Linux
-- `-L`: write a detailed log file
-- `-a`, `--save_raw`: save a raw pickle trace for post-processing and animation
-- `-f`: output CSV file
-- `-H`: write CSV header if needed
+- `-x`, `-y`: PBS dimensions, required
+- `-O`: output cells in pairs of coordinates; defaults to `0 0` if omitted, though in practice you normally set them explicitly
+- `-e`: number of escorts, default `8`
+- `-S`: number of requests in the simulation, default `1000`
+- `-R`: Poisson request arrival rate per time step, default `0.1`
+- `-E`, `--epoch`: execution epoch length, default `1`
+- `-T`: fractional horizon for the MILP; default `max(--epoch + 4, --integer_horizon)`
+- `-I`: integer horizon; default `--epoch`, or `--fractional_horizon` when `--warmstart` is used
+- `-t`: per-solve Gurobi time limit in seconds; default `--epoch`
+- `-M`: maximum number of target loads considered concurrently; if omitted, all cells are eligible
+- `-q`: queue management, either `fifo` or `spt`, default `spt`
+- `-m`, `--offline`: offline rolling horizon for pure ILP mode only, default off; in offline mode the MILP sees requests visible at the current decision time, and the flag cannot be combined with `--greedy` or `--hybrid`
+- `--full`: use the full MILP instead of the surrogate model, default off
+- `--greedy`: greedy heuristic only, default off; currently requires `--epoch 1`
+- `--hybrid`: switch to greedy epochs when the number of new open requests is large enough, default off
+- `--hybrid_ratio`: ratio used by `--hybrid`, default `1.0`
+- `--acyclic`: use seniority-based greedy priority instead of distance-based order, default off
+- `--gamma`: movement weight, default `0.01`
+- `--distance_penalty`: MILP distance penalty, default `1`
+- `--time_penalty`: MILP time penalty, default `1`
+- `--num_threads`: Gurobi thread count; default `8` on macOS and `12` on Linux
+- `-L`: write a detailed log file, default off
+- `-a`, `--save_raw`: save a raw pickle trace for post-processing and animation, default off
+- `-f`: output CSV file, default `sim_escort_flow.csv`
+- `-H`: write CSV header if needed, default off
+- `-o`, `--max_opt_gap`: reject MILP solutions above this gap and fall back to greedy, default `0.4`
+- `--seed`: random seed, default `0`
+- `--warmstart`: warmstart mode list; default is no warmstart
 
 `v7` timing notes:
 
@@ -336,6 +355,12 @@ This script:
 - applies MSER-5 warmup deletion
 - chooses a feasible batch size subject to a lag-1 autocorrelation check
 
+CLI defaults for `CI_Calculation.py`:
+
+- `-p`, `--pickle-file`: one or more pickle files or glob patterns, required
+- `-f`, `--csv`: summary CSV output file, default `block_res.csv`
+- `-H`, `--header`: write CSV header row, default off
+
 ## Animate PBS outputs
 
 `PBSAnimation.py` is the unified animation viewer for this repository. It is
@@ -343,7 +368,7 @@ compatible with:
 
 - raw simulation pickles produced by `EscortFlowSim_v7.py`
 - exported animation script pickles produced by `EscortFlowStatic.py` with `-a`
-- exported animation script pickles produced by `load_flow_multi.py` with `-a`
+- exported animation script pickles produced by `LoadFlowStatic.py` with `-a`
 
 To inspect a raw `EscortFlowSim_v7.py` trace visually:
 
@@ -363,7 +388,7 @@ python3 PBSAnimation.py script_BM_leave_16_10_8_4_1.p
 
 - `EscortFlowSim_v7.py`: main simulator
 - `EscortFlowStatic.py`: static escort-flow experiment runner
-- `load_flow_multi.py`: static load-flow experiment runner
+- `LoadFlowStatic.py`: static load-flow experiment runner
 - `CI_Calculation.py`: steady-state analysis from raw traces
 - `mser5.py`: MSER-5 warmup deletion helper
 - `OneStepHeuristic_v2.py`: greedy step heuristic
@@ -373,6 +398,8 @@ python3 PBSAnimation.py script_BM_leave_16_10_8_4_1.p
 - `escort_flow_*.mod`, `pbs_*.mod`: OPL model files
 - `run_*.txt`: example command lines used for experiments
 - `Junk/`, `kit/`: older or auxiliary copies of scripts
+
+The previous `load_flow_multi.py` script has been moved to `Junk/` for local legacy reference and is no longer part of the tracked repository.
 
 ## Notes
 
