@@ -14,41 +14,44 @@ class StaticGurobiConfig(BaseStaticGurobiConfig):
 
 class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
     cut_tol = 1e-6
-    lazy_cut_limit = 20
+    user_cut_node_count_limit = 15
 
     def _effective_bnc_cut_limit(self, T):
         if self.config.bnc_cut_limit is not None:
             return self.config.bnc_cut_limit
         return 2 * T
 
-    def _separate_movement_coupling(self, model, x_a_sol, x_e_sol, stay_specs_by_t, move_specs_by_t, tr, add_cut, max_cuts):
+    def _effective_lazy_cut_limit(self, T):
+        return 4 * T
+
+    def _separate_movement_coupling(self, model, x_a_sol, x_e_sol, move_specs_by_t, tr, add_cut, max_cuts):
         tol = self.cut_tol
-        added = 0
+        violations = []
 
         # (8) Target load movements allowed.
-        # (9) Target load movements enforced.
         for t in tr:
-            for stay_key, cover_keys, stay_expr in stay_specs_by_t[t]:
-                cover_value = sum(x_e_sol[key] for key in cover_keys)
-                if x_a_sol[stay_key] + cover_value > 1 + tol:
-                    add_cut(stay_expr <= 1)
-                    added += 1
-                    if added >= max_cuts:
-                        return added
-
             for move_key, move_cover_keys, move_expr in move_specs_by_t[t]:
                 if x_a_sol[move_key] <= tol:
                     continue
                 move_cover_value = sum(x_e_sol[key] for key in move_cover_keys)
-                if x_a_sol[move_key] > move_cover_value + tol:
-                    add_cut(move_expr <= 0)
-                    added += 1
-                    if added >= max_cuts:
-                        return added
+                violation = x_a_sol[move_key] - move_cover_value
+                if violation > tol:
+                    if max_cuts is None:
+                        add_cut(move_expr <= 0)
+                    else:
+                        violations.append((violation, move_expr))
 
+        if max_cuts is None:
+            return 0
+
+        violations.sort(key=lambda item: item[0], reverse=True)
+        added = 0
+        for _, move_expr in violations[:max_cuts]:
+            add_cut(move_expr <= 0)
+            added += 1
         return added
 
-    def _build_bnc_callback(self, x_a, x_e, stay_specs_by_t, move_specs_by_t, tr, callback_stats, root_cut_limit):
+    def _build_bnc_callback(self, x_a, x_e, move_specs_by_t, tr, callback_stats, node_cut_limit, lazy_cut_limit):
         x_a_items = list(x_a.items())
         x_e_items = list(x_e.items())
 
@@ -58,8 +61,11 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                 if node_status != GRB.OPTIMAL:
                     return
                 node_count = int(model.cbGet(GRB.Callback.MIPNODE_NODCNT))
-                if node_count != 0:
+                # Gurobi does not expose node depth in the MIPNODE callback, so use
+                # the explored-node count as a proxy for the first few levels below the root.
+                if node_count >= self.user_cut_node_count_limit:
                     return
+                user_cut_limit = None if node_count == 0 else node_cut_limit
 
                 callback_start = time.perf_counter()
                 x_a_values = model.cbGetNodeRel([var for _, var in x_a_items])
@@ -71,11 +77,10 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                     model,
                     x_a_sol,
                     x_e_sol,
-                    stay_specs_by_t,
                     move_specs_by_t,
                     tr,
                     model.cbCut,
-                    root_cut_limit,
+                    user_cut_limit,
                 )
                 callback_stats["time"] += time.perf_counter() - callback_start
 
@@ -90,11 +95,10 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                     model,
                     x_a_sol,
                     x_e_sol,
-                    stay_specs_by_t,
                     move_specs_by_t,
                     tr,
                     model.cbLazy,
-                    self.lazy_cut_limit,
+                    lazy_cut_limit,
                 )
                 callback_stats["time"] += time.perf_counter() - callback_start
 
@@ -120,6 +124,9 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
             model.Params.WorkLimit = self.config.work_limit
 
         tr = range(T + 1)
+        master_move_steps = T // 8
+        master_move_tr = range(min(T + 1, master_move_steps))
+        separated_move_tr = range(master_move_steps, T + 1)
         x_a = {
             (move, t): model.addVar(lb=0.0, ub=1.0, vtype=GRB.BINARY)
             for move in self.network["moves_a"]
@@ -231,27 +238,36 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1
                 )
 
+        # (9) A target load must move if crossed by an escort.
+        for loc in self.network["locations"]:
+            stay_move = self.network["stay_move"][loc]
+            for t in tr:
+                model.addConstr(
+                    1 - x_a[(stay_move, t)] >=
+                    gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc])
+                )
+
+        # Keep the "allowed movement" family (8) explicit for the first T // 8 time steps.
+        for loc in self.network["locations"]:
+            nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
+            for t in master_move_tr:
+                for move in nonstay_target_moves:
+                    model.addConstr(
+                        x_a[(move, t)] <=
+                        gp.quicksum(x_e[(escort_move, t)] for escort_move in self.network["move_cover"][move])
+                    )
+
         # (10) All target loads arrive at output cells.
         model.addConstr(
             gp.quicksum(x_a[(move, t)] for move in self.network["arrival_moves"] for t in tr) ==
             loads_to_retrieve
         )
 
-        # Only the movement-coupling constraints are separated in the callback below.
-        stay_specs_by_t = {t: [] for t in tr}
+        # Only the remaining movement-coupling constraints (8) are separated in the callback below.
         move_specs_by_t = {t: [] for t in tr}
         for loc in self.network["locations"]:
-            stay_move = self.network["stay_move"][loc]
             nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
-            for t in tr:
-                cover_keys = tuple((move, t) for move in self.network["cell_cover"][loc])
-                stay_specs_by_t[t].append(
-                    (
-                        (stay_move, t),
-                        cover_keys,
-                        x_a[(stay_move, t)] + gp.quicksum(x_e[key] for key in cover_keys),
-                    )
-                )
+            for t in separated_move_tr:
                 for move in nonstay_target_moves:
                     move_cover_keys = tuple((escort_move, t) for escort_move in self.network["move_cover"][move])
                     move_specs_by_t[t].append(
@@ -273,8 +289,17 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
 
         model.update()
         callback_stats = {"time": 0.0}
-        root_cut_limit = self._effective_bnc_cut_limit(T)
-        callback = self._build_bnc_callback(x_a, x_e, stay_specs_by_t, move_specs_by_t, tr, callback_stats, root_cut_limit)
+        node_cut_limit = self._effective_bnc_cut_limit(T)
+        lazy_cut_limit = self._effective_lazy_cut_limit(T)
+        callback = self._build_bnc_callback(
+            x_a,
+            x_e,
+            move_specs_by_t,
+            separated_move_tr,
+            callback_stats,
+            node_cut_limit,
+            lazy_cut_limit,
+        )
         if warmstart is not None:
             # First let Gurobi search without bias. If it fails to find any incumbent,
             # restart once and use the greedy solution as a fallback start.

@@ -83,7 +83,7 @@ parser.add_argument("--bnc", nargs="?", const=-1, default=None, type=int,
                     help="Use the branch-and-cut Gurobi static backend; optional value is the maximum number of user cuts added per separated node, default 2*T when omitted; implies --gurobi")
 
 args = parser.parse_args()
-if args.lazy is not None or args.bnc:
+if args.lazy is not None or args.bnc is not None:
     args.gurobi = True
 
 result_csv_file = args.csv
@@ -151,7 +151,7 @@ if args.work_limit is not None and args.work_limit <= 0:
     print("Panic: --work_limit must be positive")
     exit(1)
 
-if args.work_limit is not None and not args.gurobi and args.lazy is None and not args.bnc:
+if args.work_limit is not None and not args.gurobi and args.lazy is None and args.bnc is None:
     print("Panic: --work_limit is supported only with the Gurobi static backends")
     exit(1)
 
@@ -163,7 +163,7 @@ if args.bnc is not None and args.bnc < -1:
     print("Panic: --bnc must be a nonnegative integer")
     exit(1)
 
-if args.lazy is not None and args.bnc:
+if args.lazy is not None and args.bnc is not None:
     print("Panic: --lazy and --bnc cannot be combined")
     exit(1)
 
@@ -175,11 +175,11 @@ if args.lazy is not None and args.lp:
     print("Panic: --lazy is supported only for integer Gurobi solves, not with --lp")
     exit(1)
 
-if args.bnc and args.greedy:
+if args.bnc is not None and args.greedy:
     print("Panic: --bnc cannot be combined with --greedy")
     exit(1)
 
-if args.bnc and args.lp:
+if args.bnc is not None and args.lp:
     print("Panic: --bnc is supported only for integer Gurobi solves, not with --lp")
     exit(1)
 
@@ -364,7 +364,7 @@ def model_name_for_instance(T):
 gurobi_solver = None
 if args.gurobi and not args.greedy:
     try:
-        if args.bnc:
+        if args.bnc is not None:
             from escort_flow_static_bnc import StaticGurobiConfig, BnCStaticEscortFlowGurobiSolver
         elif args.lazy is not None:
             from escort_flow_static_lazy import StaticGurobiConfig, LazyStaticEscortFlowGurobiSolver

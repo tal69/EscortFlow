@@ -303,6 +303,8 @@ class RollingHorizonGurobiSolver:
                 GRB.MINIMIZE,
             )
 
+        # (1) Escort flow conservation.
+        # (2) Target flow conservation away from outputs.
         for t in range(1, T + 1):
             for loc in self.network["locations"]:
                 model.addConstr(
@@ -317,6 +319,7 @@ class RollingHorizonGurobiSolver:
                     name=f"target_flow_{loc[0]}_{loc[1]}_t{t}",
                 )
 
+        # (3) Target loads stay once they reach an output cell.
         for output in self.output_cells:
             nonstay_output_moves = [
                 move for move in self.network["outgoing_a"][output]
@@ -328,6 +331,7 @@ class RollingHorizonGurobiSolver:
                     name=f"output_nonstay_{output[0]}_{output[1]}_t{t}",
                 )
 
+        # (4) and (5) Supply at the initial locations of target loads and escorts.
         supply_a_constraints = {}
         supply_e_constraints = {}
         for loc in self.network["locations"]:
@@ -347,22 +351,26 @@ class RollingHorizonGurobiSolver:
                 if move != stay_move
             ]
             for t in range(T + 1):
-                model.addConstr(
-                    gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
-                    gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1,
-                    name=f"cap_{loc[0]}_{loc[1]}_t{t}",
-                )
+                # (6) Generalized capacity constraint. - found to be redundant
+                # model.addConstr(
+                #     gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
+                #     gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1,
+                #     name=f"cap_{loc[0]}_{loc[1]}_t{t}",
+                # )
+                # (7) Escort conflict avoidance.
                 model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1,
                     name=f"cell_cover_{loc[0]}_{loc[1]}_t{t}",
                 )
                 if not self.config.bnc:
+                    # (9) A target load must move if crossed by an escort.
                     model.addConstr(
                         1 - x_a[(stay_move, t)] >= gp.quicksum(
                             x_e[(move, t)] for move in self.network["cell_cover"][loc]
                         ),
                         name=f"stay_cover_{loc[0]}_{loc[1]}_t{t}",
                     )
+                    # (8) A target load cannot move unless crossed by an escort.
                     for move in nonstay_target_moves:
                         model.addConstr(
                             x_a[(move, t)] <= gp.quicksum(
@@ -374,6 +382,7 @@ class RollingHorizonGurobiSolver:
 
         retrieve_total_constraint = None
         if self.config.full:
+            # (10) Every target load must eventually arrive at an output cell.
             arrival_moves_to_outputs = [
                 move for move in self.network["moves_a"]
                 if (move[2], move[3]) in self.output_set and (move[0], move[1]) != (move[2], move[3])
@@ -388,6 +397,7 @@ class RollingHorizonGurobiSolver:
                     move for move in self.network["incoming_a"][output]
                     if (move[0], move[1]) != (move[2], move[3])
                 ]
+                # (15) q stores the summed arrival times at each output cell.
                 model.addConstr(
                     gp.quicksum(
                         (t + 1) * x_a[(move, t)]
@@ -399,6 +409,7 @@ class RollingHorizonGurobiSolver:
         bnc_stay_specs_by_t = None
         bnc_move_specs_by_t = None
         if self.config.bnc:
+            # Prepare separated representations of (8) and (9) for the callback.
             bnc_stay_specs_by_t = {t: [] for t in range(T + 1)}
             bnc_move_specs_by_t = {t: [] for t in range(T + 1)}
             for loc in self.network["locations"]:

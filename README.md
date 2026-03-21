@@ -113,7 +113,7 @@ Common arguments:
 - `--gurobi`: solve with the Gurobi Python API instead of `oplrun` / CPLEX, default off
 - `--warmstart`: enable heuristic MIP start with the static Gurobi backend, default off
 - `--lazy` or `--lazy N`: use the lazy-constraint Gurobi backend, default off; a bare `--lazy` means `0`, and `N` is the number of initial time steps kept in the master problem
-- `--bnc` or `--bnc N`: use the branch-and-cut Gurobi backend, default off; a bare `--bnc` means a per-node user-cut cap of `2*T`, and `N` sets that cap explicitly
+- `--bnc` or `--bnc N`: use the branch-and-cut Gurobi backend, default off; a bare `--bnc` means a per-separated-node user-cut cap of `2*T`, and `N` sets that cap explicitly
 - `-a`: export animation trace, default off
 
 Range syntax:
@@ -130,8 +130,8 @@ Notes:
 - on the standard `--gurobi` path, the full static escort-flow model is built explicitly in the master problem
 - with any Gurobi backend, `--warmstart` is treated as a fallback: the solver first tries to find an incumbent on its own, and only if that fails does it restart once with the greedy start
 - `--lazy` selects a separate Gurobi backend that keeps the flow/supply structure in the master and enforces the target-movement coupling constraints lazily; if you pass `--lazy N`, the first `N` time steps of that coupling family stay in the master
-- `--bnc` selects a separate branch-and-cut backend; the cheap strong constraints stay in the master, while the target-movement coupling constraints are separated by enumeration in callbacks
-- in the current BnC implementation, user cuts are generated only at the root node, with a configurable cap from `--bnc N`; if the value is omitted, the default cap is `2*T` for that instance, and incumbent violations are still rejected with lazy constraints
+- `--bnc` selects a separate branch-and-cut backend; the cheap strong constraints and constraint family `(9)` stay in the master, and constraint family `(8)` also stays explicit for the first `T // 8` time steps, while the remaining later `(8)` constraints are separated by enumeration in callbacks
+- in the current BnC implementation, user cuts are generated at the root and at a small number of early branch-and-bound nodes near the root; the root node is uncapped, while later separated nodes use the configurable `--bnc N` cap, which defaults to `2*T` when omitted, and under that cap the strongest violations are added first; incumbent violations are still rejected with lazy constraints using a cap of `4*T`
 - `--lazy`, `--bnc`, and `--work_limit` all imply or apply only to the Gurobi backend
 - `--lazy` and `--bnc` are integer-only MILP options; they cannot be combined with `--lp`, `--greedy`, or with each other
 
