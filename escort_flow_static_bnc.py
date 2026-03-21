@@ -223,14 +223,6 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                 gp.quicksum(x_e[(move, 0)] for move in self.network["outgoing_e"][loc]) == supply_e
             )
 
-        # (6) Generalized capacity constraint.
-        for loc in self.network["locations"]:
-            for t in tr:
-                model.addConstr(
-                    gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
-                    gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1
-                )
-
         # (7) Avoid conflicts.
         for loc in self.network["locations"]:
             for t in tr:

@@ -9,8 +9,10 @@
 float temp;
 
 float time_limit = ...;
+int threads = ...;
 
 execute {cplex.tilim = time_limit;
+		cplex.threads = threads;
 		var before = new Date();
 		temp = before.getTime();} 
 

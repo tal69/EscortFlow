@@ -18,6 +18,7 @@ class LoadFlowStaticGurobiConfig:
     time_limit: int | None
     work_limit: float | None = None
     lp: bool = False
+    threads: int = 0
 
 
 class LoadFlowStaticGurobiSolver:
@@ -27,6 +28,7 @@ class LoadFlowStaticGurobiSolver:
         self.output_set = set(self.output_cells)
         self.env = gp.Env(empty=True)
         self.env.setParam("OutputFlag", 1)
+        self.env.setParam("Threads", self.config.threads)
         self.env.start()
         self.network = self._build_network()
 

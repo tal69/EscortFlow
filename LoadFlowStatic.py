@@ -26,6 +26,14 @@ import OneStepHeuristic_v2
 
 parser = argparse.ArgumentParser()
 
+
+def solver_thread_count():
+    if sys.platform.startswith("linux"):
+        return 12
+    if sys.platform == "darwin":
+        return 8
+    return 0
+
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
 parser.add_argument("-O", "--output_cells", nargs='+', type=int, help="List of output locations", required=True)
@@ -134,6 +142,7 @@ if args.dp_file:
     print("Done", flush=True)
 
 Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
+solver_threads = solver_thread_count()
 
 
 def greedy_upper_bound(target_positions, escort_positions):
@@ -181,6 +190,7 @@ if args.gurobi:
             time_limit=time_limit,
             work_limit=args.work_limit,
             lp=args.lp,
+            threads=solver_threads,
         )
     )
 
@@ -211,6 +221,7 @@ try:
                 f.write('file_export = "%s";\n' % file_export)
                 f.write(f'file_res = "{result_csv_file}";\n')
                 f.write('time_limit = %d;\n' % time_limit)
+                f.write('threads = %d;\n' % solver_threads)
                 f.write(f'MoveMethod = {"BM" if is_bm else "LM"};\n')
                 f.write('alpha=%f;\n' % alpha)
                 f.write('beta=%f;\n' % beta)

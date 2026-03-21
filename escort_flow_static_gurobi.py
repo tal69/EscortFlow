@@ -17,7 +17,7 @@ class StaticGurobiConfig:
     time_limit: int | None
     work_limit: float | None = None
     lp: bool = False
-    omit_capacity_constraints: bool = False
+    threads: int = 0
 
 
 class StaticEscortFlowGurobiSolver:
@@ -27,6 +27,7 @@ class StaticEscortFlowGurobiSolver:
         self.output_set = set(self.output_cells)
         self.env = gp.Env(empty=True)
         self.env.setParam("OutputFlag", 1)
+        self.env.setParam("Threads", self.config.threads)
         self.env.start()
         self.network = self._build_network()
 
@@ -560,13 +561,6 @@ class StaticEscortFlowGurobiSolver:
             stay_move = self.network["stay_move"][loc]
             nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
             for t in tr:
-                # Generalized capacity constraint, (6) in the paper
-                if not self.config.omit_capacity_constraints:
-                    model.addConstr(
-                        gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
-                        gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1
-                    )
-
                 # Escort conflict avoidance constraint, (7)
                 model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1

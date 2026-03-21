@@ -351,12 +351,6 @@ class RollingHorizonGurobiSolver:
                 if move != stay_move
             ]
             for t in range(T + 1):
-                # (6) Generalized capacity constraint. - found to be redundant
-                # model.addConstr(
-                #     gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
-                #     gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1,
-                #     name=f"cap_{loc[0]}_{loc[1]}_t{t}",
-                # )
                 # (7) Escort conflict avoidance.
                 model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1,

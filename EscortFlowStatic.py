@@ -40,6 +40,14 @@ import argparse
 
 parser = argparse.ArgumentParser()
 
+
+def solver_thread_count():
+    if sys.platform.startswith("linux"):
+        return 12
+    if sys.platform == "darwin":
+        return 8
+    return 0
+
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
 parser.add_argument("-O", "--output_cells", nargs='+', type=int, help="List of output locations", required=True)
@@ -204,6 +212,7 @@ if args.warmstart and dp_file:
     exit(1)
 
 Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
+solver_threads = solver_thread_count()
 f = open(network_file, "w")
 
 f.write('locations = {')
@@ -334,7 +343,7 @@ f.write("];\n")
 f.close()
 
 header_line = (
-    "Machine Name, Time Stamp, version, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
+    "Machine Name, Time Stamp, version, Moves, Model, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
     "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , "
     "ILP makespan, ILP flowtime, #load movements, obj, LB, Wall Clock Time, Work, User Cut Time, Solver Status"
 )
@@ -354,12 +363,17 @@ def model_name_for_instance(T):
         return "Greedy"
     if args.gurobi:
         if args.bnc is not None:
-            bnc_limit = 2 * T if args.bnc == -1 else args.bnc
-            return f"ILP-Gurobi-BnC-{bnc_limit}"
+            return "ILP-Gurobi-BnC"
         if args.lazy is not None:
             return "ILP-Gurobi-Lazy"
         return "LP-Gurobi" if args.lp else "ILP-Gurobi"
     return "LP" if args.lp else "ILP"
+
+
+def max_user_cut_per_node_for_instance(T):
+    if args.bnc is None:
+        return "-"
+    return str(2 * T if args.bnc == -1 else args.bnc)
 
 gurobi_solver = None
 if args.gurobi and not args.greedy:
@@ -392,6 +406,7 @@ if args.gurobi and not args.greedy:
         time_limit=time_limit,
         work_limit=args.work_limit,
         lp=args.lp,
+        threads=solver_threads,
     )
     if args.lazy is not None:
         config_kwargs["lazy_master_steps"] = args.lazy
@@ -464,12 +479,14 @@ try:
                 T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
 
             model_name = model_name_for_instance(T)
+            max_user_cut_per_node = max_user_cut_per_node_for_instance(T)
 
             if not args.greedy and not args.gurobi:
                 f = open(dat_file, "w")
                 f.write('file_export = "%s";\n' % file_export)
                 f.write(f'file_res = "{result_csv_file}";\n')
                 f.write('time_limit = %d;\n' % time_limit)
+                f.write('threads = %d;\n' % solver_threads)
                 f.write('beta=%f;\n' % beta)
                 f.write('gamma=%f;\n' % gamma)
                 f.write('Lx=%d;\n' % Lx)
@@ -483,7 +500,7 @@ try:
 
             append_csv_text(
                 result_csv_file,
-                f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name},"
+                f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name}, {max_user_cut_per_node},"
                 f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
                 f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {heuristic_ub_makespan}, "
                 f"{heuristic_ub_movements}",

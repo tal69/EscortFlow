@@ -285,11 +285,6 @@ class RollingHorizonGurobiSolver:
             ]
             for t in range(T + 1):
                 model.addConstr(
-                    gp.quicksum(x_a[(move, t)] for move in self.network["outgoing_a"][loc]) +
-                    gp.quicksum(x_e[(move, t)] for move in self.network["outgoing_e"][loc]) <= 1,
-                    name=f"cap_{loc[0]}_{loc[1]}_t{t}",
-                )
-                model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1,
                     name=f"cell_cover_{loc[0]}_{loc[1]}_t{t}",
                 )
