@@ -514,6 +514,8 @@ try:
                     print(f"Could not solve the model with Gurobi: {exc}")
                     append_csv_text(result_csv_file, ",-,-,-,-,-,-,-,0.0000, ERROR")
                 else:
+                    if result["status_name"] == "INTERRUPTED":
+                        sys.exit(130)
                     if file_export != "" and result["has_solution"]:
                         pickle.dump(
                             (Lx, Ly, O, E, R, result["animation_moves"]),
