@@ -255,8 +255,8 @@ if __name__ == "__main__":
     header_cols = [
         "Pickle File", "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
         "Number of outputs", "Number of Escorts", "Number of Requests", "Simulation End Time",
-        "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Max Balls In Air",
-        "Max Opt Gap", "Actual Max Balls", "Non Optimal", "Max Gap", "Heuristic Solutions",
+        "Fractional Horizon", "Integer Horizon", "Execution Horizon", "Time Limit", "Attention Limit",
+        "Max Opt Gap", "Actual Attention", "Non Optimal", "Max Gap", "Heuristic Solutions",
         "Lead Time Mean", "Lead Time CI Half Width 95%",
         "Waiting Time Mean", "Waiting Time CI Half Width 95%",
         "Flow Time Mean", "Flow Time CI Half Width 95%",

@@ -272,13 +272,22 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
             )
 
         model.update()
-        if warmstart is not None:
-            # With separated movement-coupling constraints, a full incumbent start can
-            # over-bias the search. Keep the greedy solution as variable hints instead.
-            self._apply_warm_hints(x_a, x_e, q, warmstart)
         callback_stats = {"time": 0.0}
         root_cut_limit = self._effective_bnc_cut_limit(T)
-        model.optimize(self._build_bnc_callback(x_a, x_e, stay_specs_by_t, move_specs_by_t, tr, callback_stats, root_cut_limit))
+        callback = self._build_bnc_callback(x_a, x_e, stay_specs_by_t, move_specs_by_t, tr, callback_stats, root_cut_limit)
+        if warmstart is not None:
+            # First let Gurobi search without bias. If it fails to find any incumbent,
+            # restart once and use the greedy solution as a fallback start.
+            model.optimize(callback)
+            status_name = self._status_name(model.Status)
+            if model.SolCount == 0 and status_name not in {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED", "INTERRUPTED"}:
+                model.reset()
+                model.Params.SolutionLimit = 1
+                model.Params.StartNodeLimit = -2
+                self._apply_warmstart(x_a, x_e, q, warmstart)
+                model.optimize(callback)
+        else:
+            model.optimize(callback)
         cpu_time = time.perf_counter() - solve_start
 
         status_name = self._status_name(model.Status)

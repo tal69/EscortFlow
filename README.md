@@ -4,19 +4,19 @@ The repository accompany the working paper by Tal Raviv and Yossi bukchin "Escor
 
 This repository contains simulation and optimization code for retrieval control in a puzzle-based storage (PBS) system with escorts in static and dynamic environment. The main workflow is:
 
-1. run a dynamic simulation with `EscortFlowSim_v7.py` and collect steady-state statistics directly into a CSV row
+1. run a dynamic simulation with `EscortFlowSim_v8.py` and collect steady-state statistics directly into a CSV row
 2. or run a static optimization instance with `EscortFlowStatic.py` or `LoadFlowStatic.py` to solve a fixed retrieval problem
 3. optionally save a raw simulation trace with `-a/--save_raw` and inspect it with `CI_Calculation.py` or `PBSAnimation.py`
 
-The project currently uses `EscortFlowSim_v7.py` as its rolling-horizon dynamic simulator, with Gurobi accessed through the Python API.
+The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic simulator, with Gurobi accessed through the Python API.
 
 ## Main entry points
 
-- `EscortFlowSim_v7.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
+- `EscortFlowSim_v8.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
 - `EscortFlowStatic.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and `--gurobi` uses the Gurobi Python API
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
-- `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v7.py`
+- `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v8.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
 
 `EscortFlowSim_v5.py` is retired, and the old `v5` file has been moved out of the repository into `Junk/` for local reference only.
@@ -38,7 +38,7 @@ python3 -m pip install -r requirements.txt
 
 Optimization:
 
-- Gurobi with the Python API installed for `EscortFlowSim_v7.py`
+- Gurobi with the Python API installed for `EscortFlowSim_v8.py`
 - IBM ILOG OPL / CPLEX with `oplrun` available on `PATH`
 
 The simulator expects the OPL model files in this repository, especially:
@@ -128,6 +128,7 @@ Notes:
 - the DP-based upper bound currently applies only to the single-load case
 - without `--dp_file`, the static horizon upper bound is taken from the greedy heuristic
 - on the standard `--gurobi` path, the full static escort-flow model is built explicitly in the master problem
+- with any Gurobi backend, `--warmstart` is treated as a fallback: the solver first tries to find an incumbent on its own, and only if that fails does it restart once with the greedy start
 - `--lazy` selects a separate Gurobi backend that keeps the flow/supply structure in the master and enforces the target-movement coupling constraints lazily; if you pass `--lazy N`, the first `N` time steps of that coupling family stay in the master
 - `--bnc` selects a separate branch-and-cut backend; the cheap strong constraints stay in the master, while the target-movement coupling constraints are separated by enumeration in callbacks
 - in the current BnC implementation, user cuts are generated only at the root node, with a configurable cap from `--bnc N`; if the value is omitted, the default cap is `2*T` for that instance, and incumbent violations are still rejected with lazy constraints
@@ -265,42 +266,62 @@ They are not the main experiment entry points; normally you use them through `Es
 
 ### 1. Run a simulation
 
-#### Current version: `EscortFlowSim_v7.py`
+#### Current version: `EscortFlowSim_v8.py`
 
-`v7` is the maintained dynamic simulator. It uses an in-process Gurobi model and writes the CSV/raw outputs used by the rest of this repository.
+`v8` is the maintained dynamic simulator. It uses an in-process persistent Gurobi model, writes the CSV/raw outputs used by the rest of this repository, and is the sandbox for the current rolling-horizon experiments.
 
 Example greedy-only run:
 
 ```bash
-python3 EscortFlowSim_v7.py -x 9 -y 5 -O 4 0 -e 4 -R 0.4 \
+python3 EscortFlowSim_v8.py -x 9 -y 5 -O 4 0 -e 4 -R 0.4 \
   -S 1600 --greedy -f results.csv -H
 ```
 
-Example rolling-horizon Gurobi run:
+Example surrogate rolling-horizon run:
 
 ```bash
-python3 EscortFlowSim_v7.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
+python3 EscortFlowSim_v8.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
   -T 5 -I 1 -E 1 -R 0.2 -M 6 -q spt -L -f results.csv -H
 ```
 
-Example hybrid run with multi-step epochs:
+Example full-model BnC hybrid run:
 
 ```bash
-python3 EscortFlowSim_v7.py -x 9 -y 5 -O 4 0 -e 4 -S 2000 \
-  -T 6 -I 2 -E 2 -R 0.2 -M 6 --hybrid --hybrid_ratio 1.0 -L -f results.csv -H
+python3 EscortFlowSim_v8.py -x 9 -y 5 -O 4 0 -e 8 -R 0.4 -S 100 \
+  --full --bnc --hybrid -I -f sim_escort_flow.csv -H
 ```
 
-Key notes for `v7`:
+Key notes for `v8`:
 
-- `-t` is the per-solve Gurobi time limit
-- `--num_threads` controls Gurobi threads
-- `v7` now builds the rolling-horizon Gurobi model once and reuses it across epochs by updating only the dynamic state-dependent data; this removes the previous full model rebuild at every solve
-- `v7` uses balanced Gurobi search by default (`MIPFocus=0`), and switches to optimality emphasis (`MIPFocus=2`) when `--warmstart` is enabled; the solver MIP gap target remains `0.01%`
-- `--warmstart` now accepts explicit modes: `greedy`, `ilp`, or `ilp greedy`; by default all unused arc variables are set to `0`, and `nozero` disables that
-- when a warm start is used, `v7` clears any previous Gurobi solution / MIP-start state before applying the requested start vector, so warmstart behavior remains explicit instead of leaking across solves
-- `--warmstart` is allowed only when `--integer_horizon == --fractional_horizon`; if `--integer_horizon` is omitted, it defaults to `--fractional_horizon`
-- no OPL temp files are created
-- the interactive progress line now shows both arrivals and departures, and after the run finishes it prints the raw average lead time after cooldown trimming and warmup deletion
+- `v8` builds the rolling-horizon Gurobi model once per active horizon shape and reuses it across epochs by updating only state-dependent data.
+- `-t` is the per-solve Gurobi time limit, and `--num_threads` controls Gurobi threads.
+- `v8` uses balanced Gurobi search by default (`MIPFocus=0`) and switches to optimality emphasis (`MIPFocus=2`) when `--warmstart` is enabled.
+- `--warmstart` accepts `greedy`, `ilp`, or `ilp greedy`; by default unused arc variables are set to `0`, and `nozero` disables that.
+- the warmstart label is appended to the CSV `Algorithm Name` whenever a warmstart is active.
+- if a solve is interrupted with `CTRL-C`, the script exits instead of continuing to later instances in the loop.
+- the interactive progress line shows both arrivals and departures, and after the run finishes it prints the raw average lead time after cooldown trimming and warmup deletion.
+
+Model variants:
+
+- surrogate model: controlled directly by `-T`, `-I`, and `-E`
+- full model: enabled by `--full`; the planning horizon is recomputed from the greedy completion horizon at each solve
+- with `--full` and no `-I`: `v8` uses a partial LP relaxation (`PLPR`), where only the first `-E` periods are integer and the remaining greedy-based horizon is fractional
+- with `--full` and any use of `-I` (including bare `-I`): the entire greedy-based full horizon is integer
+- in the CSV `Algorithm Name`, `PLPR` is added when the active model contains a fractional tail
+
+Branch-and-cut in `v8`:
+
+- `--bnc` is available for both the surrogate and full MILP paths
+- under `--bnc`, the target-movement coupling constraints are removed from the master and separated in callbacks
+- user cuts are generated only at the root node
+- in PLPR mode, user-cut separation scans the integer periods only
+- lazy constraints still enforce the full horizon, including fractional periods when they exist
+- the per-callback cut budget is `2*T`, where `T` is the active fractional horizon for that solve
+
+Warmstart behavior in `v8`:
+
+- warmstarts are allowed only on all-integer surrogate models, so for surrogate `--warmstart ilp` and `--warmstart ilp greedy`, `--integer_horizon` must equal `--fractional_horizon`
+- `--warmstart` is recorded in both the dedicated warmstart CSV columns and in the `Algorithm Name`
 
 Important options:
 
@@ -310,13 +331,14 @@ Important options:
 - `-S`: number of requests in the simulation, default `1000`
 - `-R`: Poisson request arrival rate per time step, default `0.1`
 - `-E`, `--epoch`: execution epoch length, default `1`
-- `-T`: fractional horizon for the MILP; default `max(--epoch + 4, --integer_horizon)`
-- `-I`: integer horizon; default `--epoch`, or `--fractional_horizon` when `--warmstart` is used
+- `-T`: surrogate fractional horizon; ignored by `--full`
+- `-I`: integer horizon; bare `-I` means all periods are integer
 - `-t`: per-solve Gurobi time limit in seconds; default `--epoch`
-- `-M`: maximum number of target loads considered concurrently; if omitted, all cells are eligible
+- `-M`, `--max_attention`: attention limit, i.e. the maximum number of target loads considered concurrently; if omitted, all cells are eligible
 - `-q`: queue management, either `fifo` or `spt`, default `spt`
 - `-m`, `--offline`: offline rolling horizon for pure ILP mode only, default off; in offline mode the MILP sees requests visible at the current decision time, and the flag cannot be combined with `--greedy` or `--hybrid`
 - `--full`: use the full MILP instead of the surrogate model, default off
+- `--bnc`: use branch-and-cut separation on the movement-coupling family, default off
 - `--greedy`: greedy heuristic only, default off; currently requires `--epoch 1`
 - `--hybrid`: switch to greedy epochs when the number of new open requests is large enough, default off
 - `--hybrid_ratio`: ratio used by `--hybrid`, default `1.0`
@@ -333,17 +355,18 @@ Important options:
 - `--seed`: random seed, default `0`
 - `--warmstart`: warmstart mode list; default is no warmstart
 
-`v7` timing notes:
+`v8` timing and control notes:
 
-- The simulator plans once per epoch and then executes the resulting move list for that entire epoch.
+- The simulator plans once per epoch and then executes the resulting move list for that epoch.
 - MILP visibility is delayed by one epoch: requests must be visible by the beginning of the previous epoch to enter the next MILP solve.
 - With `--offline`, the MILP instead uses the requests visible at the current decision time.
 - In hybrid mode, `old requests` are the currently open requests that were already visible at the beginning of the previous epoch, and `new requests` are the currently open requests that were not visible then.
-- If an ILP solution is unusable, `v7` falls back to greedy on all target loads visible at the current decision time and fills the whole epoch greedily.
+- If an ILP solution is unusable, `v8` falls back to greedy on all target loads visible at the current decision time and fills the whole epoch greedily.
+- fallback greedy runs are now split in the CSV into `Fallback No Feasible Runs`, `Fallback Gap Too High Runs`, and `Fallback Same State Runs`.
 
 ## Simulator outputs
 
-Each run of `EscortFlowSim_v7.py` produces the following outputs:
+Each run of `EscortFlowSim_v8.py` produces the following outputs:
 
 - one appended row in the requested CSV file
 - optionally, when `-a/--save_raw` is set, one raw pickle trace such as `sim_escort_flow_rawYYYY-MM-DD_HHMMSS.p`
@@ -357,7 +380,10 @@ The CSV includes:
 - confidence-interval half widths
 - batching diagnostics after MSER-5 warmup deletion
 - `cpu_time`
-- separate `Solver Time`, `Greedy Heuristic Time`, `Model Construction Time`, and `Warmstart Selection Time` columns for `v7`
+- separate `Solver Time`, `Greedy Heuristic Time`, `Model Construction Time`, and `Warmstart Selection Time` columns
+- `Attention Limit` and `Actual Attention`
+- `Algorithm Name` enriched with model choice, `PLPR`, `BnC`, queue cap suffix, and warmstart method when applicable
+- total and reason-specific fallback-greedy counters
 
 The reported means and confidence intervals exclude the final cooldown tail using an arrival-based cutoff: find the first request whose departure occurs after the last arrival, then remove all requests that arrived after that request.
 
@@ -369,9 +395,9 @@ Before batching and confidence-interval calculation, the remaining request-level
 - for greedy runs: summed time spent inside the greedy heuristic
 - for mixed runs: both combined
 
-For `v7`, `Model Construction Time` now means the one-time persistent Gurobi model build plus the per-iteration model reset / RHS-update / warmstart-application work needed before each solve; it no longer reflects a full from-scratch rebuild at every epoch.
+For `v8`, `Model Construction Time` means the persistent Gurobi model build work plus the per-iteration model reset / RHS-update / warmstart-application work needed before each solve. For `--full`, the model is rebuilt only when the greedy-based active horizon changes.
 
-When running interactively, the terminal also prints a one-line progress bar with both arrivals and departures. After the progress bar completes, `v7` prints the raw lead-time average computed on the same request sample used for steady-state reporting after cooldown trimming and MSER-5 warmup deletion, but before batching.
+When running interactively, the terminal also prints a one-line progress bar with both arrivals and departures. After the progress bar completes, `v8` prints the raw lead-time average computed on the same request sample used for steady-state reporting after cooldown trimming and MSER-5 warmup deletion, but before batching.
 
 If a simulation is too short for MSER-5 or batch-size selection, the run still completes. The affected steady-state fields are left blank in the CSV, while unrelated fields are still reported.
 
@@ -401,11 +427,11 @@ CLI defaults for `CI_Calculation.py`:
 `PBSAnimation.py` is the unified animation viewer for this repository. It is
 compatible with:
 
-- raw simulation pickles produced by `EscortFlowSim_v7.py`
+- raw simulation pickles produced by `EscortFlowSim_v8.py`
 - exported animation script pickles produced by `EscortFlowStatic.py` with `-a`
 - exported animation script pickles produced by `LoadFlowStatic.py` with `-a`
 
-To inspect a raw `EscortFlowSim_v7.py` trace visually:
+To inspect a raw `EscortFlowSim_v8.py` trace visually:
 
 ```bash
 python3 PBSAnimation.py sim_escort_flow_raw2026-03-15_143541.p
@@ -421,7 +447,8 @@ python3 PBSAnimation.py script_BM_leave_16_10_8_4_1.p
 
 ## Repository layout
 
-- `EscortFlowSim_v7.py`: main simulator
+- `EscortFlowSim_v8.py`: main simulator
+- `escort_flow_gurobi_v8.py`: Gurobi backend used by the `v8` simulator
 - `EscortFlowStatic.py`: static escort-flow experiment runner
 - `LoadFlowStatic.py`: static load-flow experiment runner
 - `CI_Calculation.py`: steady-state analysis from raw traces

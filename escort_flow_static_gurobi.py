@@ -435,26 +435,6 @@ class StaticEscortFlowGurobiSolver:
         for output, var in q.items():
             var.Start = warmstart["q"].get(output, 0.0)
 
-    @staticmethod
-    def _apply_warm_hints(x_a, x_e, q, warmstart, hint_priority=1):
-        for key, value in warmstart["x_a"].items():
-            if value <= 0.5:
-                continue
-            x_a[key].VarHintVal = value
-            x_a[key].VarHintPri = hint_priority
-
-        for key, value in warmstart["x_e"].items():
-            if value <= 0.5:
-                continue
-            x_e[key].VarHintVal = value
-            x_e[key].VarHintPri = hint_priority
-
-        for output, value in warmstart["q"].items():
-            if value <= 0.0:
-                continue
-            q[output].VarHintVal = value
-            q[output].VarHintPri = hint_priority
-
     def solve(self, target_positions, escort_positions, T, warmstart=None):
         target_set = set(target_positions)
         escort_set = set(escort_positions)
@@ -623,8 +603,18 @@ class StaticEscortFlowGurobiSolver:
 
         model.update()
         if warmstart is not None and not self.config.lp:
-            self._apply_warmstart(x_a, x_e, q, warmstart)
-        model.optimize()
+            # First let Gurobi search without bias. If it fails to find any incumbent,
+            # restart once and use the greedy solution as a fallback start.
+            model.optimize()
+            status_name = self._status_name(model.Status)
+            if model.SolCount == 0 and status_name not in {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED", "INTERRUPTED"}:
+                model.reset()
+                model.Params.SolutionLimit = 1
+                model.Params.StartNodeLimit = -2
+                self._apply_warmstart(x_a, x_e, q, warmstart)
+                model.optimize()
+        else:
+            model.optimize()
         cpu_time = time.perf_counter() - solve_start
 
         status_name = self._status_name(model.Status)

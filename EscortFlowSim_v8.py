@@ -45,7 +45,7 @@ from gurobipy import GRB
 import OneStepHeuristic_v2
 from PBSCom import *
 import CI_Calculation
-from escort_flow_gurobi import RollingHorizonGurobiSolver, SolverConfig
+from escort_flow_gurobi_v8 import RollingHorizonGurobiSolver, SolverConfig
 
 sim_log_file = ""
 last_progress_line_length = 0
@@ -170,6 +170,16 @@ def warmstart_label(mode, zero_fill):
     return f"{mode}-zero" if zero_fill else mode
 
 
+def warmstart_alg_label(mode):
+    if mode == "greedy":
+        return "ws_greedy"
+    if mode == "ilp":
+        return "ws_ilp"
+    if mode == "ilp-greedy":
+        return "ws_both"
+    return "none"
+
+
 parser = argparse.ArgumentParser()
 default_num_threads = 8 if sys.platform == "darwin" else 12 if sys.platform.startswith("linux") else 8
 # This is based on trial an error on machines: Mac Studio M3 Ultra and AMD Ryzen 9 5950X running with Linux.
@@ -198,10 +208,10 @@ parser.add_argument("--num_threads", type=int,
 parser.add_argument("-S", "--number_of_requests", type=int,
                     help="Total number of requests in the simulation (default 4000)", default=1000)
 parser.add_argument("-T", "--fractional_horizon", type=int,
-                    help="Number of fractional periods in model (default: max(--epoch + 4, --integer_horizon))",
+                    help="Number of fractional periods in the surrogate model (default: max(--epoch + 4, --integer_horizon)); ignored when --full is used",
                     default=None)
-parser.add_argument("-I", "--integer_horizon", type=int,
-                    help="Number of periods in the planning horizon represented by boolean variables (default: --epoch, or --fractional_horizon when --warmstart is used)",
+parser.add_argument("-I", "--integer_horizon", nargs="?", const=-1, type=int,
+                    help="Number of initial periods prioritized as integer time steps; bare -I means all periods are integer. With --full, omitting -I keeps only the first --epoch periods integer, while any use of -I makes the whole greedy-based horizon integer",
                     default=None)
 parser.add_argument("-E", "--epoch", type=int,
                     help="Number of periods in the execution epoch (default 1)",
@@ -213,6 +223,8 @@ parser.add_argument("-m", "--offline", action="store_true",
                     help="Offline rolling horizon: use target loads visible at the current decision time; cannot be combined with --greedy or --hybrid")
 parser.add_argument("--full", action="store_true",
                     help="Use the full MILP instead of the surrogate model, in either realtime or offline mode")
+parser.add_argument("--bnc", action="store_true",
+                    help="Use branch-and-cut separation for the movement-coupling constraints in either the full or surrogate MILP")
 
 parser.add_argument("--greedy", action="store_true",
                     help="Use the greedy heuristic only; ignores Gurobi and currently requires --epoch 1")
@@ -247,11 +259,25 @@ parser.add_argument('-q', '--queue_management', choices=['fifo', 'spt'],
 
 
 args = parser.parse_args()
+integer_horizon_all_periods = args.integer_horizon == -1
+full_all_integer_mode = args.full and args.integer_horizon is not None
+full_partial_relaxation_mode = args.full and not full_all_integer_mode
 args.warmstart_mode, args.warmstart_zero_fill = parse_warmstart_spec(args.warmstart, parser)
 args.warmstart_label = warmstart_label(args.warmstart_mode, args.warmstart_zero_fill)
 args.mip_focus = 2 if args.warmstart_mode != "none" else 0
 
-if args.integer_horizon is None:
+if args.full:
+    if args.integer_horizon is None:
+        args.integer_horizon = args.epoch
+    else:
+        if args.fractional_horizon is None:
+            args.fractional_horizon = args.epoch + 4
+        args.integer_horizon = args.fractional_horizon
+elif integer_horizon_all_periods:
+    if args.fractional_horizon is None:
+        args.fractional_horizon = args.epoch + 4
+    args.integer_horizon = args.fractional_horizon
+elif args.integer_horizon is None:
     if args.warmstart_mode != "none":
         if args.fractional_horizon is None:
             args.fractional_horizon = args.epoch + 4
@@ -265,7 +291,7 @@ if args.fractional_horizon is None:
 
 if args.integer_horizon < args.epoch:
     parser.error("--integer_horizon must be at least --epoch")
-if args.fractional_horizon < args.integer_horizon:
+if not args.full and args.fractional_horizon < args.integer_horizon:
     parser.error("--fractional_horizon must be at least --integer_horizon")
 if args.greedy and args.epoch != 1:
     parser.error("--greedy requires --epoch == 1")
@@ -281,7 +307,7 @@ if args.offline and args.hybrid:
     parser.error("--offline cannot be combined with --hybrid")
 if args.hybrid_ratio <= 0:
     parser.error("--hybrid_ratio must be positive. Use --greedy to run the heuristic at every step")
-if args.warmstart_mode in {"ilp", "ilp-greedy"} and args.integer_horizon < args.fractional_horizon:
+if args.warmstart_mode in {"ilp", "ilp-greedy"} and not args.full and args.integer_horizon < args.fractional_horizon:
     parser.error(
         "--warmstart ilp and --warmstart ilp greedy require an all-integer model, "
         "so --integer_horizon must equal --fractional_horizon"
@@ -367,6 +393,9 @@ total_lead_time = 0
 non_optimal = 0
 heuristic_sol = 0
 fallback_heuristic_sol = 0
+fallback_no_feasible_sol = 0
+fallback_gap_too_high_sol = 0
+fallback_same_state_sol = 0
 hybrid_heuristic_sol = 0
 warmstart_feasible = 0
 warmstart_repaired = 0
@@ -420,7 +449,8 @@ orig_distance = np.zeros(number_of_requests, dtype=np.int32)  # the distance of 
 
 header_cols = [
     "Machine Name", "Time Stamp", "version", "cpu_time", "Non optimal", "Greedy runs",
-    "Fallback Greedy Runs", "Hybrid-Ratio Greedy Runs",
+    "Fallback Greedy Runs", "Fallback No Feasible Runs", "Fallback Gap Too High Runs",
+    "Fallback Same State Runs", "Hybrid-Ratio Greedy Runs",
     "Warmstart Mechanism", "Warmstart Feasible", "Warmstart Repaired", "Warmstart Failed",
     "Algorithm Name", "Queue Management", "Seed", "Request Rate", "PBS Dimensions", "Output Cells",
     "Number of outputs", "Number of Escorts", "Number of Requests", "Simulation End Time",
@@ -476,9 +506,13 @@ solver = RollingHorizonGurobiSolver(
         mip_focus=args.mip_focus,
         warmstart_mode=args.warmstart_mode,
         warmstart_zero_fill=args.warmstart_zero_fill,
+        bnc=args.bnc,
+        full_all_integer_horizon=full_all_integer_mode,
     )
 )
 dist_map = solver.dist_map
+max_model_fractional_horizon = args.fractional_horizon
+max_model_integer_horizon = args.integer_horizon
 
 
 def collect_target_loads(cutoff_time):
@@ -531,17 +565,17 @@ def schedule_greedy_epoch(start_time, candidate_loads, escort_positions):
 def is_usable_model_solution(model_result, old_A, old_E):
     """Return whether a model result should be executed, and why if not."""
     if model_result["sol_count"] <= 0:
-        return False, f"Gurobi status {model_result['solver_status_name']} produced no feasible solution"
+        return False, "no_feasible", f"Gurobi status {model_result['solver_status_name']} produced no feasible solution"
 
     if model_result["ilp_gap"] > args.max_opt_gap:
-        return False, (
+        return False, "gap_too_high", (
             f"ILP gap {model_result['ilp_gap']:.4f} exceeds the allowed optimality gap threshold {args.max_opt_gap:.4f}"
         )
 
     if old_A != [] and set(model_result["A"]) == set(old_A) and set(model_result["E"]) == set(old_E):
-        return False, "the model returned the same A/E state as the input state"
+        return False, "same_state", "the model returned the same A/E state as the input state"
 
-    return True, None
+    return True, None, None
 
 try:
     while True:
@@ -638,6 +672,14 @@ try:
                     model_result = solver.run_model(A, E, warmstart_vector=warmstart_vector)
                     if model_result["solver_status"] == GRB.INTERRUPTED:
                         raise KeyboardInterrupt
+                    max_model_fractional_horizon = max(
+                        max_model_fractional_horizon,
+                        model_result["fractional_horizon_used"],
+                    )
+                    max_model_integer_horizon = max(
+                        max_model_integer_horizon,
+                        model_result["integer_horizon_used"],
+                    )
                     if model_result["warmstart_outcome"] == "feasible":
                         warmstart_feasible += 1
                     elif model_result["warmstart_outcome"] == "repaired":
@@ -663,7 +705,9 @@ try:
                         f"solver_time={solver_time_iter:.2f} model_construction_time={model_construction_time_iter:.2f} "
                         f"Gap={100 * model_result['ilp_gap']:.4f}%\n")
 
-                    use_model_solution, unusable_reason = is_usable_model_solution(model_result, old_A, old_E)
+                    use_model_solution, unusable_reason_code, unusable_reason = is_usable_model_solution(
+                        model_result, old_A, old_E
+                    )
                     if use_model_solution:
                         if not model_result["is_optimal_with_tolerance"]:
                             non_optimal += 1
@@ -683,6 +727,12 @@ try:
                         )
                         greedy_A, greedy_E = schedule_greedy_epoch(curr_t, current_time_target_loads, old_E)
                         fallback_heuristic_sol += 1
+                        if unusable_reason_code == "no_feasible":
+                            fallback_no_feasible_sol += 1
+                        elif unusable_reason_code == "gap_too_high":
+                            fallback_gap_too_high_sol += 1
+                        elif unusable_reason_code == "same_state":
+                            fallback_same_state_sol += 1
                         previous_solver_solution = None
                         previous_target_loads = None
                         log_message(f"Greedy forecast after epoch: E = {greedy_E}, A = {greedy_A}\n")
@@ -799,20 +849,30 @@ if max(start_move) == np.iinfo(np.int32).max:
     print("Error: the start moves time value for some request was not recorede")
     print(f"{np.where(start_move==np.iinfo(np.int32).max)}")
 
+reported_fractional_horizon = max_model_fractional_horizon if args.full else args.fractional_horizon
+reported_integer_horizon = max_model_integer_horizon if args.full else args.integer_horizon
+
 if args.greedy:
     alg_name = "greedy"
 else:
-    horizon_suffix = "-PLPR" if args.fractional_horizon > args.integer_horizon else ""
+    horizon_suffix = "-PLPR" if full_partial_relaxation_mode or reported_fractional_horizon > reported_integer_horizon else ""
     alg_prefix = f"hybrid{args.hybrid_ratio}-" if args.hybrid else ""
     if not alg_prefix:
         alg_prefix = "offline-" if args.offline else ""
     alg_name = alg_prefix
     if not args.full:
         alg_name += "surrogate"
+    else:
+        alg_name += "full"
+    if args.bnc:
+        alg_name += "-BnC"
 
     if max_attention_csv != "n/a":
         alg_name += f"-Q{args.max_attention}"
     alg_name += horizon_suffix
+    warmstart_alg_name = warmstart_alg_label(args.warmstart_mode)
+    if warmstart_alg_name != "none":
+        alg_name += f"-{warmstart_alg_name}"
 
 if alg_name == "":
     alg_name = "-"
@@ -822,11 +882,12 @@ machine_name = f"{socket.gethostname()}-T{args.num_threads}"
 cpu_time = solver_cpu_time + heuristic_cpu_time + model_construction_cpu_time + warmstart_cpu_time
 row_vals = [
     machine_name, time.ctime(), script_version, f"{cpu_time:.2f}", non_optimal, heuristic_sol,
-    fallback_heuristic_sol, hybrid_heuristic_sol,
+    fallback_heuristic_sol, fallback_no_feasible_sol, fallback_gap_too_high_sol,
+    fallback_same_state_sol, hybrid_heuristic_sol,
     args.warmstart_label, warmstart_feasible, warmstart_repaired, warmstart_failed,
     alg_name, args.queue_management, args.seed, args.request_rate, f"{Lx}x{Ly}", tuple_opl(O),
     len(O), len(E_orig), args.number_of_requests, simulation_end_time,
-    args.fractional_horizon, args.integer_horizon, args.epoch, time_limit,
+    reported_fractional_horizon, reported_integer_horizon, args.epoch, time_limit,
     max_attention_csv, actual_max_balls, f"{max_gap:.4f}", args.max_opt_gap,
     lead_stats["mean"], lead_stats["half_width_95"],
     waiting_stats["mean"], waiting_stats["half_width_95"],
@@ -863,6 +924,6 @@ if args.save_raw:
 
     # This is consumed by CI_Calculation.py and can also be read directly by
     # PBSAnimation.py.
-    pickle.dump((alg_name, args.queue_management, args.seed, args.request_rate, args.fractional_horizon, args.integer_horizon,
+    pickle.dump((alg_name, args.queue_management, args.seed, args.request_rate, reported_fractional_horizon, reported_integer_horizon,
                  args.epoch,time_limit, args.max_attention, args.max_opt_gap, Lx, Ly, O, E_orig,arrivals,
                  departures, start_move, moves, actual_max_balls,non_optimal, max_gap,heuristic_sol), open(pickle_file_name,"wb"))
