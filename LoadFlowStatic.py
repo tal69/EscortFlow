@@ -53,7 +53,11 @@ parser.add_argument("--gamma", type=float, help="Weight of the movements in the 
 parser.add_argument("-T", "--T_factor", type=float,
                     help="multiplier of the planning horizon length when no heuristic is used to create an upper bound (default 2.0)",
                     default=2.0)
-parser.add_argument("-t", "--time_limit", type=int, help="Time limit for CPLEX (default 300)", default=300)
+parser.add_argument("-t", "--time_limit", type=int,
+                    help="Time limit for CPLEX/Gurobi in seconds (default 300 unless omitted while using only --work_limit)",
+                    default=None)
+parser.add_argument("--work_limit", type=float,
+                    help="Work limit for Gurobi solves in work units (default none)", default=None)
 
 parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
@@ -82,6 +86,8 @@ alpha = args.alpha  # C_max weight
 beta = args.beta  # flowtime weight
 gamma = args.gamma  # movement weight
 time_limit = args.time_limit  # Time limit for cplex run (seconds)
+if time_limit is None and args.work_limit is None:
+    time_limit = 300
 Lx = args.Lx
 Ly = args.Ly
 
@@ -114,6 +120,14 @@ if args.k_prime > 0:
             "Panic: DP-k' heuristic works now only for retrieval of one load and only in 'stay' mode")
         exit(1)
 
+if args.work_limit is not None and args.work_limit <= 0:
+    print("Panic: --work_limit must be positive")
+    exit(1)
+
+if args.work_limit is not None and not args.gurobi:
+    print("Panic: --work_limit is supported only with --gurobi")
+    exit(1)
+
 if args.dp_file:
     print(f"Loading DP file {args.dp_file}...", flush=True)
     S = pickle.load(open(args.dp_file, "rb"))
@@ -138,7 +152,7 @@ def greedy_upper_bound(target_positions, escort_positions):
 
 f = open(result_csv_file, 'a')
 f.write(
-    "\ndate, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed, makespan, flowtime, #load movements, obj, LB, CPU timee\n")
+    "\ndate, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed, makespan, flowtime, #load movements, obj, LB, Wall Clock Time, Work\n")
 f.close()
 
 model_name = "LP-Gurobi" if args.gurobi and args.lp else (
@@ -165,6 +179,7 @@ if args.gurobi:
             beta=beta,
             gamma=gamma,
             time_limit=time_limit,
+            work_limit=args.work_limit,
             lp=args.lp,
         )
     )
@@ -221,7 +236,7 @@ try:
                 except Exception as exc:
                     print(f"Could not solve the model with Gurobi: {exc}")
                     f = open(result_csv_file, 'a')
-                    f.write(",-,-,-,-,-,-\n")
+                    f.write(",-,-,-,-,-,-,-\n")
                     f.close()
                 else:
                     if file_export != "" and result["has_solution"]:

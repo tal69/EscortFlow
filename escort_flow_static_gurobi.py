@@ -14,7 +14,7 @@ class StaticGurobiConfig:
     retrieval_mode: str
     beta: float
     gamma: float
-    time_limit: int
+    time_limit: int | None
     work_limit: float | None = None
     lp: bool = False
 
@@ -443,8 +443,9 @@ class StaticEscortFlowGurobiSolver:
         solve_start = time.perf_counter()
         model = gp.Model("escort_flow_static", env=self.env)
         model.Params.OutputFlag = 1
-        model.Params.TimeLimit = self.config.time_limit
         model.Params.StartNodeLimit = 100000
+        if self.config.time_limit is not None:
+            model.Params.TimeLimit = self.config.time_limit
         if self.config.work_limit is not None:
             model.Params.WorkLimit = self.config.work_limit
 

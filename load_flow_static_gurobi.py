@@ -15,7 +15,8 @@ class LoadFlowStaticGurobiConfig:
     alpha: float
     beta: float
     gamma: float
-    time_limit: int
+    time_limit: int | None
+    work_limit: float | None = None
     lp: bool = False
 
 
@@ -144,7 +145,10 @@ class LoadFlowStaticGurobiSolver:
         solve_start = time.perf_counter()
         model = gp.Model("load_flow_static", env=self.env)
         model.Params.OutputFlag = 1
-        model.Params.TimeLimit = self.config.time_limit
+        if self.config.time_limit is not None:
+            model.Params.TimeLimit = self.config.time_limit
+        if self.config.work_limit is not None:
+            model.Params.WorkLimit = self.config.work_limit
 
         flow_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
         q_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
@@ -302,6 +306,7 @@ class LoadFlowStaticGurobiSolver:
             "has_solution": has_solution,
             "status_name": status_name,
             "cpu_time": cpu_time,
+            "work": getattr(model, "Work", None),
             "best_bound": best_bound,
             "makespan": None,
             "flowtime": None,
@@ -343,10 +348,12 @@ class LoadFlowStaticGurobiSolver:
                 f"{self._format_result_value(result['movements'])}, "
                 f"{self._format_result_value(result['objective'])}, "
                 f"{self._format_result_value(result['best_bound'])}, "
-                f"{result['cpu_time']:.4f}"
+                f"{result['cpu_time']:.4f}, "
+                f"{self._format_result_value(result.get('work'))}"
             )
 
         return (
             f",-,-,-,-,{self._format_result_value(result['best_bound'])}, "
-            f"{result['cpu_time']:.4f}"
+            f"{result['cpu_time']:.4f}, "
+            f"{self._format_result_value(result.get('work'))}"
         )

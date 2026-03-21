@@ -111,10 +111,11 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
         solve_start = time.perf_counter()
         model = gp.Model("escort_flow_static_bnc", env=self.env)
         model.Params.OutputFlag = 1
-        model.Params.TimeLimit = self.config.time_limit
         model.Params.StartNodeLimit = 100000
         model.Params.LazyConstraints = 1
         model.Params.PreCrush = 1
+        if self.config.time_limit is not None:
+            model.Params.TimeLimit = self.config.time_limit
         if self.config.work_limit is not None:
             model.Params.WorkLimit = self.config.work_limit
 

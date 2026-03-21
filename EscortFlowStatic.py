@@ -57,7 +57,9 @@ parser.add_argument("--gamma", type=float, help="Weight of the movements in the 
 parser.add_argument("-T", "--T_factor", type=float,
                     help="multiplier of the planning horizon length when no heuristic is used to create an upper bound (default 2.0)",
                     default=1.6)
-parser.add_argument("-t", "--time_limit", type=int, help="Time limit for CPLEX (default 300)", default=300)
+parser.add_argument("-t", "--time_limit", type=int,
+                    help="Time limit for CPLEX/Gurobi in seconds (default 300 unless omitted while using only --work_limit)",
+                    default=None)
 parser.add_argument("--work_limit", type=float,
                     help="Work limit for Gurobi solves in work units (default none)", default=None)
 parser.add_argument("--dp_file",
@@ -94,6 +96,8 @@ network_file = "escort_network.dat"  # fixed file common for all number of escor
 beta = args.beta  # flowtime weight
 gamma = args.gamma  # movement weight
 time_limit = args.time_limit  # Time limit for cplex run (seconds)
+if time_limit is None and args.work_limit is None:
+    time_limit = 300
 Lx = args.Lx
 Ly = args.Ly
 
@@ -145,6 +149,10 @@ if args.greedy and args.retrieval_mode not in ["continue", "leave"]:
 
 if args.work_limit is not None and args.work_limit <= 0:
     print("Panic: --work_limit must be positive")
+    exit(1)
+
+if args.work_limit is not None and not args.gurobi and args.lazy is None and not args.bnc:
+    print("Panic: --work_limit is supported only with the Gurobi static backends")
     exit(1)
 
 if args.lazy is not None and args.lazy < 0:

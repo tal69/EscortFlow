@@ -235,7 +235,7 @@ execute {
 	if (file_res != "") {
 		var f = new IloOplOutputFile(file_res, true);
 		f.write(",", z, ",", FlowTime, ",", NumberOfMovements,",", 
-		cplex.getObjValue(), ",",cplex.getBestObjValue(),",",CpuTime );
+		cplex.getObjValue(), ",",cplex.getBestObjValue(),",",CpuTime, ",");
 		
 		f.close()
 	}
