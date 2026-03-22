@@ -223,8 +223,8 @@ parser.add_argument("-m", "--offline", action="store_true",
                     help="Offline rolling horizon: use target loads visible at the current decision time; cannot be combined with --greedy or --hybrid")
 parser.add_argument("--full", action="store_true",
                     help="Use the full MILP instead of the surrogate model, in either realtime or offline mode")
-parser.add_argument("--bnc", action="store_true",
-                    help="Use branch-and-cut separation for the movement-coupling constraints in either the full or surrogate MILP")
+parser.add_argument("--bnc", nargs="?", const=1.0, default=None, type=float,
+                    help="Use branch-and-cut separation for the movement-coupling constraints in either the full or surrogate MILP; optional value is cuts_intensity, default 1.0")
 
 parser.add_argument("--greedy", action="store_true",
                     help="Use the greedy heuristic only; ignores Gurobi and currently requires --epoch 1")
@@ -307,6 +307,8 @@ if args.offline and args.hybrid:
     parser.error("--offline cannot be combined with --hybrid")
 if args.hybrid_ratio <= 0:
     parser.error("--hybrid_ratio must be positive. Use --greedy to run the heuristic at every step")
+if args.bnc is not None and args.bnc <= 0:
+    parser.error("--bnc cuts_intensity must be positive")
 if args.warmstart_mode in {"ilp", "ilp-greedy"} and not args.full and args.integer_horizon < args.fractional_horizon:
     parser.error(
         "--warmstart ilp and --warmstart ilp greedy require an all-integer model, "
@@ -389,6 +391,8 @@ solver_cpu_time = 0
 heuristic_cpu_time = 0
 model_construction_cpu_time = 0
 warmstart_cpu_time = 0
+cut_generation_cpu_time = 0
+generated_cut_count = 0
 total_lead_time = 0
 non_optimal = 0
 heuristic_sol = 0
@@ -469,6 +473,7 @@ header_cols = [
     "Excess Time Deleted", "Excess Time Used", "Excess Time Batch Size", "Excess Time Number of Batches",
     "Excess Time Lag1 Autocorr", "Excess Time Lag1 Threshold", "Excess Time Batch Means Variance",
     "Log File Name", "Raw Pickle File Name",
+    "Generated Cuts", "Cut Generation Time",
     "Solver Time", "Greedy Heuristic Time", "Model Construction Time", "Warmstart Selection Time"
 ]
 expected_header = ",".join(header_cols)
@@ -506,7 +511,8 @@ solver = RollingHorizonGurobiSolver(
         mip_focus=args.mip_focus,
         warmstart_mode=args.warmstart_mode,
         warmstart_zero_fill=args.warmstart_zero_fill,
-        bnc=args.bnc,
+        bnc=args.bnc is not None,
+        bnc_cuts_intensity=1.0 if args.bnc is None else args.bnc,
         full_all_integer_horizon=full_all_integer_mode,
     )
 )
@@ -692,6 +698,8 @@ try:
                     ilp_gap = model_result["ilp_gap"]
                     solver_cpu_time += solver_time_iter
                     model_construction_cpu_time += model_construction_time_iter
+                    cut_generation_cpu_time += model_result["user_cut_time"]
+                    generated_cut_count += model_result["generated_cut_count"]
                     if model_result["warmstart_log_excerpt"]:
                         log_message(
                             f"\twarmstart[{model_result['warmstart_source']}] {model_result['warmstart_outcome']}: "
@@ -864,7 +872,7 @@ else:
         alg_name += "surrogate"
     else:
         alg_name += "full"
-    if args.bnc:
+    if args.bnc is not None:
         alg_name += "-BnC"
 
     if max_attention_csv != "n/a":
@@ -902,6 +910,7 @@ row_vals = [
     excess_stats["obs_deleted"], excess_stats["obs_used"], excess_stats["batch_size"], excess_stats["num_batches"],
     excess_stats["lag1_autocorr"], excess_stats["lag1_threshold"], excess_stats["batch_means_variance"],
     sim_log_file, pickle_file_name,
+    generated_cut_count, f"{cut_generation_cpu_time:.2f}",
     f"{solver_cpu_time:.2f}", f"{heuristic_cpu_time:.2f}",
     f"{model_construction_cpu_time:.2f}", f"{warmstart_cpu_time:.2f}",
 ]

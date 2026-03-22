@@ -118,6 +118,7 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
         model.Params.StartNodeLimit = 100000
         model.Params.LazyConstraints = 1
         model.Params.PreCrush = 1
+        model.Params.MIPGap = 1e-4
         if self.config.time_limit is not None:
             model.Params.TimeLimit = self.config.time_limit
         if self.config.work_limit is not None:

@@ -46,6 +46,7 @@ class SolverConfig:
     warmstart_mode: str
     warmstart_zero_fill: bool
     bnc: bool = False
+    bnc_cuts_intensity: float = 1.0
     full_all_integer_horizon: bool = False
     optimality_tolerance: float = OPTIMALITY_TOLERANCE
 
@@ -71,6 +72,7 @@ class RollingHorizonGurobiSolver:
         self.supply_a_constraints = {}
         self.supply_e_constraints = {}
         self.retrieve_total_constraint = None
+        self.bnc_conflict_specs_by_t = None
         self.bnc_stay_specs_by_t = None
         self.bnc_move_specs_by_t = None
         if self.config.full:
@@ -84,8 +86,8 @@ class RollingHorizonGurobiSolver:
         model.Params.MIPGap = self.config.optimality_tolerance
         model.Params.MIPFocus = self.config.mip_focus
         if self.config.bnc:
-            model.Params.LazyConstraints = 1
             model.Params.PreCrush = 1
+            model.Params.LazyConstraints = 1
         if self.config.num_threads > 0:
             model.Params.Threads = self.config.num_threads
 
@@ -351,12 +353,20 @@ class RollingHorizonGurobiSolver:
                 if move != stay_move
             ]
             for t in range(T + 1):
-                # (6) Escort conflict avoidance.
-                model.addConstr(
-                    gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1,
-                    name=f"cell_cover_{loc[0]}_{loc[1]}_t{t}",
+                keep_conflict_in_master = (
+                    not self.config.bnc
+                    or self.config.full
+                    or t <= self.config.epoch
                 )
-                if not self.config.bnc:
+                # (6) Escort conflict avoidance.
+                if keep_conflict_in_master:
+                    model.addConstr(
+                        gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1,
+                        name=f"cell_cover_{loc[0]}_{loc[1]}_t{t}",
+                    )
+                keep_stay_cover_in_master = not self.config.bnc or not self.config.full
+                keep_move_cover_in_master = not self.config.bnc or not self.config.full
+                if keep_stay_cover_in_master:
                     # (8) A target load must move if crossed by an escort.
                     model.addConstr(
                         1 - x_a[(stay_move, t)] >= gp.quicksum(
@@ -364,6 +374,7 @@ class RollingHorizonGurobiSolver:
                         ),
                         name=f"stay_cover_{loc[0]}_{loc[1]}_t{t}",
                     )
+                if keep_move_cover_in_master:
                     # (7) A target load cannot move unless crossed by an escort.
                     for move in nonstay_target_moves:
                         model.addConstr(
@@ -400,39 +411,52 @@ class RollingHorizonGurobiSolver:
                     ) == q_vars[output]
                 )
 
+        bnc_conflict_specs_by_t = None
         bnc_stay_specs_by_t = None
         bnc_move_specs_by_t = None
         if self.config.bnc:
-            # Prepare separated representations of (7) and (8) for the callback.
+            # Prepare separated representations of the BnC-omitted families for the callback.
+            bnc_conflict_specs_by_t = {t: [] for t in range(T + 1)}
             bnc_stay_specs_by_t = {t: [] for t in range(T + 1)}
             bnc_move_specs_by_t = {t: [] for t in range(T + 1)}
+            separated_time_start = 0 if self.config.full else min(T + 1, self.config.epoch + 1)
             for loc in self.network["locations"]:
                 stay_move = self.network["stay_move"][loc]
                 nonstay_target_moves = [
                     move for move in self.network["outgoing_a"][loc]
                     if move != stay_move
                 ]
-                for t in range(T + 1):
-                    cover_keys = tuple((move, t) for move in self.network["cell_cover"][loc])
-                    bnc_stay_specs_by_t[t].append(
-                        (
-                            (stay_move, t),
-                            cover_keys,
-                            x_a[(stay_move, t)] + gp.quicksum(x_e[key] for key in cover_keys),
-                        )
-                    )
-                    for move in nonstay_target_moves:
-                        move_cover_keys = tuple(
-                            (escort_move, t)
-                            for escort_move in self.network["move_cover"][move]
-                        )
-                        bnc_move_specs_by_t[t].append(
+                for t in range(separated_time_start, T + 1):
+                    if self.config.full:
+                        cover_keys = tuple((move, t) for move in self.network["cell_cover"][loc])
+                        bnc_stay_specs_by_t[t].append(
                             (
-                                (move, t),
-                                move_cover_keys,
-                                x_a[(move, t)] - gp.quicksum(x_e[key] for key in move_cover_keys),
+                                (stay_move, t),
+                                cover_keys,
+                                x_a[(stay_move, t)] + gp.quicksum(x_e[key] for key in cover_keys),
                             )
                         )
+                    else:
+                        cover_keys = tuple((move, t) for move in self.network["cell_cover"][loc])
+                        bnc_conflict_specs_by_t[t].append(
+                            (
+                                cover_keys,
+                                gp.quicksum(x_e[key] for key in cover_keys),
+                            )
+                        )
+                    for move in nonstay_target_moves:
+                        if self.config.full:
+                            move_cover_keys = tuple(
+                                (escort_move, t)
+                                for escort_move in self.network["move_cover"][move]
+                            )
+                            bnc_move_specs_by_t[t].append(
+                                (
+                                    (move, t),
+                                    move_cover_keys,
+                                    x_a[(move, t)] - gp.quicksum(x_e[key] for key in move_cover_keys),
+                                )
+                            )
 
         model.update()
         self.model = model
@@ -442,6 +466,7 @@ class RollingHorizonGurobiSolver:
         self.supply_a_constraints = supply_a_constraints
         self.supply_e_constraints = supply_e_constraints
         self.retrieve_total_constraint = retrieve_total_constraint
+        self.bnc_conflict_specs_by_t = bnc_conflict_specs_by_t
         self.bnc_stay_specs_by_t = bnc_stay_specs_by_t
         self.bnc_move_specs_by_t = bnc_move_specs_by_t
         return time.perf_counter() - model_build_start
@@ -736,22 +761,55 @@ class RollingHorizonGurobiSolver:
         return list(range(integer_limit + 1)) + list(range(integer_limit + 1, self.current_fractional_horizon + 1))
 
     def _effective_bnc_cut_limit(self):
+        if not self.config.full:
+            return max(1, int(round(self.config.Lx * self.config.Ly * self.config.bnc_cuts_intensity)))
         return 2 * self.current_fractional_horizon
 
     def _separate_movement_coupling(self, x_a_sol, x_e_sol, add_cut, max_cuts, include_fractional):
-        if max_cuts <= 0:
+        if max_cuts is not None and max_cuts <= 0:
             return 0
 
         tol = 1e-6
-        added = 0
+        if not self.config.full:
+            added = 0
+            for t in range(self.current_fractional_horizon + 1):
+                violations = []
 
+                for cover_keys, conflict_expr in self.bnc_conflict_specs_by_t[t]:
+                    cover_value = sum(x_e_sol[key] for key in cover_keys)
+                    violation = cover_value - 1
+                    if violation > tol:
+                        violations.append((violation, conflict_expr <= 1))
+
+                if not violations:
+                    continue
+
+                if max_cuts is not None:
+                    remaining = max_cuts - added
+                    if remaining <= 0:
+                        return added
+
+                    if len(violations) > remaining:
+                        violations.sort(key=lambda item: item[0], reverse=True)
+                        violations = violations[:remaining]
+
+                for _, cut_expr in violations:
+                    add_cut(cut_expr)
+                    added += 1
+
+                if max_cuts is not None and added >= max_cuts:
+                    return added
+
+            return added
+
+        added = 0
         for t in self._cut_time_order(include_fractional):
             for stay_key, cover_keys, stay_expr in self.bnc_stay_specs_by_t[t]:
                 cover_value = sum(x_e_sol[key] for key in cover_keys)
                 if x_a_sol[stay_key] + cover_value > 1 + tol:
                     add_cut(stay_expr <= 1)
                     added += 1
-                    if added >= max_cuts:
+                    if max_cuts is not None and added >= max_cuts:
                         return added
 
             for move_key, move_cover_keys, move_expr in self.bnc_move_specs_by_t[t]:
@@ -761,7 +819,7 @@ class RollingHorizonGurobiSolver:
                 if x_a_sol[move_key] > move_cover_value + tol:
                     add_cut(move_expr <= 0)
                     added += 1
-                    if added >= max_cuts:
+                    if max_cuts is not None and added >= max_cuts:
                         return added
 
         return added
@@ -785,20 +843,21 @@ class RollingHorizonGurobiSolver:
                 if node_status != GRB.OPTIMAL:
                     return
                 node_count = int(model.cbGet(GRB.Callback.MIPNODE_NODCNT))
-                if node_count != 0:
+                if self.config.full and node_count != 0:
                     return
+                user_cut_limit = None if (not self.config.full and node_count == 0) else cut_limit
 
                 callback_start = time.perf_counter()
                 x_a_values = model.cbGetNodeRel([var for _, var in x_a_items])
                 x_e_values = model.cbGetNodeRel([var for _, var in x_e_items])
                 x_a_sol = {key: value for (key, _), value in zip(x_a_items, x_a_values)}
                 x_e_sol = {key: value for (key, _), value in zip(x_e_items, x_e_values)}
-                self._separate_movement_coupling(
+                callback_stats["count"] += self._separate_movement_coupling(
                     x_a_sol,
                     x_e_sol,
                     model.cbCut,
-                    cut_limit,
-                    include_fractional=False,
+                    user_cut_limit,
+                    include_fractional=self.config.full,
                 )
                 callback_stats["time"] += time.perf_counter() - callback_start
 
@@ -808,11 +867,11 @@ class RollingHorizonGurobiSolver:
                 x_e_values = model.cbGetSolution([var for _, var in x_e_items])
                 x_a_sol = {key: value for (key, _), value in zip(x_a_items, x_a_values)}
                 x_e_sol = {key: value for (key, _), value in zip(x_e_items, x_e_values)}
-                self._separate_movement_coupling(
+                callback_stats["count"] += self._separate_movement_coupling(
                     x_a_sol,
                     x_e_sol,
                     model.cbLazy,
-                    cut_limit,
+                    cut_limit if self.config.full else None,
                     include_fractional=True,
                 )
                 callback_stats["time"] += time.perf_counter() - callback_start
@@ -951,7 +1010,7 @@ class RollingHorizonGurobiSolver:
         model.update()
 
         gurobi_messages = []
-        callback_stats = {"time": 0.0}
+        callback_stats = {"time": 0.0, "count": 0}
         callback = self._build_runtime_callback(
             x_a,
             x_e,
@@ -988,6 +1047,7 @@ class RollingHorizonGurobiSolver:
             "is_optimal_with_tolerance": False,
             "solution_snapshot": None,
             "user_cut_time": callback_stats["time"],
+            "generated_cut_count": callback_stats["count"],
             "fractional_horizon_used": self.current_fractional_horizon,
             "integer_horizon_used": self.current_integer_horizon,
             "warmstart_applied": warmstart_applied,

@@ -5,6 +5,8 @@ import time
 import gurobipy as gp
 from gurobipy import GRB
 
+OPTIMALITY_TOLERANCE = 1e-4  # 0.01%
+
 
 @dataclass(frozen=True)
 class LoadFlowStaticGurobiConfig:
@@ -147,6 +149,7 @@ class LoadFlowStaticGurobiSolver:
         solve_start = time.perf_counter()
         model = gp.Model("load_flow_static", env=self.env)
         model.Params.OutputFlag = 1
+        model.Params.MIPGap = OPTIMALITY_TOLERANCE
         if self.config.time_limit is not None:
             model.Params.TimeLimit = self.config.time_limit
         if self.config.work_limit is not None:
