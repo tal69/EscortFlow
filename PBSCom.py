@@ -258,6 +258,7 @@ def str2range(s):
 
     Supported formats:
     - `n`
+    - `n1,n2,...`
     - `start-end`
     - `start:end`
     - `start-end-step`
@@ -280,6 +281,9 @@ def str2range(s):
         stop = end + (1 if step > 0 else -1)
         return range(start, stop, step)
 
+    if "," in s:
+        return [parse_int_token(token.strip(), s) for token in s.split(",")]
+
     if ":" in s:
         parts = s.split(":")
         if len(parts) == 2:
@@ -293,7 +297,7 @@ def str2range(s):
             end = parse_int_token(parts[2], s)
             return inclusive_range(start, end, step)
         raise ValueError(
-            f"Invalid range '{s}': expected 'n', 'start:end', or 'start:step:end'"
+            f"Invalid range '{s}': expected 'n', 'n1,n2,...', 'start:end', or 'start:step:end'"
         )
 
     a = s.split('-')
@@ -311,7 +315,7 @@ def str2range(s):
         step = parse_int_token(a[2], s)
         return inclusive_range(start, end, step)
     raise ValueError(
-        f"Invalid range '{s}': expected 'n', 'start-end', 'start-end-step', 'start:end', or 'start:step:end'"
+        f"Invalid range '{s}': expected 'n', 'n1,n2,...', 'start-end', 'start-end-step', 'start:end', or 'start:step:end'"
     )
 
 
