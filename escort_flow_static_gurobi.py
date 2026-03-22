@@ -454,7 +454,6 @@ class StaticEscortFlowGurobiSolver:
         load_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
         escort_vtype = GRB.CONTINUOUS if self.config.lp else GRB.BINARY
         q_vtype = GRB.CONTINUOUS if self.config.lp else GRB.INTEGER
-
         tr = range(T + 1)
         x_a = {
             (move, t): model.addVar(lb=0.0, ub=1.0, vtype=load_vtype)
@@ -561,31 +560,31 @@ class StaticEscortFlowGurobiSolver:
             stay_move = self.network["stay_move"][loc]
             nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
             for t in tr:
-                # Escort conflict avoidance constraint, (7)
+                # Escort conflict avoidance constraint, (6)
                 model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1
                 )
 
-                # A target load must move if crossed by an escort (9)
+                # A target load must move if crossed by an escort (8)
                 model.addConstr(
                     1 - x_a[(stay_move, t)] >=
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc])
                 )
 
-                # A target load cannot move unless crossed by an escort (8)
+                # A target load cannot move unless crossed by an escort (7)
                 for move in nonstay_target_moves:
                     model.addConstr(
                         x_a[(move, t)] <=
                         gp.quicksum(x_e[(escort_move, t)] for escort_move in self.network["move_cover"][move])
                     )
 
-        # (10) in the paper: every target load must eventually arrive at an output cell.
+        # (9) in the paper: every target load must eventually arrive at an output cell.
         model.addConstr(
             gp.quicksum(x_a[(move, t)] for move in self.network["arrival_moves"] for t in tr) ==
             loads_to_retrieve
         )
 
-        # Integrality "cut": q stores the summed arrival times at each output cell.  (15)
+        # Integrality "cut": q stores the summed arrival times at each output cell.  (14)
         for output in self.output_cells:
             model.addConstr(
                 gp.quicksum(

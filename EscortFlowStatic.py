@@ -80,9 +80,12 @@ parser.add_argument("-a", "--export_animation", action="store_true",
 parser.add_argument("--lp", action="store_true",
                     help="Run lp relaxation work only with bm movement regime (default False)")
 parser.add_argument("--greedy", action="store_true",
-                    help="Solve the static instance with OneStepHeuristic_v2.SolveGreedy instead of OPL")
+                    help="Solve the static instance with OneStepHeuristic_v2.SolveGreedy instead of the MILP backend")
 parser.add_argument("--gurobi", action="store_true",
-                    help="Solve the static model with the Gurobi Python API instead of oplrun/CPLEX")
+                    help="Solve the static model with the Gurobi Python API (default)")
+parser.add_argument("--opl", dest="opl", action="store_true",
+                    help="Solve the static model with oplrun/CPLEX instead of the default Gurobi backend")
+parser.add_argument("--cplex", dest="opl", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--warmstart", action="store_true",
                     help="Use a heuristic MIP start with the Gurobi static backend (default False)")
 parser.add_argument("--lazy", nargs="?", const=0, default=None, type=int,
@@ -91,8 +94,17 @@ parser.add_argument("--bnc", nargs="?", const=-1, default=None, type=int,
                     help="Use the branch-and-cut Gurobi static backend; optional value is the maximum number of user cuts added per separated node, default 2*T when omitted; implies --gurobi")
 
 args = parser.parse_args()
+requested_gurobi = args.gurobi
+requested_opl = args.opl
+if requested_gurobi and requested_opl:
+    print("Panic: --gurobi and --opl cannot be combined")
+    exit(1)
+args.gurobi = not requested_opl
 if args.lazy is not None or args.bnc is not None:
     args.gurobi = True
+if requested_opl and args.gurobi:
+    print("Panic: --opl cannot be combined with the Gurobi-only static backends")
+    exit(1)
 
 result_csv_file = args.csv
 file_export = "out.txt" if args.export_animation else ""

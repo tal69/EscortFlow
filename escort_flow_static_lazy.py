@@ -30,7 +30,7 @@ class LazyStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
             x_a_sol = {key: value for (key, _), value in zip(x_a_items, x_a_values)}
             x_e_sol = {key: value for (key, _), value in zip(x_e_items, x_e_values)}
 
-            # (8) in the paper - target load movements allowed and enforced.
+            # (7) in the paper - target load movements allowed and enforced.
             for loc in network["locations"]:
                 cell_cover = network["cell_cover"][loc]
                 stay_move = network["stay_move"][loc]
@@ -179,26 +179,26 @@ class LazyStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                 gp.quicksum(x_e[(move, 0)] for move in self.network["outgoing_e"][loc]) == supply_e
             )
 
-        # (7) in the paper - avoid conflicts for the initial master time steps.
+        # (6) in the paper - avoid conflicts for the initial master time steps.
         for loc in self.network["locations"]:
             for t in master_tr:
                 model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1
                 )
 
-        # (8) and (9) in the renumbered comments for the initial master time steps.
+        # (7) and (8) in the renumbered comments for the initial master time steps.
         for loc in self.network["locations"]:
             stay_move = self.network["stay_move"][loc]
             nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
             cell_cover = self.network["cell_cover"][loc]
             for t in master_tr:
-                # Constraint (9) if target is crossed by an escort it can't stay still
+                # Constraint (8) if target is crossed by an escort it can't stay still
                 model.addConstr(
                     x_a[(stay_move, t)] +
                     gp.quicksum(x_e[(move, t)] for move in cell_cover) <= 1
                 )
 
-                # Constraint (8) A target can move at particular direction only uf crossed by an escort in the opposite direction
+                # Constraint (7) A target can move at particular direction only uf crossed by an escort in the opposite direction
                 for move in nonstay_target_moves:
                     model.addConstr(
                         x_a[(move, t)] <=
@@ -208,9 +208,9 @@ class LazyStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                         )
                     )
 
-        # Constraint family (8)-(9) for later time steps is enforced lazily in the callback below.
+        # Constraint family (7)-(8) for later time steps is enforced lazily in the callback below.
 
-        # (10) All target loads arrived
+        # (9) All target loads arrived
         model.addConstr(
             gp.quicksum(x_a[(move, t)] for move in self.network["arrival_moves"] for t in tr) ==
             loads_to_retrieve

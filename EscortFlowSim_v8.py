@@ -216,7 +216,7 @@ parser.add_argument("-I", "--integer_horizon", nargs="?", const=-1, type=int,
 parser.add_argument("-E", "--epoch", type=int,
                     help="Number of periods in the execution epoch (default 1)",
                     default=1)
-parser.add_argument("-t", "--time_limit", type=int,
+parser.add_argument("-t", "--time_limit", type=float,
                     help="Time limit for Gurobi calls in seconds (default: --epoch)",
                     default=None)
 parser.add_argument("-m", "--offline", action="store_true",

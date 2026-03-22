@@ -79,10 +79,17 @@ parser.add_argument("-k", "--k_prime", type=int,
 parser.add_argument("--lp", action="store_true",
                     help="Run lp relaxation work only with bm movement regime (default False)")
 parser.add_argument("--gurobi", action="store_true",
-                    help="Solve the static load-flow model with the Gurobi Python API instead of oplrun/CPLEX")
+                    help="Solve the static load-flow model with the Gurobi Python API (default)")
+parser.add_argument("--opl", dest="opl", action="store_true",
+                    help="Solve the static load-flow model with oplrun/CPLEX instead of the default Gurobi backend")
+parser.add_argument("--cplex", dest="opl", action="store_true", help=argparse.SUPPRESS)
 
 
 args = parser.parse_args()
+if args.gurobi and args.opl:
+    print("Panic: --gurobi and --opl cannot be combined")
+    exit(1)
+args.gurobi = not args.opl
 result_csv_file = args.csv
 file_export = "out.txt" if args.export_animation else ""
 is_bm = not args.lm

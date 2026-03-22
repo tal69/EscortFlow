@@ -28,7 +28,7 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
         tol = self.cut_tol
         violations = []
 
-        # (8) Target load movements allowed.
+        # (7) Target load movements allowed.
         for t in tr:
             for move_key, move_cover_keys, move_expr in move_specs_by_t[t]:
                 if x_a_sol[move_key] <= tol:
@@ -223,14 +223,14 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                 gp.quicksum(x_e[(move, 0)] for move in self.network["outgoing_e"][loc]) == supply_e
             )
 
-        # (7) Avoid conflicts.
+        # (6) Avoid conflicts.
         for loc in self.network["locations"]:
             for t in tr:
                 model.addConstr(
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc]) <= 1
                 )
 
-        # (9) A target load must move if crossed by an escort.
+        # (8) A target load must move if crossed by an escort.
         for loc in self.network["locations"]:
             stay_move = self.network["stay_move"][loc]
             for t in tr:
@@ -239,7 +239,7 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                     gp.quicksum(x_e[(move, t)] for move in self.network["cell_cover"][loc])
                 )
 
-        # Keep the "allowed movement" family (8) explicit for the first T // 8 time steps.
+        # Keep the "allowed movement" family (7) explicit for the first T // 8 time steps.
         for loc in self.network["locations"]:
             nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
             for t in master_move_tr:
@@ -249,13 +249,13 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                         gp.quicksum(x_e[(escort_move, t)] for escort_move in self.network["move_cover"][move])
                     )
 
-        # (10) All target loads arrive at output cells.
+        # (9) All target loads arrive at output cells.
         model.addConstr(
             gp.quicksum(x_a[(move, t)] for move in self.network["arrival_moves"] for t in tr) ==
             loads_to_retrieve
         )
 
-        # Only the remaining movement-coupling constraints (8) are separated in the callback below.
+        # Only the remaining movement-coupling constraints (7) are separated in the callback below.
         move_specs_by_t = {t: [] for t in tr}
         for loc in self.network["locations"]:
             nonstay_target_moves = self.network["nonstay_outgoing_a"][loc]
