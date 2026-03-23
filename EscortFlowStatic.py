@@ -88,6 +88,8 @@ parser.add_argument("--opl", dest="opl", action="store_true",
 parser.add_argument("--cplex", dest="opl", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--warmstart", action="store_true",
                     help="Use a heuristic MIP start with the Gurobi static backend (default False)")
+parser.add_argument("--naive", action="store_true",
+                    help="Only calculate the naive lower bound for each generated instance and write a reduced CSV")
 parser.add_argument("--lazy", nargs="?", const=0, default=None, type=int,
                     help="Use the lazy-constraint Gurobi static backend; optional value is the number of initial time steps kept in the master problem, default 0; implies --gurobi")
 parser.add_argument("--bnc", nargs="?", const=-1, default=None, type=int,
@@ -223,142 +225,185 @@ if args.warmstart and dp_file:
     print("Panic: --warmstart is currently supported only on the greedy Gurobi upper-bound path, not with --dp_file")
     exit(1)
 
+if args.naive and requested_gurobi:
+    print("Panic: --naive cannot be combined with --gurobi")
+    exit(1)
+
+if args.naive and requested_opl:
+    print("Panic: --naive cannot be combined with --opl")
+    exit(1)
+
+if args.naive and args.greedy:
+    print("Panic: --naive cannot be combined with --greedy")
+    exit(1)
+
+if args.naive and args.lp:
+    print("Panic: --naive cannot be combined with --lp")
+    exit(1)
+
+if args.naive and args.warmstart:
+    print("Panic: --naive cannot be combined with --warmstart")
+    exit(1)
+
+if args.naive and args.lazy is not None:
+    print("Panic: --naive cannot be combined with --lazy")
+    exit(1)
+
+if args.naive and args.bnc is not None:
+    print("Panic: --naive cannot be combined with --bnc")
+    exit(1)
+
+if args.naive and args.export_animation:
+    print("Panic: --naive cannot be combined with --export_animation")
+    exit(1)
+
+if args.naive and dp_file:
+    print("Panic: --naive cannot be combined with --dp_file")
+    exit(1)
+
+if args.naive and k_prime > 0:
+    print("Panic: --naive cannot be combined with -k/--k_prime")
+    exit(1)
+
 Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
 solver_threads = solver_thread_count()
-f = open(network_file, "w")
+if args.opl:
+    f = open(network_file, "w")
 
-f.write('locations = {')
-f.write(' '.join([f"<{x},{y}>" for x in range(Lx) for y in range(Ly)]))
-f.write("};\n")
+    f.write('locations = {')
+    f.write(' '.join([f"<{x},{y}>" for x in range(Lx) for y in range(Ly)]))
+    f.write("};\n")
 
-f.write('NA = [')
-for x in range(Lx):
-    for y in range(Ly):
-        f.write("{")
-        if x < Lx - 1:
-            f.write(f"<{x + 1}, {y}> ")  # right
-        if y < Ly - 1:
-            f.write(f"<{x}, {y+1}> ")  # up
-        if x > 0:
-            f.write(f"<{x - 1}, {y}> ")  # left
-        if y > 0:
-            f.write(f"<{x}, {y-1}> ")  # down
-        f.write(f"<{x}, {y}> ")
-        f.write("}\n")
-f.write("];\n")
-
-f.write('NE = [')
-for x in range(Lx):
-    for y in range(Ly):
-        f.write("{")
-        for xx in range(Lx):
-            f.write(f"<{xx}, {y}> ")
-        for yy in range(Ly):
-            if yy != y:
-                f.write(f"<{x}, {yy}> ")
-        f.write(f"<{x}, {y} > ")
-        f.write("}\n")
-f.write("];\n")
-
-f.write('movesE = {')
-for x in range(Lx):
-    for y in range(Ly):
-        for xx in range(Lx):
-            f.write(f"<{x} {y} {xx} {y}> ")
-        for yy in range(Ly):
-            if yy != y:
-                f.write(f"<{x} {y} {x} {yy}> ")
-        f.write("\n")
-f.write("};\n")
-
-
-
-
-
-f.write('movesA = {')
-for x in range(Lx):
-    for y in range(Ly):
-        if x < Lx - 1:
-            f.write(f"<{x} {y} {x + 1} {y}> ")  # right
-        if y < Ly - 1:
-            f.write(f"<{x} {y} {x} {y + 1}> ")  # up
-        if x > 0:
-            f.write(f"<{x} {y} {x - 1} {y}> ")  # left
-        if y > 0:
-            f.write(f"<{x} {y} {x} {y - 1}> ")  # down
-        f.write(f"<{x} {y} {x} {y}> ")
-f.write("};\n")
-
-f.write('CellCover = [')
-for x in range(Lx):
-    for y in range(Ly):
-        f.write("{")
-        for x1 in range(x+1):
-            for x2 in range(x, Lx):
-                if x1 != x2:
-                    f.write(f"<{x1} {y} {x2} {y}> ")
-                    f.write(f"<{x2} {y} {x1} {y}> ")
-        for y1 in range(y+1):
-            for y2 in range(y, Ly):
-                if y1 != y2:
-                    f.write(f"<{x} {y1} {x} {y2}> ")
-                    f.write(f"<{x} {y2} {x} {y1}> ")
-        f.write(f"<{x} {y} {x} {y}> ")
-        f.write("}\n")
-f.write("];\n")
-
-
-# Conflict-pair generation is disabled; the static models rely on CellCover/avoid_conflicts.
-
-
-f.write('MoveCover = [')
-for x in range(Lx):
-    for y in range(Ly):
-        # right movement to (x+1,y)
-        if x < Lx-1:
+    f.write('NA = [')
+    for x in range(Lx):
+        for y in range(Ly):
             f.write("{")
-            for x1 in range(x+1):
-                for x2 in range(x, Lx):
-                    if x1 != x2:
-                        f.write(f"<{x2} {y} {x1} {y}> ")
+            if x < Lx - 1:
+                f.write(f"<{x + 1}, {y}> ")  # right
+            if y < Ly - 1:
+                f.write(f"<{x}, {y+1}> ")  # up
+            if x > 0:
+                f.write(f"<{x - 1}, {y}> ")  # left
+            if y > 0:
+                f.write(f"<{x}, {y-1}> ")  # down
+            f.write(f"<{x}, {y}> ")
             f.write("}\n")
+    f.write("];\n")
 
-        # up movement to (x,y+1)
-        if y < Ly-1:
+    f.write('NE = [')
+    for x in range(Lx):
+        for y in range(Ly):
             f.write("{")
-            for y1 in range(y + 1):
-                for y2 in range(y, Ly):
-                    if y1 != y2:
-                        f.write(f"<{x} {y2} {x} {y1}> ")
+            for xx in range(Lx):
+                f.write(f"<{xx}, {y}> ")
+            for yy in range(Ly):
+                if yy != y:
+                    f.write(f"<{x}, {yy}> ")
+            f.write(f"<{x}, {y} > ")
             f.write("}\n")
+    f.write("];\n")
 
-        # left movement to (x-1,y)
-        if x> 0:
+    f.write('movesE = {')
+    for x in range(Lx):
+        for y in range(Ly):
+            for xx in range(Lx):
+                f.write(f"<{x} {y} {xx} {y}> ")
+            for yy in range(Ly):
+                if yy != y:
+                    f.write(f"<{x} {y} {x} {yy}> ")
+            f.write("\n")
+    f.write("};\n")
+
+    f.write('movesA = {')
+    for x in range(Lx):
+        for y in range(Ly):
+            if x < Lx - 1:
+                f.write(f"<{x} {y} {x + 1} {y}> ")  # right
+            if y < Ly - 1:
+                f.write(f"<{x} {y} {x} {y + 1}> ")  # up
+            if x > 0:
+                f.write(f"<{x} {y} {x - 1} {y}> ")  # left
+            if y > 0:
+                f.write(f"<{x} {y} {x} {y - 1}> ")  # down
+            f.write(f"<{x} {y} {x} {y}> ")
+    f.write("};\n")
+
+    f.write('CellCover = [')
+    for x in range(Lx):
+        for y in range(Ly):
             f.write("{")
             for x1 in range(x+1):
                 for x2 in range(x, Lx):
                     if x1 != x2:
                         f.write(f"<{x1} {y} {x2} {y}> ")
-            f.write("}\n")
-
-        # down movement to (x,y-1)
-        if y > 0:
-            f.write("{")
+                        f.write(f"<{x2} {y} {x1} {y}> ")
             for y1 in range(y+1):
                 for y2 in range(y, Ly):
                     if y1 != y2:
                         f.write(f"<{x} {y1} {x} {y2}> ")
+                        f.write(f"<{x} {y2} {x} {y1}> ")
+            f.write(f"<{x} {y} {x} {y}> ")
             f.write("}\n")
-        f.write("{}\n")
+    f.write("];\n")
 
-f.write("];\n")
-f.close()
+    # Conflict-pair generation is disabled; the static models rely on CellCover/avoid_conflicts.
 
-header_line = (
+    f.write('MoveCover = [')
+    for x in range(Lx):
+        for y in range(Ly):
+            # right movement to (x+1,y)
+            if x < Lx-1:
+                f.write("{")
+                for x1 in range(x+1):
+                    for x2 in range(x, Lx):
+                        if x1 != x2:
+                            f.write(f"<{x2} {y} {x1} {y}> ")
+                f.write("}\n")
+
+            # up movement to (x,y+1)
+            if y < Ly-1:
+                f.write("{")
+                for y1 in range(y + 1):
+                    for y2 in range(y, Ly):
+                        if y1 != y2:
+                            f.write(f"<{x} {y2} {x} {y1}> ")
+                f.write("}\n")
+
+            # left movement to (x-1,y)
+            if x > 0:
+                f.write("{")
+                for x1 in range(x+1):
+                    for x2 in range(x, Lx):
+                        if x1 != x2:
+                            f.write(f"<{x1} {y} {x2} {y}> ")
+                f.write("}\n")
+
+            # down movement to (x,y-1)
+            if y > 0:
+                f.write("{")
+                for y1 in range(y+1):
+                    for y2 in range(y, Ly):
+                        if y1 != y2:
+                            f.write(f"<{x} {y1} {x} {y2}> ")
+                f.write("}\n")
+            f.write("{}\n")
+
+    f.write("];\n")
+    f.close()
+
+regular_header_line = (
     "Machine Name, Time Stamp, version, Moves, Model, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
-    "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , "
+    "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , Greedy UB, Naive LB, "
     "ILP makespan, ILP flowtime, #load movements, obj, LB, Wall Clock Time, Work, User Cut Time, Solver Status"
 )
+greedy_header_line = (
+    "Machine Name, Time Stamp, version, Moves, Model, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
+    "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , Greedy UB, Naive LB"
+)
+naive_header_line = (
+    "Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, beta, gamma, seed, Naive LB"
+)
+header_line = naive_header_line if args.naive else greedy_header_line if args.greedy else regular_header_line
 if not csv_file_contains_row(result_csv_file, header_line):
     append_csv_text(result_csv_file, header_line + "\n", ensure_record_start=True)
 
@@ -387,8 +432,35 @@ def max_user_cut_per_node_for_instance(T):
         return "-"
     return str(2 * T if args.bnc == -1 else args.bnc)
 
+def calculate_naive_lower_bound(target_positions):
+    total_distance = sum(
+        min(distance(target_loc, output_loc) for output_loc in O)
+        for target_loc in target_positions
+    )
+    return total_distance * (beta + gamma)
+
+
+def build_naive_csv_row(target_positions, escort_positions, rep, naive_lower_bound):
+    return (
+        f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(escort_positions)}, {len(target_positions)}, "
+        f"{tuple_opl(O)}, {tuple_opl(escort_positions)}, {tuple_opl(target_positions)}, "
+        f"{beta}, {gamma}, {rep}, {naive_lower_bound}"
+    )
+
+
+def build_regular_csv_prefix(target_positions, escort_positions, rep, T, heuristic_ub_makespan,
+                             heuristic_ub_movements, greedy_upper_bound, naive_lower_bound,
+                             model_name, max_user_cut_per_node):
+    return (
+        f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name}, {max_user_cut_per_node},"
+        f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(escort_positions)}, {len(target_positions)}, {tuple_opl(O)}, "
+        f"{tuple_opl(escort_positions)}, {tuple_opl(target_positions)}, {beta}, {gamma}, {rep}, {T}, "
+        f"{heuristic_ub_makespan}, {heuristic_ub_movements}, {greedy_upper_bound}, {naive_lower_bound}"
+    )
+
+
 gurobi_solver = None
-if args.gurobi and not args.greedy:
+if args.gurobi and not args.greedy and not args.naive:
     try:
         if args.bnc is not None:
             from escort_flow_static_bnc import StaticGurobiConfig, BnCStaticEscortFlowGurobiSolver
@@ -427,9 +499,10 @@ if args.gurobi and not args.greedy:
     gurobi_solver = solver_class(StaticGurobiConfig(**config_kwargs))
 
 
-def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_warmstart=False):
+def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_warmstart=False, export_moves=False):
     max_steps = max(1, (Lx + Ly) * len(target_positions) * 20 // max(len(escort_positions), 1))
     need_trace = build_warmstart and args.retrieval_mode != "leave"
+    need_moves = export_moves and not need_trace
     greedy_result = OneStepHeuristic_v2.SolveGreedy(
         Lx,
         Ly,
@@ -438,13 +511,19 @@ def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_w
         set(escort_positions),
         verbal=False,
         max_steps=max_steps,
+        return_moves=need_moves,
         return_trace=need_trace,
         retrieval_mode=args.retrieval_mode,
     )
     if need_trace:
-        makespan, _, movements, _, escort_moves, target_moves = greedy_result
+        makespan, flowtime, movements, move_history, escort_moves, target_moves = greedy_result
+    elif need_moves:
+        makespan, flowtime, movements, move_history = greedy_result
+        escort_moves = None
+        target_moves = None
     else:
-        makespan, _, movements = greedy_result
+        makespan, flowtime, movements = greedy_result
+        move_history = None
         escort_moves = None
         target_moves = None
     warmstart = None
@@ -462,16 +541,38 @@ def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_w
                 target_moves,
                 escort_moves,
             )
-    return makespan, movements, warmstart
+    return makespan, flowtime, movements, move_history, warmstart
 
 try:
     for escort_num in escorts_range:
         for rep in reps_range:
             random.seed(rep)
             R, E = GeneretaeRandomInstance(rep, Locations, escort_num, load_num)
+            naive_lower_bound = calculate_naive_lower_bound(R)
+
+            if args.naive:
+                append_csv_text(
+                    result_csv_file,
+                    build_naive_csv_row(R, E, rep, naive_lower_bound) + "\n",
+                    ensure_record_start=True,
+                )
+                continue
+
             heuristic_ub_makespan = 0
             heuristic_ub_movements = 0
             warmstart = None
+            greedy_upper_bound = "-"
+            greedy_solution = None
+
+            if args.retrieval_mode in ["continue", "leave"]:
+                greedy_solution = greedy_upper_bound_and_warmstart(
+                    R,
+                    E,
+                    build_warmstart=args.warmstart,
+                    export_moves=bool(args.greedy and file_export != ""),
+                )
+                greedy_ub_makespan, greedy_ub_flowtime, greedy_ub_movements, greedy_move_history, warmstart = greedy_solution
+                greedy_upper_bound = beta * greedy_ub_flowtime + gamma * greedy_ub_movements
 
             if dp_file:
                 moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, k_prime, False)
@@ -480,11 +581,8 @@ try:
                 heuristic_ub_movements = sum(len(step) for step in moves)
             elif args.gurobi and args.retrieval_mode in ["continue", "leave"]:
                 moves = []
-                heuristic_ub_makespan, heuristic_ub_movements, warmstart = greedy_upper_bound_and_warmstart(
-                    R,
-                    E,
-                    build_warmstart=args.warmstart,
-                )
+                heuristic_ub_makespan = greedy_ub_makespan
+                heuristic_ub_movements = greedy_ub_movements
                 T = heuristic_ub_makespan
             else:  # just guess T
                 moves = []  # so it prints 0
@@ -512,30 +610,28 @@ try:
 
             append_csv_text(
                 result_csv_file,
-                f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name}, {max_user_cut_per_node},"
-                f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
-                f"{tuple_opl(E)}, {tuple_opl(R)},{beta},{gamma},{rep}, {T}, {heuristic_ub_makespan}, "
-                f"{heuristic_ub_movements}",
+                build_regular_csv_prefix(
+                    R,
+                    E,
+                    rep,
+                    T,
+                    heuristic_ub_makespan,
+                    heuristic_ub_movements,
+                    greedy_upper_bound,
+                    naive_lower_bound,
+                    model_name,
+                    max_user_cut_per_node,
+                ),
                 ensure_record_start=True,
             )
 
             if args.greedy:
-                max_steps = max(T, (Lx + Ly) * len(R) * 20 // max(len(E), 1))
-                greedy_start_time = time.perf_counter()
-                makespan, flowtime, movements, greedy_moves = OneStepHeuristic_v2.SolveGreedy(
-                    Lx, Ly, set(O), set(R), set(E), verbal=False, max_steps=max_steps, return_moves=True,
-                    retrieval_mode=args.retrieval_mode
-                )
-                cpu_time = time.perf_counter() - greedy_start_time
+                _, _, _, greedy_moves, _ = greedy_solution
 
                 if file_export != "":
                     pickle.dump((Lx, Ly, O, E, R, greedy_moves),
                                 open(f"script_BM_{args.retrieval_mode}_{Lx}_{Ly}_{escort_num}_{load_num}_{rep}.p", "wb"))
 
-                append_csv_text(
-                    result_csv_file,
-                    f",{makespan}, {flowtime}, {movements}, {beta * flowtime + gamma * movements}, , {cpu_time:.4f}, , 0.0000, Greedy"
-                )
             elif args.gurobi:
                 try:
                     result = gurobi_solver.solve(R, E, T, warmstart=warmstart)
