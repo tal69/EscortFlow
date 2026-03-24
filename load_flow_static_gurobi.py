@@ -19,6 +19,7 @@ class LoadFlowStaticGurobiConfig:
     gamma: float
     time_limit: int | None
     work_limit: float | None = None
+    mip_focus: int = 0
     lp: bool = False
     threads: int = 0
 
@@ -149,6 +150,8 @@ class LoadFlowStaticGurobiSolver:
         solve_start = time.perf_counter()
         model = gp.Model("load_flow_static", env=self.env)
         model.Params.OutputFlag = 1
+        if not self.config.lp:
+            model.Params.MIPFocus = self.config.mip_focus
         model.Params.MIPGap = OPTIMALITY_TOLERANCE
         if self.config.time_limit is not None:
             model.Params.TimeLimit = self.config.time_limit

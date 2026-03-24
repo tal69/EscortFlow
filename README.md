@@ -106,6 +106,7 @@ Common arguments:
 - `-T`: legacy horizon scaling factor, default `1.6`; retained in the CLI but retired from the normal static workflow
 - `-t`: solver time limit, default `300`
 - `--work_limit`: Gurobi work limit in work units, default none
+- `--mip_emphasis`: Gurobi MIP emphasis, one of `balanced`, `feasibility`, `optimality`, or `bound`, default `balanced`
 - `--dp_file`: DP table file for the single-load case, default empty
 - `-k`: `k'` parameter used with the DP heuristic, default `0`
 - `--lp`: LP relaxation option, default off
@@ -142,6 +143,7 @@ Static CSV output:
 
 - each row now begins with `Machine Name`, `Time Stamp`, and `version`, mirroring the dynamic simulator
 - regular static rows also include `Greedy UB` and `Naive LB` before the solver-result columns
+- regular static rows also include `MIP Emphasis`; it is the selected Gurobi emphasis for MILP solves and `-` when not applicable
 - `Wall Clock Time` is the elapsed solve time measured by Python around the backend call
 - `Work` is the Gurobi work value when a Gurobi backend is used; it is blank for the OPL/CPLEX path
 - `User Cut Time` is nonzero only for the BnC backend and measures time spent inside the callback separation logic
@@ -225,6 +227,7 @@ Common arguments:
 - `--gamma`: movement weight, default `0.01`
 - `-T`: legacy horizon scaling factor, default `2.0`; retained in the CLI but retired from the documented BM workflow
 - `-t`: solver time limit, default `300`
+- `--mip_emphasis`: Gurobi MIP emphasis, one of `balanced`, `feasibility`, `optimality`, or `bound`, default `balanced`
 - `--lm` or `--LM`: run LM instead of the default BM mode, default off
 - `--dp_file`: DP table file for single-load upper bounds, default empty
 - `-k`: `k'` parameter for the DP heuristic, default `0`

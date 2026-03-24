@@ -70,6 +70,12 @@ parser.add_argument("-t", "--time_limit", type=int,
                     default=None)
 parser.add_argument("--work_limit", type=float,
                     help="Work limit for Gurobi solves in work units (default none)", default=None)
+parser.add_argument(
+    "--mip_emphasis",
+    choices=["balanced", "feasibility", "optimality", "bound"],
+    default="balanced",
+    help="Gurobi MIP emphasis for static MILP solves (default balanced)",
+)
 parser.add_argument("--dp_file",
                     help="Dynamic programming file for upper bound and warm start (only relevant for single target load for now)",
                     default="")
@@ -392,16 +398,16 @@ if args.opl:
     f.close()
 
 regular_header_line = (
-    "Machine Name, Time Stamp, version, Moves, Model, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
+    "Machine Name, Time Stamp, version, Moves, Model, MIP Emphasis, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
     "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , Greedy UB, Naive LB, "
     "ILP makespan, ILP flowtime, #load movements, obj, LB, Wall Clock Time, Work, User Cut Time, Solver Status"
 )
 greedy_header_line = (
-    "Machine Name, Time Stamp, version, Moves, Model, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
+    "Machine Name, Time Stamp, version, Moves, Model, MIP Emphasis, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
     "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , Greedy UB, Naive LB"
 )
 naive_header_line = (
-    "Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, beta, gamma, seed, Naive LB"
+    "Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, beta, gamma, seed, MIP Emphasis, Naive LB"
 )
 header_line = naive_header_line if args.naive else greedy_header_line if args.greedy else regular_header_line
 if not csv_file_contains_row(result_csv_file, header_line):
@@ -432,6 +438,22 @@ def max_user_cut_per_node_for_instance(T):
         return "-"
     return str(2 * T if args.bnc == -1 else args.bnc)
 
+
+def mip_emphasis_focus():
+    return {
+        "balanced": 0,
+        "feasibility": 1,
+        "optimality": 2,
+        "bound": 3,
+    }[args.mip_emphasis]
+
+
+def mip_emphasis_for_csv():
+    if args.gurobi and not args.greedy and not args.naive and not args.lp:
+        return args.mip_emphasis
+    return "-"
+
+
 def calculate_naive_lower_bound(target_positions):
     total_distance = sum(
         min(distance(target_loc, output_loc) for output_loc in O)
@@ -444,7 +466,7 @@ def build_naive_csv_row(target_positions, escort_positions, rep, naive_lower_bou
     return (
         f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(escort_positions)}, {len(target_positions)}, "
         f"{tuple_opl(O)}, {tuple_opl(escort_positions)}, {tuple_opl(target_positions)}, "
-        f"{beta}, {gamma}, {rep}, {naive_lower_bound}"
+        f"{beta}, {gamma}, {rep}, {mip_emphasis_for_csv()}, {naive_lower_bound}"
     )
 
 
@@ -452,7 +474,7 @@ def build_regular_csv_prefix(target_positions, escort_positions, rep, T, heurist
                              heuristic_ub_movements, greedy_upper_bound, naive_lower_bound,
                              model_name, max_user_cut_per_node):
     return (
-        f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name}, {max_user_cut_per_node},"
+        f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name}, {mip_emphasis_for_csv()}, {max_user_cut_per_node},"
         f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(escort_positions)}, {len(target_positions)}, {tuple_opl(O)}, "
         f"{tuple_opl(escort_positions)}, {tuple_opl(target_positions)}, {beta}, {gamma}, {rep}, {T}, "
         f"{heuristic_ub_makespan}, {heuristic_ub_movements}, {greedy_upper_bound}, {naive_lower_bound}"
@@ -489,6 +511,7 @@ if args.gurobi and not args.greedy and not args.naive:
         gamma=gamma,
         time_limit=time_limit,
         work_limit=args.work_limit,
+        mip_focus=mip_emphasis_focus(),
         lp=args.lp,
         threads=solver_threads,
     )

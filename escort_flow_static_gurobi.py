@@ -18,6 +18,7 @@ class StaticGurobiConfig:
     gamma: float
     time_limit: int | None
     work_limit: float | None = None
+    mip_focus: int = 0
     lp: bool = False
     threads: int = 0
 
@@ -448,6 +449,8 @@ class StaticEscortFlowGurobiSolver:
         model = gp.Model("escort_flow_static", env=self.env)
         model.Params.OutputFlag = 1
         model.Params.StartNodeLimit = 100000
+        if not self.config.lp:
+            model.Params.MIPFocus = self.config.mip_focus
         model.Params.MIPGap = OPTIMALITY_TOLERANCE
         if self.config.time_limit is not None:
             model.Params.TimeLimit = self.config.time_limit

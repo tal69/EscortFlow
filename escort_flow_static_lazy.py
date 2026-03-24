@@ -77,6 +77,7 @@ class LazyStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
         model.Params.OutputFlag = 1
         model.Params.StartNodeLimit = 100000
         model.Params.LazyConstraints = 1
+        model.Params.MIPFocus = self.config.mip_focus
         model.Params.MIPGap = 1e-4
         if self.config.time_limit is not None:
             model.Params.TimeLimit = self.config.time_limit

@@ -66,6 +66,12 @@ parser.add_argument("-t", "--time_limit", type=int,
                     default=None)
 parser.add_argument("--work_limit", type=float,
                     help="Work limit for Gurobi solves in work units (default none)", default=None)
+parser.add_argument(
+    "--mip_emphasis",
+    choices=["balanced", "feasibility", "optimality", "bound"],
+    default="balanced",
+    help="Gurobi MIP emphasis for static MILP solves (default balanced)",
+)
 
 parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
@@ -152,6 +158,21 @@ Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
 solver_threads = solver_thread_count()
 
 
+def mip_emphasis_focus():
+    return {
+        "balanced": 0,
+        "feasibility": 1,
+        "optimality": 2,
+        "bound": 3,
+    }[args.mip_emphasis]
+
+
+def mip_emphasis_for_csv():
+    if args.gurobi and not args.lp:
+        return args.mip_emphasis
+    return "-"
+
+
 def greedy_upper_bound(target_positions, escort_positions):
     max_steps = max(1, (Lx + Ly) * len(target_positions) * 20 // max(len(escort_positions), 1))
     makespan, _, _ = OneStepHeuristic_v2.SolveGreedy(
@@ -168,7 +189,7 @@ def greedy_upper_bound(target_positions, escort_positions):
 
 f = open(result_csv_file, 'a')
 f.write(
-    "\ndate, Moves, Model, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed, makespan, flowtime, #load movements, obj, LB, Wall Clock Time, Work\n")
+    "\ndate, Moves, Model, MIP Emphasis, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed, makespan, flowtime, #load movements, obj, LB, Wall Clock Time, Work\n")
 f.close()
 
 model_name = "LP-Gurobi" if args.gurobi and args.lp else (
@@ -196,6 +217,7 @@ if args.gurobi:
             gamma=gamma,
             time_limit=time_limit,
             work_limit=args.work_limit,
+            mip_focus=mip_emphasis_focus(),
             lp=args.lp,
             threads=solver_threads,
         )
@@ -243,7 +265,7 @@ try:
 
             f = open(result_csv_file, 'a')
             f.write(
-                f"{time.ctime()},{'BM' if is_bm else 'LM'}, {model_name},"
+                f"{time.ctime()},{'BM' if is_bm else 'LM'}, {model_name}, {mip_emphasis_for_csv()},"
                 f"{args.retrieval_mode},{Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
                 f"{tuple_opl(E)}, {tuple_opl(R)}, {alpha},{beta},{gamma},{args.k_prime},{rep}")
             f.close()
