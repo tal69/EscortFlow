@@ -13,7 +13,7 @@ The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic 
 ## Main entry points
 
 - `EscortFlowSim_v8.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
-- `EscortFlowStatic.py`: static escort-flow ILP experiment runner for single-load and multi-load instances
+- `EscortFlowStatic.py`: static escort-flow experiment runner for single-load and multi-load instances, defaulting to the Gurobi Python backend and also supporting greedy-only and naive-lower-bound modes
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and `--gurobi` uses the Gurobi Python API
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
 - `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v8.py`
@@ -109,9 +109,11 @@ Common arguments:
 - `--dp_file`: DP table file for the single-load case, default empty
 - `-k`: `k'` parameter used with the DP heuristic, default `0`
 - `--lp`: LP relaxation option, default off
-- `--greedy`: solve the static instance with the greedy heuristic instead of OPL, default off; currently supported for `continue` and `leave` modes. In `leave` mode, a target load that reached an output cell becomes an escort at the beginning of the next step
-- `--gurobi`: solve with the Gurobi Python API instead of `oplrun` / CPLEX, default off
+- `--greedy`: solve the static instance with the greedy heuristic instead of a MILP backend, default off; currently supported for `continue` and `leave` modes. In `leave` mode, a target load that reached an output cell becomes an escort at the beginning of the next step
+- `--gurobi`: explicitly select the Gurobi Python backend; accepted for clarity but now redundant because Gurobi is the default
+- `--opl`: switch to the legacy `oplrun` / CPLEX path instead of the default Gurobi backend
 - `--warmstart`: enable heuristic MIP start with the static Gurobi backend, default off
+- `--naive`: skip optimization entirely, compute only the naive lower bound for each generated instance, and write a reduced CSV row
 - `--lazy` or `--lazy N`: use the lazy-constraint Gurobi backend, default off; a bare `--lazy` means `0`, and `N` is the number of initial time steps kept in the master problem
 - `--bnc` or `--bnc N`: use the branch-and-cut Gurobi backend, default off; a bare `--bnc` means a per-separated-node user-cut cap of `2*T`, and `N` sets that cap explicitly
 - `-a`: export animation trace, default off
@@ -123,7 +125,7 @@ Range syntax:
 
 Notes:
 
-- if `--gurobi` is omitted, the default solver path is CPLEX through `oplrun`
+- the default solver path is the Gurobi Python backend; `--opl` switches to the legacy `oplrun` / CPLEX path
 - for `stay` mode, the number of output cells must be at least the number of target loads
 - the DP-based upper bound currently applies only to the single-load case
 - without `--dp_file`, the static horizon upper bound is taken from the greedy heuristic
@@ -134,14 +136,18 @@ Notes:
 - in the current BnC implementation, user cuts are generated at the root and at a small number of early branch-and-bound nodes near the root; the root node is uncapped, while later separated nodes use the configurable `--bnc N` cap, which defaults to `2*T` when omitted, and under that cap the strongest violations are added first; incumbent violations are still rejected with lazy constraints using a cap of `4*T`
 - `--lazy`, `--bnc`, and `--work_limit` all imply or apply only to the Gurobi backend
 - `--lazy` and `--bnc` are integer-only MILP options; they cannot be combined with `--lp`, `--greedy`, or with each other
+- `--naive` is a reporting-only mode: it cannot be combined with solver-selection flags, greedy mode, DP files, warmstarts, animation export, or `-k`
 
 Static CSV output:
 
 - each row now begins with `Machine Name`, `Time Stamp`, and `version`, mirroring the dynamic simulator
+- regular static rows also include `Greedy UB` and `Naive LB` before the solver-result columns
 - `Wall Clock Time` is the elapsed solve time measured by Python around the backend call
 - `Work` is the Gurobi work value when a Gurobi backend is used; it is blank for the OPL/CPLEX path
 - `User Cut Time` is nonzero only for the BnC backend and measures time spent inside the callback separation logic
-- for the BnC backend, the `Model` field records the resolved cut cap, for example `ILP-Gurobi-BnC-20`
+- for the BnC backend, `Model` is `ILP-Gurobi-BnC`, and the resolved cut cap is written separately in `Max User Cut Per Node`
+- with `--greedy`, the CSV row stops after `Naive LB`; the final 9 solver-only columns are omitted
+- with `--naive`, the script writes a reduced CSV containing only the instance description and the naive lower bound
 
 Single-load examples:
 
@@ -178,6 +184,12 @@ python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -e 12 -l 4 -m leave -r 11 --bnc 1
 ```
 
 With bare `--bnc`, the per-node user-cut cap defaults to `2*T`, where `T` is the horizon selected for that instance.
+
+Naive lower-bound example:
+
+```bash
+python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -e 3-8 -r 1-100 -l 1 --naive
+```
 
 ### `LoadFlowStatic.py`
 

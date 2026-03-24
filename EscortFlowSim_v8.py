@@ -239,8 +239,8 @@ parser.add_argument("-L", "--log", action="store_true",
                     help="Write report after each iteration into log file (sim_log<time>.txt), overwrite previous report")
 parser.add_argument("-R", "--request_rate", type=float, help="Request arrival rate (default 0.1 request/time step)",
                     default=0.1)
-parser.add_argument("-o", "--max_opt_gap", type=float, help="Maximum optimality gap to use ILP solution, otherwise use heuristic solution (default 0.4)",
-                    default=0.4)
+parser.add_argument("-o", "--max_opt_gap", type=float, help="Maximum optimality gap to use ILP solution, otherwise use heuristic solution (default 0.2)",
+                    default=0.2)
 parser.add_argument("--seed", type=int, help="random seed (default 0)", default=0)
 parser.add_argument("-H", "--header_line", action="store_true",
                     help="Print header line in result csv file; a new or empty file gets a header automatically")
