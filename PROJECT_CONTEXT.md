@@ -127,6 +127,11 @@ Implemented in `escort_flow_static_bnc.py`.
   - `attention` terminology
   - fallback-reason CSV columns
 
+## Paper Source Location
+
+- The paper LaTeX/Overleaf sync directory for this project is:
+  `/Users/talraviv/Library/CloudStorage/Dropbox/.metadata/Apps/Overleaf/Escort flow formulation for the PBS retrieval problem`
+
 ## Useful Reminder For Next Session
 
 If restarting work, first read:
