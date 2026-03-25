@@ -105,6 +105,7 @@ Common arguments:
 - `--gamma`: movement weight, default `0.01`
 - `-T`: legacy horizon scaling factor, default `1.6`; retained in the CLI but retired from the normal static workflow
 - `-t`: solver time limit, default `300`
+- `--num_threads`: solver thread count, default `8` on macOS and `12` on Linux
 - `--work_limit`: Gurobi work limit in work units, default none
 - `--mip_emphasis`: Gurobi MIP emphasis, one of `balanced`, `feasibility`, `optimality`, or `bound`, default `balanced`
 - `--dp_file`: DP table file for the single-load case, default empty
@@ -227,6 +228,7 @@ Common arguments:
 - `--gamma`: movement weight, default `0.01`
 - `-T`: legacy horizon scaling factor, default `2.0`; retained in the CLI but retired from the documented BM workflow
 - `-t`: solver time limit, default `300`
+- `--num_threads`: solver thread count, default `8` on macOS and `12` on Linux
 - `--mip_emphasis`: Gurobi MIP emphasis, one of `balanced`, `feasibility`, `optimality`, or `bound`, default `balanced`
 - `--lm` or `--LM`: run LM instead of the default BM mode, default off
 - `--dp_file`: DP table file for single-load upper bounds, default empty

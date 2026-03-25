@@ -34,6 +34,9 @@ def solver_thread_count():
         return 8
     return 0
 
+
+default_num_threads = solver_thread_count()
+
 parser.add_argument("-x", "--Lx", type=int, help="Horizontal dimension of the PBS unit", required=True)
 parser.add_argument("-y", "--Ly", type=int, help="Vertical dimension of the PBS unit", required=True)
 parser.add_argument("-O", "--output_cells", nargs='+', type=int, help="List of output locations", required=True)
@@ -64,6 +67,15 @@ parser.add_argument("-T", "--T_factor", type=float,
 parser.add_argument("-t", "--time_limit", type=int,
                     help="Time limit for CPLEX/Gurobi in seconds (default 300 unless omitted while using only --work_limit)",
                     default=None)
+parser.add_argument(
+    "--num_threads",
+    type=int,
+    help=(
+        "Number of solver threads for the static backends. "
+        f"Default {default_num_threads}; 0 means use the solver default."
+    ),
+    default=default_num_threads,
+)
 parser.add_argument("--work_limit", type=float,
                     help="Work limit for Gurobi solves in work units (default none)", default=None)
 parser.add_argument(
@@ -145,6 +157,10 @@ if args.work_limit is not None and args.work_limit <= 0:
     print("Panic: --work_limit must be positive")
     exit(1)
 
+if args.num_threads < 0:
+    print("Panic: --num_threads must be nonnegative")
+    exit(1)
+
 if args.work_limit is not None and not args.gurobi:
     print("Panic: --work_limit is supported only with --gurobi")
     exit(1)
@@ -155,7 +171,7 @@ if args.dp_file:
     print("Done", flush=True)
 
 Locations = sorted(set(itertools.product(range(Lx), range(Ly))))
-solver_threads = solver_thread_count()
+solver_threads = args.num_threads
 
 
 def mip_emphasis_focus():

@@ -62,7 +62,7 @@ This file is a working context snapshot for future sessions on this repo.
 - Static scripts now default to Gurobi.
 - `--opl` switches to the legacy OPL/CPLEX path.
 - `--cplex` is accepted as a hidden alias for `--opl`.
-- Both static scripts set solver threads to:
+- Both static scripts expose `--num_threads` and default it to:
   - `12` on Linux
   - `8` on macOS
 - This is applied to:
