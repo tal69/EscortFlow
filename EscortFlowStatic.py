@@ -106,6 +106,9 @@ parser.add_argument("--opl", dest="opl", action="store_true",
 parser.add_argument("--cplex", dest="opl", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--warmstart", action="store_true",
                     help="Use a heuristic MIP start with the Gurobi static backend (default False)")
+parser.add_argument("--cutoff", dest="cutoff", action="store_true",
+                    help="Enable a heuristic objective cutoff with the static backend")
+parser.add_argument("--no_cutoff", dest="cutoff", action="store_false", help=argparse.SUPPRESS)
 parser.add_argument("--naive", action="store_true",
                     help="Only calculate the naive lower bound for each generated instance and write a reduced CSV")
 parser.add_argument("--lazy", nargs="?", const=0, default=None, type=int,
@@ -113,6 +116,7 @@ parser.add_argument("--lazy", nargs="?", const=0, default=None, type=int,
 parser.add_argument("--bnc", nargs="?", const=-1, default=None, type=int,
                     help="Use the branch-and-cut Gurobi static backend; optional value is the maximum number of user cuts added per separated node, default 2*T when omitted; implies --gurobi")
 
+parser.set_defaults(cutoff=False)
 args = parser.parse_args()
 requested_gurobi = args.gurobi
 requested_opl = args.opl
@@ -671,6 +675,7 @@ try:
             heuristic_ub_movements = 0
             warmstart = None
             greedy_upper_bound = "-"
+            objective_cutoff = None
             greedy_solution = None
 
             if args.retrieval_mode in ["continue", "leave"]:
@@ -683,6 +688,8 @@ try:
                 greedy_ub_makespan = greedy_solution["upper_bound_makespan"]
                 greedy_ub_movements = greedy_solution["upper_bound_movements"]
                 greedy_upper_bound = greedy_solution["upper_bound_objective"]
+                if args.cutoff:
+                    objective_cutoff = greedy_solution["upper_bound_objective"]
 
             if dp_file:
                 moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, k_prime, False)
@@ -719,6 +726,7 @@ try:
                 f.write('threads = %d;\n' % solver_threads)
                 f.write('beta=%f;\n' % beta)
                 f.write('gamma=%f;\n' % gamma)
+                f.write('heuristic_cutoff=%f;\n' % (-1.0 if objective_cutoff is None else objective_cutoff))
                 f.write('Lx=%d;\n' % Lx)
                 f.write('Ly=%d;\n' % Ly)
                 f.write(f'T={T};\n')
@@ -754,7 +762,7 @@ try:
 
             elif args.gurobi:
                 try:
-                    result = gurobi_solver.solve(R, E, T, warmstart=warmstart)
+                    result = gurobi_solver.solve(R, E, T, warmstart=warmstart, objective_cutoff=objective_cutoff)
                 except Exception as exc:
                     print(f"Could not solve the model with Gurobi: {exc}")
                     append_csv_text(result_csv_file, ",-,-,-,-,-,-,-,0.0000, ERROR")

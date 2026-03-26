@@ -6,6 +6,7 @@ import gurobipy as gp
 from gurobipy import GRB
 
 OPTIMALITY_TOLERANCE = 1e-4  # 0.01%
+OBJECTIVE_CUTOFF_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,7 @@ class LoadFlowStaticGurobiSolver:
             moves.append(one_step_moves)
         return moves
 
-    def solve(self, target_positions, escort_positions, T):
+    def solve(self, target_positions, escort_positions, T, objective_cutoff=None):
         target_set = set(target_positions)
         escort_set = set(escort_positions)
         blocking_set = set(self.network["locations"]) - target_set - escort_set
@@ -187,10 +188,8 @@ class LoadFlowStaticGurobiSolver:
             for output in self.output_cells
             for t in tr
         )
-        model.setObjective(
-            self.config.alpha * z + self.config.gamma * movement_expr + self.config.beta * flow_time_expr,
-            GRB.MINIMIZE,
-        )
+        objective_expr = self.config.alpha * z + self.config.gamma * movement_expr + self.config.beta * flow_time_expr
+        model.setObjective(objective_expr, GRB.MINIMIZE)
 
         for loc in self.network["locations"]:
             for t in range(1, T + 1):
@@ -302,6 +301,13 @@ class LoadFlowStaticGurobiSolver:
             for output in self.output_cells:
                 for t in tr:
                     model.addConstr(t * q[(output, t)] <= z)
+
+        if objective_cutoff is not None:
+            cutoff_value = objective_cutoff + OBJECTIVE_CUTOFF_TOLERANCE
+            if self.config.lp:
+                model.addConstr(objective_expr <= cutoff_value)
+            else:
+                model.Params.Cutoff = cutoff_value
 
         model.optimize()
         cpu_time = time.perf_counter() - solve_start

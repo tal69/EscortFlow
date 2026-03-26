@@ -101,8 +101,12 @@ parser.add_argument("--gurobi", action="store_true",
 parser.add_argument("--opl", dest="opl", action="store_true",
                     help="Solve the static load-flow model with oplrun/CPLEX instead of the default Gurobi backend")
 parser.add_argument("--cplex", dest="opl", action="store_true", help=argparse.SUPPRESS)
+parser.add_argument("--cutoff", dest="cutoff", action="store_true",
+                    help="Enable a heuristic objective cutoff with the static backend")
+parser.add_argument("--no_cutoff", dest="cutoff", action="store_false", help=argparse.SUPPRESS)
 
 
+parser.set_defaults(cutoff=False)
 args = parser.parse_args()
 if args.gurobi and args.opl:
     print("Panic: --gurobi and --opl cannot be combined")
@@ -189,9 +193,9 @@ def mip_emphasis_for_csv():
     return "-"
 
 
-def greedy_upper_bound(target_positions, escort_positions):
+def greedy_upper_bound_summary(target_positions, escort_positions):
     max_steps = max(1, (Lx + Ly) * len(target_positions) * 20 // max(len(escort_positions), 1))
-    makespan, _, _ = OneStepHeuristic_v2.SolveGreedy(
+    makespan, flowtime, movements = OneStepHeuristic_v2.SolveGreedy(
         Lx,
         Ly,
         set(O),
@@ -201,7 +205,12 @@ def greedy_upper_bound(target_positions, escort_positions):
         max_steps=max_steps,
         retrieval_mode=args.retrieval_mode,
     )
-    return planning_horizon_from_heuristic_makespan(makespan)
+    return {
+        "makespan": makespan,
+        "flowtime": flowtime,
+        "movements": movements,
+        "objective": alpha * makespan + beta * flowtime + gamma * movements,
+    }
 
 
 def planning_horizon_from_heuristic_makespan(makespan):
@@ -256,6 +265,7 @@ try:
             random.seed(rep)
 
             R, E = GeneretaeRandomInstance(rep, Locations, escort_num, load_num)
+            objective_cutoff = None
             if args.dp_file:
                 if is_bm:
                     moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, args.k_prime, False)
@@ -264,7 +274,10 @@ try:
                 T = planning_horizon_from_heuristic_makespan(len(moves))
             elif is_bm and args.retrieval_mode in ["continue", "leave"]:
                 moves = []
-                T = greedy_upper_bound(R, E)
+                greedy_summary = greedy_upper_bound_summary(R, E)
+                T = planning_horizon_from_heuristic_makespan(greedy_summary["makespan"])
+                if args.cutoff:
+                    objective_cutoff = greedy_summary["objective"]
             else:  # just guess T
                 moves = []  # so it prints 0
                 T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
@@ -281,6 +294,7 @@ try:
                 f.write('alpha=%f;\n' % alpha)
                 f.write('beta=%f;\n' % beta)
                 f.write('gamma=%f;\n' % gamma)
+                f.write('heuristic_cutoff=%f;\n' % (-1.0 if objective_cutoff is None else objective_cutoff))
                 f.write('Lx=%d;\n' % Lx)
                 f.write('Ly=%d;\n' % Ly)
                 f.write('T=%d;\n' % T)
@@ -298,7 +312,7 @@ try:
 
             if args.gurobi:
                 try:
-                    result = gurobi_solver.solve(R, E, T)
+                    result = gurobi_solver.solve(R, E, T, objective_cutoff=objective_cutoff)
                 except Exception as exc:
                     print(f"Could not solve the model with Gurobi: {exc}")
                     f = open(result_csv_file, 'a')

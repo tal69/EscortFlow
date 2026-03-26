@@ -22,6 +22,7 @@ string file_res = ...;
 
 float beta = ...; // flowtime weight - can be zero
 float gamma = ...; // movement weight  (assumed > 0)
+float heuristic_cutoff = ...; // negative value disables the objective cutoff
 
 tuple Loc {
   key int x;
@@ -85,9 +86,10 @@ dvar float+ q[O];  // auxiliary to facilitate cuts
 dexpr float NumberOfMovements = (sum(m in movesE, t in Tr )  (abs(m.orig_x-m.dest_x)+ abs(m.orig_y-m.dest_y))*xE[m,t]);
 dexpr float FlowTime = sum(l2 in O)  sum(l1 in NA[l2] : l2 != l1) sum(t in 1..T) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y>,t];  
 dexpr float CalcMakespan = max(l2 in O, l1 in NA[l2], t in Tr : l2 != l1) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y>,t];  
+dexpr float ObjectiveValue = gamma * NumberOfMovements + beta * sum(l in O) q[l];
 
 
-minimize gamma * NumberOfMovements + beta * sum(l in O) q[l];
+minimize ObjectiveValue;
 subject to
 {
   	 		 
@@ -164,6 +166,9 @@ subject to
 
 	// Integrality cut 
 	forall(l2 in O ) sum(t in Tr, l1 in NA[l2]: l1 != l2) (t+1)* xA[<l1.x, l1.y, l2.x, l2.y> ,t] == q[l2]; 
+
+  if (heuristic_cutoff >= 0)
+    objective_cutoff_constraint: ObjectiveValue <= heuristic_cutoff + 1e-6;
 
 }
 

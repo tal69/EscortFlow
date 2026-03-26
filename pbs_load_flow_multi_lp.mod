@@ -24,6 +24,7 @@ string file_res = ...;
 float alpha = ...; // C_max weight
 float beta = ...; // flowtime weight
 float gamma = ...; // movement weight
+float heuristic_cutoff = ...; // negative value disables the objective cutoff
 
 tuple Loc {
   key int x;
@@ -83,10 +84,11 @@ dvar float+ z;
 
 dexpr float NumberOfMovements = (sum(m in moves, t in Tr, i in 1..2 )  m.cost  *x[m,t,i])/gamma;
 dexpr float FlowTime = sum(l in O, t in Tr) t* q[l,t];
+dexpr float ObjectiveValue = alpha* z + sum(m in moves, t in Tr, i in 1..2 )  m.cost  *x[m,t,i] + beta * FlowTime;
 
 
 
-minimize alpha* z + sum(m in moves, t in Tr, i in 1..2 )  m.cost  *x[m,t,i] + beta * FlowTime;
+minimize ObjectiveValue;
 
 subject to{
   // (2) in the paper
@@ -142,6 +144,9 @@ subject to{
   
    // ( stipulating z)
    if (alpha > 0)   forall( l in O,t in Tr)  t * q[l,t] <= z;
+
+   if (heuristic_cutoff >= 0)
+     objective_cutoff_constraint: ObjectiveValue <= heuristic_cutoff + 1e-6;
 }
 
 execute {

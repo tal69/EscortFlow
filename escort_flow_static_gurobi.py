@@ -6,6 +6,7 @@ import gurobipy as gp
 from gurobipy import GRB
 
 OPTIMALITY_TOLERANCE = 1e-4  # 0.01%
+OBJECTIVE_CUTOFF_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -459,7 +460,7 @@ class StaticEscortFlowGurobiSolver:
         for output, var in q.items():
             var.Start = warmstart["q"].get(output, 0.0)
 
-    def solve(self, target_positions, escort_positions, T, warmstart=None):
+    def solve(self, target_positions, escort_positions, T, warmstart=None, objective_cutoff=None):
         target_set = set(target_positions)
         escort_set = set(escort_positions)
         loads_to_retrieve = len(target_set - self.output_set)
@@ -500,11 +501,11 @@ class StaticEscortFlowGurobiSolver:
             for move in self.network["moves_e"]
             for t in tr
         )
-        model.setObjective(
+        objective_expr = (
             self.config.gamma * number_of_movements +
-            self.config.beta * gp.quicksum(q[output] for output in self.output_cells),
-            GRB.MINIMIZE,
+            self.config.beta * gp.quicksum(q[output] for output in self.output_cells)
         )
+        model.setObjective(objective_expr, GRB.MINIMIZE)
 
         if self.config.retrieval_mode == "stay":
             # Flow conservation at nodes for escorts and target loads in stay mode.
@@ -618,6 +619,13 @@ class StaticEscortFlowGurobiSolver:
                     for t in tr
                 ) == q[output]
             )
+
+        if objective_cutoff is not None:
+            cutoff_value = objective_cutoff + OBJECTIVE_CUTOFF_TOLERANCE
+            if self.config.lp:
+                model.addConstr(objective_expr <= cutoff_value)
+            else:
+                model.Params.Cutoff = cutoff_value
 
         # Explicit conflict cuts are disabled; rely on the cell-cover constraints above.
 
