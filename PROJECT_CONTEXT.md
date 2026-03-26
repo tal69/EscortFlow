@@ -6,7 +6,7 @@ This file is a working context snapshot for future sessions on this repo.
 
 - Dynamic simulator:
   - Active track is `EscortFlowSim_v8.py` with backend `escort_flow_gurobi_v8.py`.
-  - `v7` stays in the repo but is not the documented active simulator.
+  - `v7` has been moved out of the tracked repo into local junk storage.
 - Static runners:
   - `EscortFlowStatic.py`
   - `LoadFlowStatic.py`
@@ -117,7 +117,7 @@ Implemented in `escort_flow_static_bnc.py`.
 ## Documentation Status
 
 - `README.md` tracks `v8` as the active dynamic simulator.
-- `v7` references were removed from `README.md`.
+- `v7` has been removed from the tracked repo and from `README.md`.
 - The README documents:
   - `v8` dynamic behavior
   - surrogate vs full

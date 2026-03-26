@@ -29,7 +29,7 @@ def build_dist_map(Lx, Ly, O):
 
 def OneStep(
     Lx, Ly, O, _A, _E, dist_map, acyclic=False, retrieval_mode="continue",
-    return_escort_moves=False, return_target_moves=False
+    return_escort_moves=False, return_target_moves=False, blocked_cells=None
 ):
     """Advance the heuristic by one takt.
 
@@ -45,6 +45,8 @@ def OneStep(
             ``continue`` mode, loads at outputs stop being targets but do not
             create new escorts. In ``leave`` mode, they become escorts at the
             beginning of the next step.
+        blocked_cells: Cells that are occupied for the current time step and
+            therefore cannot be crossed or used by escort moves.
 
     Returns:
         Tuple ``(A, E, moves)`` where ``A`` maps updated target locations to
@@ -315,7 +317,7 @@ def OneStep(
     if dist_map is None:
         dist_map = build_dist_map(Lx, Ly, O)
 
-    cell_used = set()
+    cell_used = set(blocked_cells or ())
 
     moved_target_ids = set()
 
@@ -437,10 +439,10 @@ def SolveGreedy(
     all_targets = {loc: idx + 1 for idx, loc in enumerate(ordered_targets)}
     if retrieval_mode == "leave":
         A = {loc: target_id for loc, target_id in all_targets.items() if loc not in O}
-        output_wait_buffer = {loc: target_id for loc, target_id in all_targets.items() if loc in O}
+        current_output_stays = {loc: target_id for loc, target_id in all_targets.items() if loc in O}
     else:
         A = dict(all_targets)
-        output_wait_buffer = {}
+        current_output_stays = {}
     E = set(_E)
 
     dist_map = build_dist_map(Lx, Ly, O)
@@ -460,8 +462,17 @@ def SolveGreedy(
 
         one_step_retrieval_mode = "continue" if retrieval_mode == "leave" else retrieval_mode
         step_result = OneStep(
-            Lx, Ly, O, A, E, dist_map, acyclic=acyclic, retrieval_mode=one_step_retrieval_mode,
-            return_escort_moves=return_trace, return_target_moves=return_trace
+            Lx,
+            Ly,
+            O,
+            A,
+            E,
+            dist_map,
+            acyclic=acyclic,
+            retrieval_mode=one_step_retrieval_mode,
+            return_escort_moves=return_trace,
+            return_target_moves=return_trace,
+            blocked_cells=current_output_stays if retrieval_mode == "leave" else None,
         )
         if return_trace:
             next_A, next_E, mv, escort_mv, target_mv = step_result
@@ -472,8 +483,8 @@ def SolveGreedy(
 
         if retrieval_mode == "leave":
             A = {loc: target_id for loc, target_id in next_A.items() if loc not in O}
-            E = set(next_E) | set(output_wait_buffer)
-            output_wait_buffer = {loc: target_id for loc, target_id in next_A.items() if loc in O}
+            E = set(next_E) | set(current_output_stays)
+            current_output_stays = {loc: target_id for loc, target_id in next_A.items() if loc in O}
         else:
             A, E = next_A, next_E
 

@@ -538,9 +538,53 @@ if args.gurobi and not args.greedy and not args.naive:
     gurobi_solver = solver_class(StaticGurobiConfig(**config_kwargs))
 
 
+def adjusted_leave_upper_bound_from_trace(target_positions, target_move_history, movements):
+    """Convert a leave-mode greedy trace into a model-compatible upper bound.
+
+    Loads that reach the same output too close to each other must be queued,
+    because in the static MILP each retrieved load occupies the output for one
+    additional period before the cell can accept the next arrival.
+    """
+    ordered_targets = sorted(
+        set(target_positions),
+        key=lambda a: (min(abs(a[0] - o[0]) + abs(a[1] - o[1]) for o in O), a[0], a[1]),
+    )
+    all_targets = {loc: idx + 1 for idx, loc in enumerate(ordered_targets)}
+    active_targets = {loc: target_id for loc, target_id in all_targets.items() if loc not in O}
+    raw_arrivals_by_output = {output: [] for output in O}
+
+    for step_idx, step_target_moves in enumerate(target_move_history, start=1):
+        next_targets = {}
+        for loc, target_id in active_targets.items():
+            move = step_target_moves.get(target_id)
+            dest = move[1] if move is not None else loc
+            if dest in O and dest != loc:
+                raw_arrivals_by_output[dest].append(step_idx)
+            else:
+                next_targets[dest] = target_id
+        active_targets = next_targets
+
+    adjusted_arrivals = []
+    for output in O:
+        next_available_arrival = 0
+        for raw_arrival in raw_arrivals_by_output[output]:
+            adjusted_arrival = max(raw_arrival, next_available_arrival)
+            adjusted_arrivals.append(adjusted_arrival)
+            next_available_arrival = adjusted_arrival + 2
+
+    flowtime = sum(adjusted_arrivals)
+    makespan = max(adjusted_arrivals, default=0)
+    return {
+        "makespan": makespan,
+        "flowtime": flowtime,
+        "movements": movements,
+        "objective": beta * flowtime + gamma * movements,
+    }
+
+
 def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_warmstart=False, export_moves=False):
     max_steps = max(1, (Lx + Ly) * len(target_positions) * 20 // max(len(escort_positions), 1))
-    need_trace = build_warmstart and args.retrieval_mode != "leave"
+    need_trace = args.retrieval_mode == "leave" or (build_warmstart and args.retrieval_mode != "leave")
     need_moves = export_moves and not need_trace
     greedy_result = OneStepHeuristic_v2.SolveGreedy(
         Lx,
@@ -565,22 +609,48 @@ def greedy_upper_bound_and_warmstart(target_positions, escort_positions, build_w
         move_history = None
         escort_moves = None
         target_moves = None
-    warmstart = None
-    if build_warmstart and gurobi_solver is not None and not args.lp:
-        if args.retrieval_mode == "leave":
-            makespan, warmstart = gurobi_solver.build_feasible_leave_warmstart(
-                target_positions,
-                escort_positions,
-            )
-        else:
-            warmstart = gurobi_solver.build_warmstart_from_trace(
-                target_positions,
-                escort_positions,
-                makespan,
-                target_moves,
-                escort_moves,
-            )
-    return makespan, flowtime, movements, move_history, warmstart
+
+    upper_bound_flowtime = flowtime
+    upper_bound_movements = movements
+    upper_bound_objective = beta * flowtime + gamma * movements
+    upper_bound_makespan = makespan
+    if args.retrieval_mode == "leave":
+        upper_bound_summary = adjusted_leave_upper_bound_from_trace(
+            target_positions,
+            target_moves,
+            movements,
+        )
+        upper_bound_makespan = upper_bound_summary["makespan"]
+        upper_bound_flowtime = upper_bound_summary["flowtime"]
+        upper_bound_movements = upper_bound_summary["movements"]
+        upper_bound_objective = upper_bound_summary["objective"]
+    return {
+        "makespan": makespan,
+        "flowtime": flowtime,
+        "movements": movements,
+        "upper_bound_makespan": upper_bound_makespan,
+        "upper_bound_flowtime": upper_bound_flowtime,
+        "upper_bound_movements": upper_bound_movements,
+        "upper_bound_objective": upper_bound_objective,
+        "move_history": move_history,
+        "escort_move_history": escort_moves,
+        "target_move_history": target_moves,
+    }
+
+
+def planning_horizon_from_heuristic_makespan(makespan):
+    """Convert a heuristic makespan into a safe static MILP horizon.
+
+    In leave mode the reported heuristic makespan is an arrival-time upper
+    bound, while the MILP horizon parameter T is the last indexed decision
+    period.
+    """
+    return max(0, makespan - 1) if args.retrieval_mode == "leave" else makespan
+
+
+def reported_heuristic_upper_bound_makespan(makespan):
+    """Return the makespan upper bound to report in CSV output."""
+    return makespan
 
 try:
     for escort_num in escorts_range:
@@ -610,22 +680,33 @@ try:
                     build_warmstart=args.warmstart,
                     export_moves=bool(args.greedy and file_export != ""),
                 )
-                greedy_ub_makespan, greedy_ub_flowtime, greedy_ub_movements, greedy_move_history, warmstart = greedy_solution
-                greedy_upper_bound = beta * greedy_ub_flowtime + gamma * greedy_ub_movements
+                greedy_ub_makespan = greedy_solution["upper_bound_makespan"]
+                greedy_ub_movements = greedy_solution["upper_bound_movements"]
+                greedy_upper_bound = greedy_solution["upper_bound_objective"]
 
             if dp_file:
                 moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, k_prime, False)
-                T = len(moves)
-                heuristic_ub_makespan = len(moves)
+                heuristic_makespan = len(moves)
+                T = planning_horizon_from_heuristic_makespan(heuristic_makespan)
+                heuristic_ub_makespan = reported_heuristic_upper_bound_makespan(heuristic_makespan)
                 heuristic_ub_movements = sum(len(step) for step in moves)
             elif args.gurobi and args.retrieval_mode in ["continue", "leave"]:
                 moves = []
-                heuristic_ub_makespan = greedy_ub_makespan
+                heuristic_ub_makespan = reported_heuristic_upper_bound_makespan(greedy_ub_makespan)
                 heuristic_ub_movements = greedy_ub_movements
-                T = heuristic_ub_makespan
+                T = planning_horizon_from_heuristic_makespan(heuristic_ub_makespan)
             else:  # just guess T
                 moves = []  # so it prints 0
                 T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
+
+            if args.warmstart and args.gurobi and greedy_solution is not None:
+                warmstart = gurobi_solver.build_warmstart_from_trace(
+                    R,
+                    E,
+                    T,
+                    greedy_solution["target_move_history"],
+                    greedy_solution["escort_move_history"],
+                )
 
             model_name = model_name_for_instance(T)
             max_user_cut_per_node = max_user_cut_per_node_for_instance(T)
@@ -665,7 +746,7 @@ try:
             )
 
             if args.greedy:
-                _, _, _, greedy_moves, _ = greedy_solution
+                greedy_moves = greedy_solution["move_history"]
 
                 if file_export != "":
                     pickle.dump((Lx, Ly, O, E, R, greedy_moves),

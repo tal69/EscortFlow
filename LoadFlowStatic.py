@@ -201,7 +201,17 @@ def greedy_upper_bound(target_positions, escort_positions):
         max_steps=max_steps,
         retrieval_mode=args.retrieval_mode,
     )
-    return makespan
+    return planning_horizon_from_heuristic_makespan(makespan)
+
+
+def planning_horizon_from_heuristic_makespan(makespan):
+    """Convert a heuristic makespan into a safe static MILP horizon.
+
+    In leave mode the greedy heuristic stops once the last target reaches an
+    output cell, while the static MILP needs one additional period to represent
+    the output leave event.
+    """
+    return makespan + 1 if args.retrieval_mode == "leave" else makespan
 
 f = open(result_csv_file, 'a')
 f.write(
@@ -251,7 +261,7 @@ try:
                     moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, args.k_prime, False)
                 else:
                     moves = PBS_DPHeuristic_lm.DOHueristicLM(S, R[0], E, Lx, Ly, O, args.k_prime, False)
-                T = len(moves)
+                T = planning_horizon_from_heuristic_makespan(len(moves))
             elif is_bm and args.retrieval_mode in ["continue", "leave"]:
                 moves = []
                 T = greedy_upper_bound(R, E)

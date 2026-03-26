@@ -431,6 +431,25 @@ class StaticEscortFlowGurobiSolver:
 
         return dense_warmstart
 
+    def summarize_warmstart(self, warmstart):
+        arrival_times = [
+            t + 1
+            for (move, t), value in warmstart["x_a"].items()
+            if value > 0.5 and move in self.network["arrival_moves"]
+        ]
+        flowtime = sum(warmstart["q"].values())
+        movements = sum(
+            self.network["move_cost_e"][move] * value
+            for (move, _), value in warmstart["x_e"].items()
+            if value > 0.5
+        )
+        return {
+            "makespan": max(arrival_times, default=0),
+            "flowtime": flowtime,
+            "movements": movements,
+            "objective": self.config.beta * flowtime + self.config.gamma * movements,
+        }
+
     @staticmethod
     def _apply_warmstart(x_a, x_e, q, warmstart):
         for key, var in x_a.items():
@@ -604,18 +623,8 @@ class StaticEscortFlowGurobiSolver:
 
         model.update()
         if warmstart is not None and not self.config.lp:
-            # First let Gurobi search without bias. If it fails to find any incumbent,
-            # restart once and use the greedy solution as a fallback start.
-            model.optimize()
-            status_name = self._status_name(model.Status)
-            if model.SolCount == 0 and status_name not in {"INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED", "INTERRUPTED"}:
-                model.reset()
-                model.Params.SolutionLimit = 1
-                model.Params.StartNodeLimit = -2
-                self._apply_warmstart(x_a, x_e, q, warmstart)
-                model.optimize()
-        else:
-            model.optimize()
+            self._apply_warmstart(x_a, x_e, q, warmstart)
+        model.optimize()
         cpu_time = time.perf_counter() - solve_start
 
         status_name = self._status_name(model.Status)
