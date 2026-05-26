@@ -1,11 +1,14 @@
 # Escort Flow Optimization and Simulation
 
-The repository accompany the working paper by Tal Raviv and Yossi bukchin "Escort-Flow Approach for the Multi-Load Retrieval in Puzzle-Based Storage: Static and Dynamic Approach."  
+This repository accompanies two working papers by Tal Raviv and Yossi Bukchin:
 
-This repository contains simulation and optimization code for retrieval control in a puzzle-based storage (PBS) system with escorts in static and dynamic environment. The main workflow is:
+- "Escort-Flow Formulation for Simultaneous Multi-Load Retrieval in Puzzle-Based Storage"
+- a companion paper on rolling-horizon control for dynamic PBS retrieval
 
-1. run a dynamic simulation with `EscortFlowSim_v8.py` and collect steady-state statistics directly into a CSV row
-2. or run a static optimization instance with `EscortFlowStatic.py` or `LoadFlowStatic.py` to solve a fixed retrieval problem
+This repository contains optimization and simulation code for retrieval control in a puzzle-based storage (PBS) system with escorts. The main workflow is:
+
+1. run a formulation-paper benchmark instance with `EscortFlowStatic.py` or `LoadFlowStatic.py`
+2. run a dynamic rolling-horizon simulation with `EscortFlowSim_v8.py` and collect steady-state statistics directly into a CSV row
 3. optionally save a raw simulation trace with `-a/--save_raw` and inspect it with `CI_Calculation.py` or `PBSAnimation.py`
 
 The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic simulator, with Gurobi accessed through the Python API.
@@ -14,7 +17,7 @@ The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic 
 
 - `EscortFlowSim_v8.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
 - `EscortFlowStatic.py`: static escort-flow experiment runner for single-load and multi-load instances, defaulting to the Gurobi Python backend and also supporting greedy-only and naive-lower-bound modes
-- `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and `--gurobi` uses the Gurobi Python API
+- `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and the Gurobi Python API is the default backend
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
 - `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v8.py`
 - `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
@@ -38,33 +41,106 @@ python3 -m pip install -r requirements.txt
 
 Optimization:
 
-- Gurobi with the Python API installed for `EscortFlowSim_v8.py`
-- IBM ILOG OPL / CPLEX with `oplrun` available on `PATH`
+- Gurobi with the Python API installed for all paper replication commands below
+- IBM ILOG OPL / CPLEX with `oplrun` available on `PATH` only if you want to use the legacy `--opl` path
 
-The simulator expects the OPL model files in this repository, especially:
+The legacy OPL paths expect the OPL model files in this repository, especially:
 
 - `escort_flow_bm_rh_v3.mod`
 - `escort_flow_bm_rh_static_v3.mod`
 
 The static experiment scripts additionally depend on:
 
-- `pbs_escorts_bm_v3.mod` and related escort-flow OPL files used by `EscortFlowStatic.py`
-- `pbs_load_flow_multi.mod` and `pbs_load_flow_multi_lp.mod` used by `LoadFlowStatic.py`
+- `escort_flow_static_gurobi.py`, `escort_flow_static_lazy.py`, and `escort_flow_static_bnc.py` for the escort-flow Gurobi backends
+- `load_flow_static_gurobi.py` for the load-flow Gurobi backend
+- `pbs_escorts_bm_v3.mod` and related escort-flow OPL files only when the legacy `--opl` path is used
+- `pbs_load_flow_multi.mod` and `pbs_load_flow_multi_lp.mod` only when the legacy `--opl` path is used
 - `PBSCom.py` for common instance-generation and formatting helpers
 - `PBS_DPHeuristic_bm.py` and `PBS_DPHeuristic_lm.py` when a DP-based upper bound is requested
 
-For the single-load static experiments, large DP table files are also required:
+For the DP-assisted single-load examples, large DP table files are also required:
 
 - `BM_set10x10_k3_corner.p`
 - `BM_set16x10_k3_2centers.p`
 
-Those tables are used to derive an upper bound on the number of time steps for the single-load case.
+Those tables are used to derive an upper bound on the number of time steps for the single-load case. They are optional for the paper replication block below because the current formulation-paper commands use the greedy upper bound instead.
 
 Download source for the large DP files:
 
 - Dropbox archive: <https://www.dropbox.com/scl/fi/ug5eenojzkh4riv8ja1rc/ESCORTS.zip?rlkey=2r01my7aeetl5q0zzn6evzvtt&st=25y3rg7d&dl=0>
 
-Place the extracted `.p` files in the project directory when using the single-load static commands shown below.
+Place the extracted `.p` files in the project directory when using the DP-assisted single-load examples later in this README.
+
+## Paper replication guide
+
+Run all commands from the `Code/` directory:
+
+```bash
+cd /Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Code
+python3 -m pip install -r requirements.txt
+```
+
+The scripts append to CSV files. For a fresh replication, remove or rename existing CSV outputs before running the commands.
+
+The paper experiments were developed with Python 3.11, Gurobi 13.0, and NumPy. Static benchmark runs in the formulation paper used a 300-second solver limit per instance. Dynamic runs use the request counts and seeds hard-coded in the shell scripts listed below.
+
+### Formulation paper: retrieval benchmark tables
+
+The raw CSV inputs for Table 1(a) and Table 1(b) in "Escort-Flow Formulation for Simultaneous Multi-Load Retrieval in Puzzle-Based Storage" are generated by `SingleLoadStatic.sh` and `FourLoadsStatic.sh`. These two scripts run both formulations and both ILP/LP-relaxation variants, so no separate LP-relaxation scripts are needed. The current table scope is:
+
+- Table 1(a): one target load, five layouts, 3--8 escorts, 100 random instances per row.
+- Table 1(b): four target loads, five layouts, 8, 12, and 16 escorts, 100 random instances per row.
+
+Use this block for a clean formulation-paper replication:
+
+```bash
+cd /Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Code
+rm -f table1a_*.csv table1b_*.csv
+
+bash SingleLoadStatic.sh
+bash FourLoadsStatic.sh
+```
+
+Reference outputs from previous runs are stored under:
+
+- `/Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Experiment_Static_May2026/`
+- `/Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Experiment_Mar2026_take2/`
+
+Separate LP-relaxation helper scripts are no longer needed because their commands are now part of `SingleLoadStatic.sh` and `FourLoadsStatic.sh`.
+
+### Dynamic rolling-horizon paper: simulation experiments
+
+These commands reproduce the raw CSV files used for the dynamic rolling-horizon paper. The shell scripts contain the exact command lines for each experiment family.
+
+```bash
+cd /Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Code
+DYNAMIC_DIR=../replication/dynamic_paper
+mkdir -p "$DYNAMIC_DIR"
+rm -f FullFactorial9x5-o0.2.csv FullFactorial13x7.csv \
+  Modular_vs_integrated.csv AttentionTest.csv HybridRatioTest.csv
+
+bash FullFactor9x5.sh
+bash FullFactor13x7.sh
+bash TestIntegrated.sh
+bash TestAtten.sh
+bash TestHybridRatio.sh
+
+mv FullFactorial9x5-o0.2.csv "$DYNAMIC_DIR/"
+mv FullFactorial13x7.csv "$DYNAMIC_DIR/"
+mv Modular_vs_integrated.csv "$DYNAMIC_DIR/"
+mv AttentionTest.csv "$DYNAMIC_DIR/"
+mv HybridRatioTest.csv "$DYNAMIC_DIR/"
+```
+
+The generated CSV files correspond to the paper experiments as follows:
+
+- `FullFactorial9x5-o0.2.csv`: full-factorial RTRH evaluation on the `9 x 5` grid with escorts `4` and `6`, arrival rates `0.2` and `0.4`, and the full/surrogate/hybrid/PLPR/attention factors.
+- `FullFactorial13x7.csv`: full-factorial RTRH evaluation on the `13 x 7` grid with escorts `8` and `12`, arrival rates `0.2` and `0.4`, and the same algorithmic factors.
+- `Modular_vs_integrated.csv`: modular-versus-integrated layout comparison.
+- `AttentionTest.csv`: sensitivity to the attention limit.
+- `HybridRatioTest.csv`: sensitivity to the hybrid fallback ratio.
+
+`TestWarmStart.sh` is a separate warm-start sandbox and is not part of the main dynamic-paper replication set unless the warm-start appendix or supplementary analysis is being regenerated.
 
 ## Static optimization scripts
 
@@ -89,8 +165,8 @@ Key dependencies:
 - `PBSCom.py`
 - `PBS_DPHeuristic_lm.py`
 - `PBS_DPHeuristic_bm.py`
-- escort-flow OPL model files in this repository
-- `oplrun`
+- `escort_flow_static_gurobi.py`, `escort_flow_static_lazy.py`, and `escort_flow_static_bnc.py`
+- escort-flow OPL model files and `oplrun` only for the legacy `--opl` path
 
 Common arguments:
 
@@ -122,8 +198,8 @@ Common arguments:
 
 Range syntax:
 
-- ranges use the format `min-max-step`
-- example: `-e 8-20-4` means `8, 12, 16, 20`
+- ranges accept `n`, `n1,n2,...`, `start-end`, `start:end`, `start-end-step`, and `start:step:end`
+- example: `-e 8-16-4` means `8, 12, 16`
 
 Notes:
 
@@ -167,7 +243,7 @@ python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -k 
 Multi-load example:
 
 ```bash
-python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8:4:20 -l 4
+python3 EscortFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8-16-4 -l 4
 ```
 
 For multi-load experiments, drop `-k` and `--dp_file`. The horizon upper bound is then taken from the greedy heuristic.
@@ -202,7 +278,7 @@ Purpose:
 - supports the same benchmark family as `EscortFlowStatic.py`
 - can solve the ILP or LP relaxation
 - defaults to BM and switches to LM only with `--lm` or `--LM`
-- can use the Gurobi Python API with `--gurobi`
+- uses the Gurobi Python API by default; `--opl` switches to the legacy `oplrun` / CPLEX path
 - can also export animation traces
 
 Key dependencies:
@@ -210,9 +286,8 @@ Key dependencies:
 - `PBSCom.py`
 - `PBS_DPHeuristic_lm.py`
 - `PBS_DPHeuristic_bm.py`
-- `pbs_load_flow_multi.mod`
-- `pbs_load_flow_multi_lp.mod`
-- `oplrun`
+- `load_flow_static_gurobi.py`
+- `pbs_load_flow_multi.mod`, `pbs_load_flow_multi_lp.mod`, and `oplrun` only for the legacy `--opl` path
 
 Common arguments:
 
@@ -234,12 +309,12 @@ Common arguments:
 - `--dp_file`: DP table file for single-load upper bounds, default empty
 - `-k`: `k'` parameter for the DP heuristic, default `0`
 - `--lp`: solve the LP relaxation instead of the ILP, default off
-- `--gurobi`: solve with the Gurobi Python API instead of `oplrun`, default off
+- `--gurobi`: explicitly select the Gurobi Python backend; accepted for clarity but now redundant because Gurobi is the default
 - `-a`: export animation trace, default off
 
 Notes:
 
-- if `--gurobi` is omitted, the default solver path is CPLEX through `oplrun`
+- the default solver path is the Gurobi Python backend; `--opl` switches to the legacy `oplrun` / CPLEX path
 - the script header says only `leave` is supported at present; that is the safe mode to use
 - as in `EscortFlowStatic.py`, the DP table route is for the single-load case
 - without `--dp_file`, BM runs in `leave` and `continue` mode use `OneStepHeuristic_v2` to get an upper bound on `T`
@@ -259,7 +334,7 @@ python3 LoadFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 3-8 -k 3 
 Multi-load example:
 
 ```bash
-python3 LoadFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8-20-4 -l 4
+python3 LoadFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8-16-4 -l 4
 ```
 
 To solve the LP relaxation for either static model, add `--lp`. Using a larger horizon can make the LP lower bound slightly weaker.
