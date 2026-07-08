@@ -578,6 +578,17 @@ The public API of `OneStep`/`SolveGreedy` is unchanged; `EscortFlowSim_v8.py` an
 
 Verification (`test_onestep_heuristic.py`): on 100 random instances in each of the two priority modes, the fixed heuristic solves every instance, satisfies the theoretical makespan bound `4*n*d_max` in acyclic mode, and produces legal, conflict-free moves in every time step. Mean flow time, makespan, and movement counts all improved slightly (acyclic mode: mean flow time 32.41 -> 31.50, mean moves 77.25 -> 74.89 on the test battery); about half of the instances follow different trajectories than before, confirming that extensions now activate.
 
+#### Rerunning the experiments affected by this fix
+
+The fix changes (slightly improves) the greedy moves, so any simulation in which greedy decisions were executed should be regenerated before quoting its numbers. Because all dynamic runs use the optimality-gap fallback (`-o 0.2`), greedy moves occur in essentially every dynamic experiment. Seeds are hard-coded in the scripts, so before/after differences are attributable to this fix. The CSV outputs append; rename or remove previous outputs first (see the replication guide above). In decreasing order of expected sensitivity:
+
+1. `TestHybridRatio.sh` and `TestAtten.sh` - the hybrid rule applies the greedy heuristic directly, so these meta-parameter studies are the most affected.
+2. `FullFactor9x5.sh` and `FullFactor13x7.sh` - the hybrid-factor rows use greedy directly; all other rows use it through the fallback.
+3. `TestIntegrated.sh` - real-time modular-vs-integrated comparison; greedy enters through the fallback.
+4. The greedy-vs-optimum gap quoted in the papers (mean flow times 30-70% above the optimum in static benchmarks) should be re-estimated with `EscortFlowStatic.py --greedy`.
+
+The static formulation tables (`SingleLoadStatic.sh`, `FourLoadsStatic.sh`) do not require rerunning: the greedy solution there only determines the planning-horizon upper bound `T`, so optimal objective values are unchanged (solution times may shift marginally).
+
 ## Known limitations
 
 - `requirements.txt` is intentionally minimal and only covers Python packages imported by the checked scripts.
