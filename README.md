@@ -580,6 +580,8 @@ Verification (`test_onestep_heuristic.py`): on 100 random instances in each of t
 
 #### Rerunning the experiments affected by this fix
 
+`RunAllDynamic.sh` runs the full battery below in one go (preflight checks, per-family logs, and CSV collection under a timestamped `results_*/` directory); start it inside `tmux` or with `nohup`, as it takes many hours.
+
 The fix changes (slightly improves) the greedy moves, so any simulation in which greedy decisions were executed should be regenerated before quoting its numbers. Because all dynamic runs use the optimality-gap fallback (`-o 0.2`), greedy moves occur in essentially every dynamic experiment. Seeds are hard-coded in the scripts, so before/after differences are attributable to this fix. The CSV outputs append; rename or remove previous outputs first (see the replication guide above). In decreasing order of expected sensitivity:
 
 1. `TestHybridRatio.sh` and `TestAtten.sh` - the hybrid rule applies the greedy heuristic directly, so these meta-parameter studies are the most affected.
