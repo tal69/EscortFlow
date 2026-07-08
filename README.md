@@ -564,9 +564,23 @@ The previous `load_flow_multi.py` script has been moved to `Junk/` for local leg
 - Python dependencies are listed in `requirements.txt`, but Gurobi and the large DP pickle files must still be installed or downloaded separately.
 - `requirements.txt` pins NumPy to `1.24.4`, which is one of the versions known to have been used successfully for these experiments.
 
+## Changelog
+
+### 2026-07-08 - `OneStepHeuristic_v2.py`: move-extension fixes (termination-proof conformance)
+
+Three related corrections to the "extend a move to promote lower-priority targets" refinement, aligning the implementation with the greedy-heuristic termination analysis in the appendix of the dynamic paper (and the supplement of the static paper):
+
+1. **Direction sign.** An escort move shifts the loads on its path one cell *against* the escort's travel direction `dir`. The extension condition in `extend_move_for_lower_priority_targets` compared a load's preferred direction with `dir` instead of `-dir`, so extensions almost never fired, and when they did, they extended toward loads that the move would push *away* from their outputs (such moves were then typically rejected by the lower-priority-harm guard). The condition now uses `-dir`.
+2. **Destination-zone guard.** In the zone-descent operations (B->A, C->B, D->C), an extension could carry the escort's final cell beyond the intended destination zone, which would invalidate the zone-descent step of the progress lemma. Extensions of descent moves are now applied only if the escort's final cell remains in the destination zone (`extension_endpoint_ok` predicate returned by `find_zone_escorts`). Extensions of the promotion move (operation 1, Zone A) remain unrestricted, matching the papers.
+3. **Guard fallback.** If an extended move would hurt lower-priority targets, the unextended base move is now tried before the candidate is discarded (previously the entire candidate was skipped, and for the highest-priority load the *extended* harmful move was stored as the forced-progress fallback; the fallback is now the base move).
+
+The public API of `OneStep`/`SolveGreedy` is unchanged; `EscortFlowSim_v8.py` and the static runners need no modification.
+
+Verification (`test_onestep_heuristic.py`): on 100 random instances in each of the two priority modes, the fixed heuristic solves every instance, satisfies the theoretical makespan bound `4*n*d_max` in acyclic mode, and produces legal, conflict-free moves in every time step. Mean flow time, makespan, and movement counts all improved slightly (acyclic mode: mean flow time 32.41 -> 31.50, mean moves 77.25 -> 74.89 on the test battery); about half of the instances follow different trajectories than before, confirming that extensions now activate.
+
 ## Known limitations
 
 - `requirements.txt` is intentionally minimal and only covers Python packages imported by the checked scripts.
 - The Python dependency list is pinned only for NumPy; solver and other system-level dependencies are still not captured by a full environment definition.
-- There is no automated test suite in the repository.
+- Automated tests currently cover only the greedy one-step heuristic (`test_onestep_heuristic.py`, see Changelog); the optimization and simulation pipelines have no automated tests.
 - Gurobi/model failures currently stop the simulation rather than degrading gracefully.

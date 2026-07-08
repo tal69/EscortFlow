@@ -119,19 +119,28 @@ def OneStep(
 
         return False
 
-    def choose_guarded_move(candidates, current_priority_rank):
+    def choose_guarded_move(candidates, current_priority_rank, extension_endpoint_ok=None):
         fallback_move = None
 
         for x0, y0, x1, y1 in candidates:
             if not check_move(x0, y0, x1, y1):
                 continue
 
-            x1_ext, y1_ext = extend_move_for_lower_priority_targets(x0, y0, x1, y1)
-            if not move_hurts_lower_priority_targets(x0, y0, x1_ext, y1_ext, current_priority_rank):
+            x1_ext, y1_ext = extend_move_for_lower_priority_targets(
+                x0, y0, x1, y1, extension_endpoint_ok
+            )
+            if (x1_ext, y1_ext) != (x1, y1) and not move_hurts_lower_priority_targets(
+                x0, y0, x1_ext, y1_ext, current_priority_rank
+            ):
                 return x0, y0, x1_ext, y1_ext
 
+            # If the extension would hurt lower-priority targets, fall back to the
+            # base (unextended) move rather than discarding the candidate.
+            if not move_hurts_lower_priority_targets(x0, y0, x1, y1, current_priority_rank):
+                return x0, y0, x1, y1
+
             if current_priority_rank == 0 and fallback_move is None:
-                fallback_move = (x0, y0, x1_ext, y1_ext)
+                fallback_move = (x0, y0, x1, y1)
 
         return fallback_move
 
@@ -266,14 +275,26 @@ def OneStep(
             elif is_zone_d(x_escort, y_escort):
                 zone_d_escorts.add(escort)
 
-        return zone_a_escorts, zone_b_escorts, zone_c_escorts, zone_d_escorts
+        return (
+            zone_a_escorts, zone_b_escorts, zone_c_escorts, zone_d_escorts,
+            (is_zone_a, is_zone_b, is_zone_c),
+        )
 
     def sort_escorts_by_distance(x, y, EE):
         """Return escorts in ``EE`` sorted by distance to ``(x, y)`` and then lexicographically."""
         return sorted(EE, key=lambda escort: (abs(escort[0] - x) + abs(escort[1] - y), escort[0], escort[1]))
 
-    def extend_move_for_lower_priority_targets(x0, y0, x1, y1):
-        """Extend a zone-to-zone escort move if it can also promote lower-priority targets."""
+    def extend_move_for_lower_priority_targets(x0, y0, x1, y1, endpoint_ok=None):
+        """Extend a zone-to-zone escort move if it can also promote lower-priority targets.
+
+        An escort move from ``(x0, y0)`` to ``(x1, y1)`` shifts every load on its
+        path one cell *against* the escort's travel direction. The move is
+        extended up to the farthest load that is thereby promoted toward its
+        designated output. When ``endpoint_ok`` is given, an extension is applied
+        only if the escort's extended final cell satisfies it; this keeps
+        zone-to-zone moves inside their destination zone, as required by the
+        termination analysis in the paper.
+        """
         dir_x, dir_y = int(np.sign(x1 - x0)), int(np.sign(y1 - y0))
         if dir_x == 0 and dir_y == 0:
             return x1, y1
@@ -286,8 +307,11 @@ def OneStep(
             yy += dir_y
             if (xx, yy) in A:
                 target_dir = dist_map[(xx, yy)]
-                if (dir_x != 0 and target_dir[0] == dir_x) or (dir_y != 0 and target_dir[1] == dir_y):
-                    best_x, best_y = xx, yy
+                # Loads shift against the escort's travel direction (dir), so a
+                # load is promoted only if its preferred direction equals -dir.
+                if (dir_x != 0 and target_dir[0] == -dir_x) or (dir_y != 0 and target_dir[1] == -dir_y):
+                    if endpoint_ok is None or endpoint_ok(xx, yy):
+                        best_x, best_y = xx, yy
 
         return best_x, best_y
 
@@ -340,7 +364,7 @@ def OneStep(
         if target_id not in moved_target_ids:
             # Try to move the item immediately in the right direction. An escort moves from Zone A->C/D
             #A_dir = A_sorted[i][2]  # we can also take it from dist_map
-            zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts = find_zone_escorts(x0, y0)
+            zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts, zone_tests = find_zone_escorts(x0, y0)
             lst = sort_escorts_by_distance(x0, y0, zone_A_escorts)
             candidates = [(x_escort, y_escort, x0, y0) for (x_escort, y_escort) in lst]
 
@@ -350,7 +374,7 @@ def OneStep(
                 dx, dy = np.sign(x0 - x_escort), np.sign(y0 - y_escort)  # only one of them is non zero
                 move_escort(x_escort, y_escort, x1, y1)
                 x0, y0 = x0 - dx, y0 - dy  # update the location of the current target load
-                zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts = find_zone_escorts(x0, y0)
+                zone_A_escorts, zone_B_escorts, zone_C_escorts, zone_D_escorts, zone_tests = find_zone_escorts(x0, y0)
 
             # make sure that no further escort movement in the current step moves high priority loads in the wrong direction
             cell_used.add((x0, y0))
@@ -369,7 +393,7 @@ def OneStep(
             else:  # escort is "above" the load
                 candidates.append((x_escort, y_escort, x_escort, y0))
 
-        chosen_move = choose_guarded_move(candidates, i)
+        chosen_move = choose_guarded_move(candidates, i, extension_endpoint_ok=zone_tests[0])
         if chosen_move is not None:
             x_escort, y_escort, x1, y1 = chosen_move
             move_escort(x_escort, y_escort, x1, y1)
@@ -388,7 +412,7 @@ def OneStep(
             else:  # escort is "below" the load
                 candidates.append((x_escort, y_escort, x_escort, y0 + dir_y))
 
-        chosen_move = choose_guarded_move(candidates, i)
+        chosen_move = choose_guarded_move(candidates, i, extension_endpoint_ok=zone_tests[1])
         if chosen_move is not None:
             x_escort, y_escort, x1, y1 = chosen_move
             move_escort(x_escort, y_escort, x1, y1)
@@ -411,7 +435,7 @@ def OneStep(
                 candidates.append((x_escort, y_escort, x_escort, y_escort + 1))
                 candidates.append((x_escort, y_escort, x_escort, y_escort - 1))
 
-        chosen_move = choose_guarded_move(candidates, i)
+        chosen_move = choose_guarded_move(candidates, i, extension_endpoint_ok=zone_tests[2])
         if chosen_move is not None:
             x_escort, y_escort, x1, y1 = chosen_move
             move_escort(x_escort, y_escort, x1, y1)
