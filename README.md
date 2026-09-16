@@ -20,7 +20,7 @@ The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic 
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and the Gurobi Python API is the default backend
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
 - `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v8.py`
-- `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used in greedy mode and as fallback when MILP results are rejected
+- `OneStepHeuristic_v2.py`: greedy one-step escort heuristic used for static feasible solutions and horizon estimates, dynamic greedy control, and fallback when dynamic MILP results are rejected; see [One-step heuristic for static retrieval](#one-step-heuristic-for-static-retrieval)
 
 `EscortFlowSim_v5.py` is retired, and the old `v5` file has been moved out of the repository into `Junk/` for local reference only.
 
@@ -142,6 +142,83 @@ The generated CSV files correspond to the paper experiments as follows:
 
 `TestWarmStart.sh` is a separate warm-start sandbox and is not part of the main dynamic-paper replication set unless the warm-start appendix or supplementary analysis is being regenerated.
 
+## One-step heuristic for static retrieval
+
+The static paper describes this method in the online supplement, Section "Greedy heuristic", Algorithm `OneStep` (source: `static_escort_flow_IISE_supplement.tex`). All retrieval requests are known initially. The heuristic constructs a feasible retrieval plan, supplies an objective upper bound and information for choosing the ILP horizon, and serves as a computational benchmark.
+
+`OneStep()` plans **one time step, or takt, of simultaneous block movements**. `SolveGreedy()` repeatedly calls it until all requested loads reach output cells. A single call can select several escort movements. An escort is an empty cell: moving it along a row or column shifts every load on that segment by one cell in the opposite direction. For example, moving an escort from `(1, 2)` to a target at `(3, 2)` shifts the intervening load to `(1, 2)` and the target to `(2, 2)`, all in one takt. The target advances one cell even though the escort travels two cells.
+
+### The rule described in the paper
+
+Give each target a unique, fixed priority ID and retain that ID when the target moves. The supplement reports assigning priorities by increasing **initial** Manhattan distance to the closest output. For each target's current position, select its closest output, breaking equal-distance ties lexicographically by output coordinates. Partition the other grid cells relative to that target and output:
+
+| Zone | Definition | Purpose of an escort there |
+| --- | --- | --- |
+| A | Same row or column as the target, in a direction toward its designated output. These are rays extending to the grid boundary. | Can advance the target directly if its path is available. |
+| B | Outside A, sharing a row or column with an A cell, without the target lying between them. | Can be repositioned into A. |
+| C | Outside A and B, sharing a row or column with a B cell. | Can be repositioned into B. |
+| D | All remaining cells; present only when target and output share a row or column. | Can be repositioned into C. |
+
+At the beginning of each takt, remove completed requests and clear the set of reserved cells. Scan the remaining targets in increasing ID order. Skip a target if an earlier block movement has already moved it in this takt. For each other target, attempt these four operations in order:
+
+1. **Advance the target.** Move an available Zone A escort to the target's cell. This shifts the target one cell toward its designated output. Where possible, extend that same escort movement beyond the target to advance additional lower-priority targets too. Recompute the zones around the target's new position if it moved.
+2. **Prepare Zone A.** Move at most one available escort from B to A.
+3. **Prepare Zone B.** Move at most one available escort from C to B.
+4. **Prepare Zone C.** Move at most one available escort from D to C.
+
+All four operations are attempted, including the preparation operations after a successful target advance. The paper calls for the shortest eligible escort movement at each operation. Preparation moves may also be extended to help lower-priority targets, while keeping the escort endpoint in the intended destination zone.
+
+Every selected escort path must be horizontal or vertical, contain no other escort, and share no cell, including endpoints, with a previously selected path. Reserve the current target's cell even if it did not move, so subsequent decisions cannot push it backward. Lower-priority targets may be shifted incidentally. An escort already assigned a movement is unavailable for the rest of this takt. Thus, the operations construct one simultaneous batch; they cannot move the same escort through D, C, B, and A within a single takt.
+
+With fixed priorities, the supplement proves that the highest-priority remaining target never moves farther from its output and advances at least once in every four takts. In the worst case an escort first progresses through `D -> C -> B -> A` over three takts, then advances the target in the fourth. Consequently, the paper's algorithm retrieves all targets within `4 * n * d_max` takts, where `n` is the initial number of targets and `d_max` is the largest distance from any grid cell to its closest output. The termination and acyclicity arguments rely on retaining the priority order across takts.
+
+### Current implementation and paper differences
+
+The implementation is in `OneStepHeuristic_v2.py`. Its public inputs are the grid dimensions, output locations, target locations, and escort locations. For `OneStep`, targets are a dictionary from locations to IDs; `SolveGreedy` accepts target locations and assigns the IDs itself.
+
+- **Priority:** `acyclic=True` scans targets by fixed ID. `SolveGreedy` assigns these IDs once by initial distance, with target-coordinate ties. The default, `acyclic=False`, reorders targets at every takt by their current distance to the closest output. Both static runners currently use this default and expose no `--acyclic` option. Their default runs therefore do not implement the paper's fixed-priority rule, and the paper's proof should not be attributed to that default.
+- **Candidate selection:** the code orders escorts by distance to the current target, with coordinate ties, for every operation. For the direct advance this is also the escort movement length; for preparation moves it need not select the shortest movement specified in the paper.
+- **Output ties:** `build_dist_map` retains the first equally near output encountered in its input iteration order. The static runners pass a set, so movement directions do not explicitly implement the paper's lexicographic output tie rule.
+- **Protection and extensions:** the code prefers moves that do not increase any lower-priority target's distance to its closest output. Only the highest-priority target may fall back to a harmful base move to ensure progress. If an extension fails this guard, the unextended move is tried. Extensions of preparation moves must end in the intended destination zone.
+
+These distinctions matter for reproducing exact trajectories. Selecting `acyclic=True` enables the fixed-priority variant but does not change the other implementation details above.
+
+### Running and interpreting the heuristic
+
+Run the current static greedy benchmark from `Code/`:
+
+```bash
+python3 EscortFlowStatic.py -x 10 -y 10 -O 0 0 -e 12 -l 4 -m leave -r 11 \
+  --greedy -f greedy_static.csv
+```
+
+This generates one instance with seed `11`, runs the heuristic, and appends its results to `greedy_static.csv`. It requires NumPy but does not invoke Gurobi or CPLEX. Use `-r 1-100` for 100 instances and add `-a` to export animation traces. `--greedy` supports `leave` and `continue`, not `stay`.
+
+To select fixed priorities directly through the Python API:
+
+```python
+from OneStepHeuristic_v2 import SolveGreedy
+
+makespan, total_flowtime, movements = SolveGreedy(
+    5, 5,
+    {(0, 0)},                 # output cells
+    {(2, 2), (4, 4)},         # target-load cells
+    {(0, 1), (3, 1)},         # escort cells
+    acyclic=True,
+    retrieval_mode="leave",
+    max_steps=1000,
+)
+print(makespan, total_flowtime, movements)
+```
+
+In static `leave` mode, `SolveGreedy` removes a request on arrival, blocks that output cell for the following full takt, and then makes it available as an escort. Arrival at the end of takt `t` therefore allows that escort to move from takt `t + 2`. In `continue` mode, an arrived load stops being a target and remains a blocking load; no new escort is created. The `leave` timing is enforced by the `SolveGreedy` wrapper; calling `OneStep(..., retrieval_mode="leave")` directly instead converts a target already at an output into an escort at the start of that call.
+
+In the static `leave` results, flow time is the sum of target arrival times, makespan is the last arrival time, and movements count all individual one-cell load shifts, including blocking loads. The `Greedy UB` column in `EscortFlowStatic.py` is `beta * total_flowtime + gamma * movements`. It is an objective upper bound, not a mean flow time. The weights affect the reported objective, not the heuristic's move choices. `OneStep`'s returned `moves` list also includes blocking-load shifts; use `return_escort_moves=True` for escort paths or `return_target_moves=True` for the target-ID movement map.
+
+Without `--greedy`, the normal static BM workflow still runs this heuristic in `leave` and `continue` modes. Unless a DP horizon is supplied, the runners choose their horizon from its makespan, with backend-specific time indexing. In `EscortFlowStatic.py`, `--warmstart` additionally makes its trace available as a fallback MIP start, and `--cutoff` enables its objective cutoff. The standalone greedy benchmark performs no MILP solve.
+
+The main paper's horizon theorem gives the sufficient horizon bound `sum(f_i) - sum(d_i) + max(d_i)`, where `f_i` are feasible arrival times and `d_i` are initial distances to the closest outputs, under lexicographic minimization of flow time and movements. The current runners use the greedy makespan instead of that expression. A feasible greedy makespan supplies a horizon containing a feasible plan; by itself it does not establish that the horizon contains an unrestricted flow-time optimum.
+
 ## Static optimization scripts
 
 The repository contains two static experiment runners:
@@ -187,7 +264,7 @@ Common arguments:
 - `--dp_file`: DP table file for the single-load case, default empty
 - `-k`: `k'` parameter used with the DP heuristic, default `0`
 - `--lp`: LP relaxation option, default off
-- `--greedy`: solve the static instance with the greedy heuristic instead of a MILP backend, default off; currently supported for `continue` and `leave` modes. In `leave` mode, a target load that reached an output cell becomes an escort at the beginning of the next step
+- `--greedy`: solve the static instance with the greedy heuristic instead of a MILP backend, default off; supported for `continue` and `leave` modes. In static `leave` mode, an arrived target occupies its output for one further takt before the cell becomes an available escort. See [One-step heuristic for static retrieval](#one-step-heuristic-for-static-retrieval) for the algorithm, priority settings, and examples
 - `--gurobi`: explicitly select the Gurobi Python backend; accepted for clarity but now redundant because Gurobi is the default
 - `--opl`: switch to the legacy `oplrun` / CPLEX path instead of the default Gurobi backend
 - `--warmstart`: enable heuristic MIP start with the static Gurobi backend, default off
@@ -589,7 +666,7 @@ The fix changes (slightly improves) the greedy moves, so any simulation in which
 3. `TestIntegrated.sh` - real-time modular-vs-integrated comparison; greedy enters through the fallback.
 4. The greedy-vs-optimum gap quoted in the papers (mean flow times 30-70% above the optimum in static benchmarks) should be re-estimated with `EscortFlowStatic.py --greedy`.
 
-The static formulation tables (`SingleLoadStatic.sh`, `FourLoadsStatic.sh`) do not require rerunning: the greedy solution there only determines the planning-horizon upper bound `T`, so optimal objective values are unchanged (solution times may shift marginally).
+The static formulation tables (`SingleLoadStatic.sh`, `FourLoadsStatic.sh`) can also be affected: the greedy solution determines the reported greedy bound and the selected planning horizon, and changing that horizon can change solver performance and potentially the best objective within it. Regenerate these results when exact replication with the corrected heuristic is required; see the horizon distinction in [One-step heuristic for static retrieval](#one-step-heuristic-for-static-retrieval).
 
 ## Known limitations
 
