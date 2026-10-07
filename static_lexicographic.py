@@ -11,6 +11,8 @@ from gurobipy import GRB
 
 
 ABSOLUTE_GAP_LIMIT = 1.0
+# A bound microscopically above an integer must not certify a one-unit gap.
+CERTIFICATE_GAP_MARGIN = 1e-6
 # Gurobi can return OPTIMAL at a raw floating-point gap just below one while
 # the integer incumbent and reported bound still differ by exactly one. Keep
 # a numerical margin in the solver setting; certification remains strictly < 1.
@@ -41,7 +43,7 @@ def _phase_result(model, status_name, time_limit):
         gap = abs(objective - bound)
     status = status_name(model.Status)
     proven = (
-        gap is not None and gap < ABSOLUTE_GAP_LIMIT
+        gap is not None and gap < ABSOLUTE_GAP_LIMIT - CERTIFICATE_GAP_MARGIN
         and status not in {"NUMERIC", "SUBOPTIMAL", "INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED"}
     )
     return {

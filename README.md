@@ -92,8 +92,9 @@ The legacy weighted benchmark campaign in "Escort-Flow Formulation for Simultane
 - Single target: five layouts, 3--8 escorts, 100 random instances per row.
 - Four targets: five layouts, 8, 12, and 16 escorts, 100 random instances per row.
 
-For the new lexicographic experiment matching the current Table 2(a,b), use
-`RunTable2Lex.sh`, described below.
+For the revised weighted experiment and separate flow-time check matching
+Table 2(a,b), use `RunTable2Weighted.sh`, described below. `RunTable2Lex.sh`
+retains the earlier two-phase lexicographic experiment.
 
 Use this block for a clean formulation-paper replication:
 
@@ -129,7 +130,9 @@ Both phases use `MIPGap=0` and `MIPGapAbs=0.999`. The small margin below one avo
 premature stopping at the numerical boundary: the original setting of exactly
 one produced some Gurobi `OPTIMAL` results whose integer incumbent and reported
 bound still differed by one. Certification separately requires the integer
-incumbent-to-bound gap to be strictly below one. No weighted objective cutoff is
+incumbent-to-bound gap to be below one with an additional `1e-6` numerical margin.
+This prevents a bound microscopically above an integer from falsely certifying a
+one-unit gap, including on time-limited solves. No weighted objective cutoff is
 carried into either phase. See the
 [Gurobi gap parameter definitions](https://docs.gurobi.com/projects/optimizer/en/current/reference/parameters.html#mipgapabs).
 
@@ -201,7 +204,60 @@ budget allocation, callbacks, and retained incumbents:
 python3 test_static_lexicographic.py
 ```
 
-### Linux batch run for Table 2(a) and (b)
+### Revised weighted Table 2 experiment
+
+`RunTable2Weighted.sh` runs both formulations on the current Table 2(a,b)
+instances with **300 seconds for the weighted solve** and an independent
+**300-second certification budget**. Both weighted formulations receive a complete
+greedy warm start; each certification solve starts from its weighted incumbent.
+The weighted objective is `100*F + M`, exactly equivalent to `F + 0.01*M`.
+Both objectives are integer, so the solver uses `MIPGap=0`, `MIPGapAbs=0.999`,
+followed by independent numerical certificate checks. Original weighted units
+are used in the reported weighted objective, bound, and absolute gap.
+
+From the repository directory on Linux:
+
+```bash
+bash RunTable2Weighted.sh --dry-run
+nohup bash RunTable2Weighted.sh --python python3 --threads 12 > table2_weighted.log 2>&1 &
+```
+
+The script retains the Table 2 layouts, escort counts, seeds, leave retrieval,
+BM movement, and sequential execution of `RunTable2Lex.sh`. It writes a new
+timestamped result directory with `parts/`, `logs/`, merged CSVs, environment
+metadata, and the executed commands. Each batch log reports per-instance
+progress. Existing output directories are rejected to prevent mixing runs.
+
+Certification runs for proven weighted optima, or for unproven weighted
+candidates whose **absolute gap is below 0.1 in `F + 0.01*M` units**. The gate is
+strict and configurable with `--certification-gap-threshold`. A larger gap or
+missing incumbent skips certification. The gate is not itself an optimality
+certificate. `--weighted-time-limit` and `--certification-time-limit` set the
+two independent budgets. The runtime columns measure Gurobi optimization;
+the corresponding elapsed-time columns also include model construction, which
+does not consume either Gurobi time limit.
+
+The check minimizes flow time in a separate model and stops when its lower bound
+proves the saved weighted candidate's flow time, or when it finds a better flow
+time. The weighted result is preserved in either case. Its full solution is saved
+before model disposal and transferred into the certification model, with explicit
+values for every variable. The check selects a sufficient horizon covering every potentially better-flow
+schedule, shortening or extending the weighted horizon as needed.
+The sufficient horizon is calculated from the weighted incumbent's flow time,
+not the heuristic's. The certificate uses this sufficient horizon directly. The start is truncated
+or padded with idle periods accordingly. Redundant post-retrieval movements
+removed from the start are counted in the CSV; all retrieval times remain unchanged.
+Weighted optimality remains scoped to its recorded horizon. A separate global
+lexicographic flag also requires that the weighted horizon cover all candidates
+with the saved flow time. See [the method notes](weighted_flow_certification_notes.md)
+for the small-weight proof, horizon argument, and numerical safeguards.
+
+`RunWeightedStatic.py --help` documents the standalone batch interface. Existing
+weighted and two-phase CLI behavior remains available. `LoadFlowStatic.py` also
+now accepts `--warmstart` for integer Gurobi BM leave runs; it uses the same
+physical greedy plan as escort-flow, including blocking-load movements.
+
+### Earlier lexicographic Linux batch run for Table 2(a) and (b)
 
 `RunTable2Lex.sh` runs both lexicographic formulations with a **270-second phase-one
 cap and a 300-second total solver limit per instance**. Phase 2 receives 300 seconds
@@ -364,7 +420,7 @@ In static `leave` mode, `SolveGreedy` removes a request on arrival, blocks that 
 
 In the static `leave` results, flow time is the sum of target arrival times, makespan is the last arrival time, and movements count all individual one-cell load shifts, including blocking loads. The `Greedy UB` column in `EscortFlowStatic.py` is `beta * total_flowtime + gamma * movements`. It is an objective upper bound, not a mean flow time. The weights affect the reported objective, not the heuristic's move choices. `OneStep`'s returned `moves` list also includes blocking-load shifts; use `return_escort_moves=True` for escort paths or `return_target_moves=True` for the target-ID movement map.
 
-Without `--greedy`, the normal static BM workflow still runs this heuristic in `leave` and `continue` modes. Unless a DP horizon is supplied, the runners choose their horizon from its makespan, with backend-specific time indexing. In `EscortFlowStatic.py`, `--warmstart` additionally makes its trace available as a fallback MIP start, and `--cutoff` enables its objective cutoff. The standalone greedy benchmark performs no MILP solve.
+Without `--greedy`, the normal static BM workflow still runs this heuristic in `leave` and `continue` modes. Unless a DP horizon is supplied, the runners choose their horizon from its makespan, with backend-specific time indexing. In the standard `EscortFlowStatic.py --gurobi` backend, `--warmstart` supplies its trace before optimization, and `--cutoff` enables its objective cutoff. `LoadFlowStatic.py --warmstart` now supplies the same physical plan for Gurobi integer BM leave runs. The standalone greedy benchmark performs no MILP solve.
 
 The main paper's horizon theorem gives the sufficient horizon bound `sum(f_i) - sum(d_i) + max(d_i)`, where `f_i` are feasible arrival times and `d_i` are initial distances to the closest outputs, under lexicographic minimization of flow time and movements. The current runners use the greedy makespan instead of that expression. A feasible greedy makespan supplies a horizon containing a feasible plan; by itself it does not establish that the horizon contains an unrestricted flow-time optimum.
 
@@ -434,7 +490,7 @@ Notes:
 - the DP-based upper bound currently applies only to the single-load case
 - without `--dp_file`, the static horizon upper bound is taken from the greedy heuristic
 - on the standard `--gurobi` path, the full static escort-flow model is built explicitly in the master problem
-- with any Gurobi backend, `--warmstart` is treated as a fallback: the solver first tries to find an incumbent on its own, and only if that fails does it restart once with the greedy start
+- with the standard Gurobi backend, `--warmstart` supplies a complete greedy start before optimization; legacy weighted lazy/BnC backends retain their fallback-restart behavior
 - `--lazy` selects a separate Gurobi backend that keeps the flow/supply structure in the master and enforces the target-movement coupling constraints lazily; if you pass `--lazy N`, the first `N` time steps of that coupling family stay in the master
 - `--bnc` selects a separate branch-and-cut backend; the cheap strong constraints and constraint family `(9)` stay in the master, and constraint family `(8)` also stays explicit for the first `T // 8` time steps, while the remaining later `(8)` constraints are separated by enumeration in callbacks
 - in the current BnC implementation, user cuts are generated at the root and at a small number of early branch-and-bound nodes near the root; the root node is uncapped, while later separated nodes use the configurable `--bnc N` cap, which defaults to `2*T` when omitted, and under that cap the strongest violations are added first; incumbent violations are still rejected with lazy constraints using a cap of `4*T`
@@ -525,6 +581,7 @@ Common arguments:
 - `-m`: retrieval mode, default `leave`
 - `-f`: CSV result file, default `res_load_flow.csv`
 - `--alpha`: makespan weight, default `0.0`
+- `--warmstart`: supply a complete greedy MIP start in Gurobi integer BM leave mode, default off; unsupported mode combinations are rejected
 - `--beta`: flowtime weight, default `1.0`
 - `--gamma`: movement weight, default `0.01`
 - `-T`: legacy horizon scaling factor, default `2.0`; retained in the CLI but retired from the documented BM workflow
@@ -821,5 +878,5 @@ The static formulation tables (`SingleLoadStatic.sh`, `FourLoadsStatic.sh`) can 
 
 - `requirements.txt` is intentionally minimal and only covers Python packages imported by the checked scripts.
 - The Python dependency list is pinned only for NumPy; solver and other system-level dependencies are still not captured by a full environment definition.
-- Automated tests currently cover only the greedy one-step heuristic (`test_onestep_heuristic.py`, see Changelog); the optimization and simulation pipelines have no automated tests.
+- Automated tests cover the greedy one-step heuristic and the static lexicographic, weighted certification, warm-start, and experiment-runner workflows. The dynamic simulation pipeline does not yet have comparable automated coverage.
 - Gurobi/model failures currently stop the simulation rather than degrading gracefully.

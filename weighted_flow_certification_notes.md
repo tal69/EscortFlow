@@ -1,0 +1,100 @@
+# Weighted retrieval and separate flow-time certification
+
+Method notes for the revision, October 8, 2026. These notes describe the mathematical claims and implemented experiment protocol. They do not assert that the new experiments have already established those claims.
+
+## Objective and claims
+
+Let `F` denote total integer flow time and `M` the integer number of individual one-cell load movements, including movements of blocking loads. A block movement contributes its length to `M`. The revised problem objective is
+
+```text
+minimize Z = F + alpha * M, with alpha = 0.01.
+```
+
+In the current command-line programs, the movement coefficient is named `gamma`; the paper's proposed `alpha` therefore corresponds to `--gamma 0.01`, with `--beta 1`. Load-flow's existing `--alpha` parameter is a makespan coefficient and must remain zero for this experiment.
+
+The formulation defines a weighted optimization problem. An empirical finding that its solutions also minimize flow time is a separate, instance-specific result. A weighted optimum with minimum flow time also minimizes movements among all minimum-flow solutions: a solution with the same flow time and fewer movements would have a smaller weighted objective. Consequently it is lexicographically optimal on that instance. A merely feasible or loosely terminated weighted solution requires an additional movement certificate before making the full lexicographic claim.
+
+## Why a sufficiently small weight exists
+
+Suppose the feasible set under consideration satisfies `0 <= M <= U`, where `U` is finite. For two feasible plans with `F_2 >= F_1 + 1`,
+
+```text
+(F_2 + alpha*M_2) - (F_1 + alpha*M_1) >= 1 - alpha*U.
+```
+
+Thus every `0 < alpha < 1/U` makes all strict flow-time improvements preferable, regardless of movements. Among equal-flow plans, any positive weight prefers fewer movements. For example, `alpha = 1/(U+1)` suffices. When `U = 0`, every positive weight suffices. More generally, a valid bound on the movement range, `M_max - M_min`, can replace `U`.
+
+For a rectangular PBS with `N = Lx*Ly` cells and `H` modeled movement periods, a safe bound for the present BM and LM formulations is
+
+```text
+U = N*H.
+```
+
+Each individual load moves at most one cell per period. In escort-flow, the nonoverlapping escort paths give the same bound because each selected path of length `d` occupies `d+1` cells and contributes `d` movements. The current implementations create movement variables for `t = 0,...,T`, so the conservative implementation-level bound is `U = N*(T+1)`. It is safe even if some final-period movement variables are redundant. No claim is made that this bound is tight or that `0.01` satisfies it for the tested instances.
+
+If the problem has no prescribed finite horizon, the argument needs a finite horizon shown to contain a lexicographic optimum, or a valid bound on the movements of at least one such optimum. A bound derived only from an arbitrary restricted model does not establish unrestricted equivalence.
+
+## Numerical implications
+
+With a fixed flow time, a one-movement improvement changes the original weighted objective by only `alpha`. A guaranteed movement-optimality certificate therefore needs an absolute objective gap strictly below `alpha`, subject to numerical safeguards. A relative MIP-gap setting alone may be too loose, depending on the objective magnitude.
+
+Very small weights can create a large objective coefficient range and make secondary improvements difficult to distinguish under finite precision and stopping tolerances. These are potential numerical and computational disadvantages, not a theorem that the particular models become unstable. Gurobi's [numerical guidance on hierarchical objectives](https://docs.gurobi.com/projects/optimizer/en/current/concepts/numericguide/tolerances_scaling.html#improving-ranges-for-variables-and-constraints) discusses the risks of aggregating objectives with widely separated weights.
+
+For the experimental choice `alpha = 0.01`, use the exactly equivalent objective
+
+```text
+minimize Q = 100*F + M.
+```
+
+`Q` is integer valued. This scaling preserves the weighted ordering exactly and permits integer absolute-gap stopping. It does not turn `alpha = 0.01` into a universally lexicographic weight. The coefficients 100 and 1 are moderate; this transformation avoids needing a `0.00999` stopping threshold in the original units. Scaling can still change the solver's numerical search path, so the revision should state the implementation used.
+
+Use `MIPGap = 0` and `MIPGapAbs = 0.999` for this integer objective. Independently reconstruct the incumbent as `Q_w = 100*F_w + M_w` from validated integer values and check that its gap to a valid global lower bound is less than `1 - epsilon`, using the project's conservative certificate margin. Do not derive a proof solely from Gurobi's `OPTIMAL` status or from rounding the bound upward. A bound materially above the reconstructed incumbent should trigger a consistency failure. Report both `Q` and the original `Z = F + 0.01*M`, including appropriately scaled bounds and gaps.
+
+If `alpha` were much smaller, multiplying by `1/alpha` could avoid a tiny absolute-gap number but would introduce a large flow-time coefficient. Scaling changes the numerical representation, not the underlying separation of priorities. The distinction between MIP gap and LP dual-feasibility tolerance should remain explicit; they are different parameters.
+
+## A certificate that the weighted candidate minimizes flow time
+
+Let `(F_w, M_w)` be the saved feasible weighted candidate, and let `L_F` be a valid global lower bound for a separate minimization of `F` over the relevant feasible set. Since `F` is integer,
+
+```text
+L_F > F_w - 1  implies  F_w is minimum.
+```
+
+The proposed guarded target, `L_F > F_w - 0.999`, is sufficient. It leaves 0.001 between the stopping target and the mathematically critical boundary. This is a bound certificate; finding a new flow-optimal incumbent is unnecessary because the weighted candidate already attains `F_w` and is feasible. The implementation uses a further `1e-6` comparison margin and a bound-stop target just above that threshold. Each weighted solve receives a complete greedy MIP start. The certification solve receives the saved weighted incumbent itself, including all variable values and explicit zeros, truncated or padded with idle periods to fit the certification horizon without changing retrieval times. The saved weighted candidate also supplies the external feasible flow-time upper bound.
+
+For a minimization model, Gurobi's [`BestBdStop`](https://docs.gurobi.com/projects/optimizer/en/current/reference/parameters.html#parameterBestBdStop) can terminate once the global bound reaches `F_w - 0.999`. [`BestObjStop`](https://docs.gurobi.com/projects/optimizer/en/current/reference/parameters.html#parameterBestObjStop) can alternatively stop upon finding a strictly better integer flow time, using a target near `F_w - 1` with an explicit numerical margin. Both may return `USER_OBJ_LIMIT`; the implementation must inspect the bound and incumbent to determine what was established. The final certificate must be recomputed from saved candidate values and the returned bound, independent of the termination status.
+
+A pure-flow LP relaxation or a valid analytical lower bound may certify some candidates without a MIP search. Bound-focused MIP settings can be evaluated, but faster verification is an empirical possibility, not a guarantee.
+
+### Preserve the right feasible set
+
+Do not fix `F` to `F_w` for the flow-time certification solve. Do not constrain movements to `M <= M_w`. Either restriction could hide a better-flow plan. Remove any explicit weighted-objective cutoff constraint and reset objective-specific solver parameters before changing the objective. A weighted sublevel restriction may exclude a lower-flow plan with many more movements.
+
+Certification on the same finite horizon would prove minimum flow time only within that horizon. The automatic greedy-makespan horizon supplies a feasible plan but, by itself, is not a proof that an unrestricted optimum fits.
+
+The separate certification model uses a horizon covering every candidate with `F <= F_w`. If `d_i` is a valid individual lower bound on target `i`'s arrival time, then such a candidate satisfies
+
+```text
+C_max <= F_w - sum_i(d_i) + max_i(d_i).
+```
+
+This follows from `f_i <= F_w - sum_{j != i}(d_j)`. The implementation uses nearest-output Manhattan distances for `d_i`. For proving only the absence of a better flow time, `F_w - 1` can replace `F_w`. Write the displayed bound as `H`. Current escort-flow arrivals can occur at `t+1` for movement indices `0,...,T`, so `T >= max(0,H-1)` covers arrival times through `H`. Load-flow retrieval variables are indexed `0,...,T`, so it requires `T >= H`. The new runner sets certification `T = H` for both, even when this is shorter than `weighted_T`, while covering all no-worse-flow schedules. Every arrival of the weighted incumbent fits this horizon, so only its post-retrieval suffix can be discarded. The value of `H` is computed from the weighted incumbent's flow time, never from the greedy flow time. It records both horizons and their proof scope.
+
+If movement optimality is also claimed for a larger feasible set, the weighted lower bound must be valid for that same set, or a separate fixed-flow movement certificate is needed. A weighted proof from the original restricted horizon cannot automatically be combined with a larger-horizon flow proof to establish unrestricted lexicographic optimality. In particular, a sufficient horizon check for a global movement claim at `F_w` is `weighted_T + 1 >= H` for escort-flow, or `weighted_T >= H` for load-flow. Otherwise distinguish global flow certification from lexicographic certification within the original weighted horizon.
+
+When changing the horizon of a load-flow incumbent, the boundary period `min(weighted_T, H)` occurs after every target has been retrieved. Any redundant blocking-load movements in that period are replaced with stationary arcs before padding or truncation. This is necessary because the shorter model does not constrain their final destinations or opposite-direction conflicts. It preserves all retrieval times and can only reduce movements in the supplied start; the original weighted result remains unchanged. The CSV records `certification_warmstart_source=weighted_solution` and the number of removed post-retrieval movements. Escort-flow preserves the incumbent arcs through the new horizon. When extending it, the start adds the required output-service stays before converting newly retrieved targets into stationary escorts.
+
+## Outcome rules and reporting
+
+1. Solve the weighted model with a complete greedy MIP start and a 300-second solver-time cap. Record the actual time, work, objective, bound, status, candidate `(F_w,M_w)`, and warm-start outcome. Retain a validated greedy fallback separately if no solver incumbent is returned.
+2. Preserve the weighted candidate and its results before deciding whether to verify it. Every proven weighted optimum is eligible. For a suboptimal weighted candidate, verify it only when its absolute weighted gap is below a configurable eligibility threshold that is significantly less than one, initially `0.1` in the original `F + 0.01*M` units. Divide the scaled objective gap by 100 before applying this gate. Missing, nonfinite, or inconsistent bounds do not pass the gate. Mark a candidate that fails it `FLOW_SKIPPED_WEIGHTED_GAP`, not unresolved or counterexample. Verification has a separate configurable budget, initially 300 seconds. Report verification time separately from the weighted benchmark time; also report their sum when describing the complete certification procedure.
+3. If the pure-flow lower bound passes the guarded target, mark the original weighted candidate `FLOW_CERTIFIED`.
+4. If verification finds an integer flow time smaller than `F_w`, mark the original candidate `FLOW_COUNTEREXAMPLE` and preserve both plans. The weighted candidate is then not flow-optimal. Do not silently replace it and retain the original claim about what the weighted run produced.
+5. If neither event occurs before the verification budget, mark it `FLOW_UNRESOLVED`. A timeout is not evidence of a counterexample or evidence of optimality.
+6. Mark `LEX_CERTIFIED` only when flow optimality and movement optimality at that flow are both justified on the same feasible set. A weighted global optimum plus the flow certificate suffices. More generally, a valid weighted gap below `alpha` suffices for movements at fixed `F_w`: any one-movement improvement at the same flow would reduce the weighted objective by at least `alpha`. With `alpha = 0.01`, a guarded gap below one for `Q = 100F+M` supplies this certificate and also certifies weighted optimality on the integer objective lattice.
+
+Apply the same physical greedy plan to escort-flow and load-flow, with formulation-specific encodings of all model variables. Verify that both encodings have matching flow time and movement count and are feasible under the same retrieval convention. Report warm starts as a revision improvement, while making clear that the previous static experiment scripts left them disabled. For fair runtime comparisons, use the same machine, solver version, thread count, horizon policy, instance data, and benchmark budgets for both formulations.
+
+Implement the revised workflow in a separate experiment runner. Keep the existing weighted command-line behavior available for reproducing the previous experiment; the new workflow explicitly selects the integer-scaled weighted objective and the subsequent pure-flow certificate model.
+
+The paper can report the number of weighted candidates with certified minimum flow time, certified lexicographic optimality, counterexamples, and unresolved verification. It should not extrapolate an all-tested-instances finding to a general guarantee for `alpha = 0.01`.

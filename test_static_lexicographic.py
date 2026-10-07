@@ -272,7 +272,10 @@ class PhaseBudgetTests(unittest.TestCase):
         self.assertFalse(result["lexicographic_optimal"])
 
     def test_absolute_gap_boundary_is_strict(self):
-        for bound, proven in ((9.0, False), (9.0001, True)):
+        for bound, proven in (
+            (9.0, False), (9.0 + 1e-12, False), (9.0 + 5e-7, False),
+            (9.0001, True), (9.5, True),
+        ):
             with self.subTest(bound=bound):
                 result, _ = self.solve_runs([
                     scripted_run(status=GRB.TIME_LIMIT, bound=bound),
@@ -281,18 +284,33 @@ class PhaseBudgetTests(unittest.TestCase):
                 self.assertEqual(result["phase1"]["proven_optimal"], proven)
                 self.assertEqual(result["lexicographic_optimal"], proven)
 
+    def test_solver_optimal_with_near_one_flow_gap_is_not_certified(self):
+        for flowtime in (11, 10.99999999999999):
+            with self.subTest(flowtime=flowtime):
+                result, _ = self.solve_runs([
+                    scripted_run(flowtime=flowtime, status=GRB.OPTIMAL, bound=10 + 1e-12),
+                    scripted_run(flowtime=11, movements=4),
+                ], time_limit=300, phase1_time_limit=270)
+                self.assertEqual(result["phase1"]["status_name"], "OPTIMAL")
+                self.assertFalse(result["phase1"]["proven_optimal"])
+                self.assertFalse(result["lexicographic_optimal"])
+                self.assertEqual(result["status_name"], "FLOWTIME_NOT_PROVEN")
+
     def test_solver_optimal_status_with_one_movement_gap_is_not_certified(self):
         # Actual Linux results returned OPTIMAL at integer gaps 61-60, 57-56,
         # and 53-52 before the solver's absolute tolerance was tightened. Raw
         # floating-point values can lie just below the corresponding integer.
-        for movements, bound in ((61, 60), (56.99999999999999, 56)):
+        for movements, bound in (
+            (61, 60), (56.99999999999999, 56),
+            (61, 60 + 1e-12), (61, 60 + 5e-7),
+        ):
             with self.subTest(movements=movements):
                 result, _ = self.solve_runs([
                     scripted_run(movements=83),
                     scripted_run(movements=movements, status=GRB.OPTIMAL, bound=bound),
                 ], time_limit=300, phase1_time_limit=270)
                 self.assertEqual(result["phase2"]["status_name"], "OPTIMAL")
-                self.assertEqual(result["phase2"]["absolute_gap"], 1)
+                self.assertAlmostEqual(result["phase2"]["absolute_gap"], 1, places=6)
                 self.assertFalse(result["phase2"]["proven_optimal"])
                 self.assertFalse(result["lexicographic_optimal"])
                 self.assertEqual(result["status_name"], "MOVEMENTS_NOT_PROVEN")

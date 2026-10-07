@@ -71,6 +71,52 @@ This file is a working context snapshot for future sessions on this repo.
 
 ## Two-Phase Static Version (October 7, 2026)
 
+### Revised strategy (October 8, 2026)
+
+The user superseded the two-phase experiment as the main revision strategy.
+The problem will use the weighted objective `F + 0.01*M`; minimum flow time is
+an instance-specific empirical certificate, not a claimed universal property.
+The user authorized experiment code and method notes first, without further
+manuscript or reviewer-response edits at this stage.
+
+`RunTable2Weighted.sh` and `RunWeightedStatic.py` implement the new protocol:
+300 seconds for integer-scaled `100*F+M`, with a separate configurable 300-second
+pure-flow certificate budget. Complete greedy starts are enabled for both
+weighted formulations. Certification receives the saved weighted solution, with
+truncation or idle padding to fit its horizon. Load-flow removes redundant terminal
+blocker moves at the boundary before padding or truncation because terminal
+destination constraints are absent from the shorter model. This preserves all
+retrieval times; the original weighted result is retained. The CSV records the
+start source and removed-movement count.
+The certificate uses T=H directly, even if smaller than the weighted horizon.
+H uses weighted flow time, not greedy flow time. The user requested skipping
+unproven weighted candidates unless
+their absolute weighted gap is significantly below one; the configurable default
+gate is strictly below 0.1 in original weighted units. Solver gaps use 0.999 in
+integer objective units, with independent guarded proof flags. Certification
+sets a sufficient horizon covering all no-worse-flow candidates. Weighted results and
+certificate results remain separate, including counterexamples and proof scope.
+The protocol and sufficient-small-weight argument are documented in
+`weighted_flow_certification_notes.md`. The full experiment is not yet run.
+
+`LoadFlowStatic.py --warmstart` now supports the same physical BM leave greedy
+trace as escort-flow, translated into every target/blocker arc, retrieval, and
+makespan variable. Unsupported modes are rejected. Existing weighted defaults
+and the earlier two-phase runners remain available.
+
+Validation: 62 unit/integration tests passed across the lexicographic, LF
+warm-start, weighted certificate, new runner, and weighted solution-transfer
+suites. Starts were checked with every variable fixed, including shorter and
+longer horizons. Six tiny two-target instances (three per formulation) accepted
+both starts and passed all certificates; all three load-flow certification
+horizons were shorter than their weighted horizons. A
+one-second 10x10, three-escort, seed-23 smoke run retained the greedy incumbent
+and correctly skipped certification because its weighted gap was too large.
+The shell's 16-batch dry run and syntax checks passed. These checks are not the
+new numerical campaign and must not be reported as its results.
+
+### Earlier two-phase implementation
+
 - New entry points: `EscortFlowStaticLex.py` and `LoadFlowStaticLex.py`. Existing
   static entry points also accept `--lexicographic`; weighted mode remains the default.
 - Shared implementation: `static_lexicographic.py`, two explicit Gurobi solves.
@@ -109,6 +155,15 @@ This file is a working context snapshot for future sessions on this repo.
   certificate, and report `MOVEMENTS_NOT_PROVEN` if raw `OPTIMAL` lacks that
   certificate. Local reruns proved the same flow time 11 and respective movement
   counts 61, 57, 53. Original Linux runtimes are not replaced by local rerun times.
+- A broader workbook audit also found false-positive proof flags when a raw bound
+  lay microscopically above an integer. Certification now requires gap < 1 - 1e-6;
+  raw bounds/gaps remain available, and the solver tolerance stays 0.999. In the
+  original files, 13x7 has 4 phase-one and 5 phase-two such flags; the partial 10x10
+  file has 20 phase-one and 3 phase-two flags (some phases share an instance).
+  Six phase-one rows also have worse flow time than a known weighted solution.
+  Corrected local 13x7 / 3 escorts / seed 42 rerun gives flow 10, movements 62,
+  whereas its original Linux row reported flow 11 as proven. Original result
+  workbooks are preserved and require reruns before use as certified optima.
 
 ## Static BnC Status
 

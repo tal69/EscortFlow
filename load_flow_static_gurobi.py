@@ -27,10 +27,14 @@ class LoadFlowStaticGurobiConfig:
     threads: int = 0
     lexicographic: bool = False
     phase1_time_limit: float | None = None
+    objective_mode: str = "legacy"
+    certification_target: int | None = None
 
 
 class LoadFlowStaticGurobiSolver:
     def __init__(self, config):
+        from static_weighted_certification import validate_objective_mode
+        validate_objective_mode(config)
         if config.lexicographic and config.lp:
             raise ValueError("Lexicographic optimization requires an integer model")
         if config.phase1_time_limit is not None and not config.lexicographic:
@@ -151,9 +155,145 @@ class LoadFlowStaticGurobiSolver:
             moves.append(one_step_moves)
         return moves
 
-    def solve(self, target_positions, escort_positions, T, objective_cutoff=None):
+    def build_warmstart_from_trace(self, target_positions, escort_positions, T,
+                                   target_move_history, escort_move_history):
+        """Encode the same BM leave trace used by the escort-flow solver.
+
+        A straight escort move shifts each load on its path by one cell in
+        the opposite direction. Commodity 1 tracks target loads; commodity 2
+        tracks all remaining loads. A target arriving after transition t is
+        retrieved through q at t + 1. During that retrieval period the output
+        stays unavailable, as in the greedy trace and escort-flow model.
+
+        Store nonzero values sparsely; _apply_warmstart explicitly supplies
+        zero for every other variable, so Gurobi receives a complete start.
+        """
+        if self.config.lp or self.config.move_method != "BM":
+            raise ValueError("Heuristic warm starts require an integer BM load-flow model")
+        if len(target_move_history) != len(escort_move_history):
+            raise ValueError("Target and escort traces must have the same length")
+        if T < len(escort_move_history):
+            raise ValueError(
+                f"Warm-start trace needs load-flow horizon at least {len(escort_move_history)}, got {T}"
+            )
+        targets, escorts = set(target_positions), set(escort_positions)
+        locations = set(self.network["locations"])
+        if targets & escorts or not (targets | escorts) <= locations:
+            raise ValueError("Target and escort locations must be disjoint and inside the grid")
+        occupied = {loc: 1 if loc in targets else 2 for loc in locations - escorts}
+        warmstart = {"x": {}, "q": {}, "z": 0.0}
+
+        for t in range(T + 1):
+            retrieved = {loc for loc, commodity in occupied.items()
+                         if commodity == 1 and loc in self.output_set}
+            for loc in retrieved:
+                warmstart["q"][(loc, t)] = 1.0
+                warmstart["z"] = float(t)
+                del occupied[loc]
+
+            escort_moves = escort_move_history[t] if t < len(escort_move_history) else []
+            target_moves = target_move_history[t] if t < len(target_move_history) else {}
+            load_destinations = {}
+            used_cells = set()
+            for orig_x, orig_y, dest_x, dest_y in escort_moves:
+                origin, destination = (orig_x, orig_y), (dest_x, dest_y)
+                if origin in occupied or origin in retrieved:
+                    raise ValueError(f"Trace escort is unavailable at {origin}, period {t}")
+                if origin == destination:
+                    continue
+                if (orig_x != dest_x and orig_y != dest_y) or destination not in locations:
+                    raise ValueError("Trace escort moves must be straight and inside the grid")
+                # OneStep can return numpy integer coordinates, whose boolean
+                # comparisons do not support direct subtraction.
+                dx = int(dest_x > orig_x) - int(dest_x < orig_x)
+                dy = int(dest_y > orig_y) - int(dest_y < orig_y)
+                current = origin
+                path = {current}
+                while current != destination:
+                    source = (current[0] + dx, current[1] + dy)
+                    if source not in occupied:
+                        raise ValueError(f"Trace crosses an empty cell at {source}, period {t}")
+                    load_destinations[source] = current
+                    path.add(source)
+                    current = source
+                if path & (used_cells | retrieved):
+                    raise ValueError(f"Trace has conflicting movements or output service at period {t}")
+                used_cells.update(path)
+
+            expected_target_moves = {
+                (source, dest) for source, dest in load_destinations.items()
+                if occupied[source] == 1
+            }
+            if expected_target_moves != set(target_moves.values()):
+                raise ValueError(f"Target and escort traces disagree at period {t}")
+
+            next_occupied = {}
+            for source, commodity in occupied.items():
+                dest = load_destinations.get(source, source)
+                if dest in next_occupied:
+                    raise ValueError(f"Trace moves two loads to {dest}, period {t}")
+                move = source + dest
+                warmstart["x"][(move, t, commodity)] = 1.0
+                next_occupied[dest] = commodity
+            occupied = next_occupied
+
+        if any(commodity == 1 for commodity in occupied.values()):
+            raise ValueError("Warm-start trace does not retrieve every target within the horizon")
+        return warmstart
+
+    def build_warmstart_from_solution(self, result, T):
+        """Retarget a weighted incumbent's horizon without changing retrievals."""
+        if self.config.lp or self.config.move_method != "BM":
+            raise ValueError("Solution transfer requires an integer BM load-flow model")
+        if not result.get("has_solution"):
+            raise ValueError("Solution transfer requires a saved incumbent")
+        old_T = result["solution_horizon"]
+        if T < 0 or int(T) != T or T < result["makespan"]:
+            raise ValueError("The receiving horizon must cover every saved target retrieval")
+        saved = result["solution_warmstart"]
+        start = {"x": {key: value for key, value in saved["x"].items() if key[1] <= T},
+                 "q": {key: value for key, value in saved["q"].items() if key[1] <= T},
+                 "z": saved["z"],
+                 "removed_post_retrieval_movements": sum(
+                     1 for (move, t, _), value in saved["x"].items()
+                     if t > T and value > .5 and move[:2] != move[2:])}
+        if T == old_T:
+            return start
+
+        boundary = min(T, old_T)
+        # All targets have left by boundary. Final-period blocker moves are
+        # unnecessary and their endpoints lack capacity/anti-swap constraints
+        # in the shorter model. Replace them with stays before extending.
+        blockers = set()
+        for (move, t, commodity), value in saved["x"].items():
+            if t != boundary or value <= .5:
+                continue
+            if commodity == 1:
+                raise ValueError("Saved solution leaves a target unretrieved at the horizon")
+            blockers.add(move[:2])
+            if move[:2] != move[2:]:
+                start["removed_post_retrieval_movements"] += 1
+            start["x"].pop((move, t, commodity), None)
+        for t in range(boundary, T + 1):
+            for loc in blockers:
+                start["x"][(loc + loc, t, 2)] = 1.0
+        return start
+
+    @staticmethod
+    def _apply_warmstart(x, q, z, warmstart):
+        for key, var in x.items():
+            var.Start = warmstart["x"].get(key, 0.0)
+        for key, var in q.items():
+            var.Start = warmstart["q"].get(key, 0.0)
+        z.Start = warmstart["z"]
+
+    def solve(self, target_positions, escort_positions, T, objective_cutoff=None, warmstart=None):
+        if self.config.objective_mode != "legacy" and objective_cutoff is not None:
+            raise ValueError("Weighted/certification modes cannot use an objective cutoff")
         if self.config.lexicographic and objective_cutoff is not None:
             raise ValueError("A weighted objective cutoff cannot be used with lexicographic optimization")
+        if warmstart is not None and (self.config.lp or self.config.move_method != "BM"):
+            raise ValueError("Heuristic warm starts require an integer BM load-flow model")
         target_set = set(target_positions)
         escort_set = set(escort_positions)
         blocking_set = set(self.network["locations"]) - target_set - escort_set
@@ -312,17 +452,35 @@ class LoadFlowStaticGurobiSolver:
                 for t in tr:
                     model.addConstr(t * q[(output, t)] <= z)
 
-        if self.config.lexicographic:
+        if warmstart is not None:
+            self._apply_warmstart(x, q, z, warmstart)
+
+        if self.config.lexicographic or self.config.objective_mode != "legacy":
             def extract_solution():
                 actual_makespan = max(
                     (t for output in self.output_cells for t in tr if q[(output, t)].X > 1e-6),
                     default=0,
                 )
-                return {
+                result = {
                     "makespan": actual_makespan,
                     "animation_moves": self._extract_animation_moves(x, q, actual_makespan),
                 }
+                if self.config.objective_mode == "weighted_integer":
+                    result["solution_horizon"] = T
+                    result["solution_warmstart"] = {
+                        "x": {key: 1.0 for key, var in x.items() if var.X > .5},
+                        "q": {key: 1.0 for key, var in q.items() if var.X > .5},
+                        "z": float(round(z.X)),
+                    }
+                return result
 
+            if self.config.objective_mode != "legacy":
+                from static_weighted_certification import solve_weighted_or_certificate
+                return solve_weighted_or_certificate(
+                    model, flow_time_expr, movement_expr, extract_solution,
+                    status_name=self._status_name, solve_start=solve_start,
+                    mode=self.config.objective_mode, target=self.config.certification_target,
+                )
             return solve_lexicographic(
                 model,
                 flow_time_expr,

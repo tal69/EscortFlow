@@ -24,10 +24,14 @@ class StaticGurobiConfig:
     threads: int = 0
     lexicographic: bool = False
     phase1_time_limit: float | None = None
+    objective_mode: str = "legacy"
+    certification_target: int | None = None
 
 
 class StaticEscortFlowGurobiSolver:
     def __init__(self, config):
+        from static_weighted_certification import validate_objective_mode
+        validate_objective_mode(config)
         if config.lexicographic and config.lp:
             raise ValueError("Lexicographic integer stopping is not supported for LP relaxations")
         if config.phase1_time_limit is not None and not config.lexicographic:
@@ -310,6 +314,46 @@ class StaticEscortFlowGurobiSolver:
 
         return self._densify_warmstart(warmstart, T)
 
+    def build_warmstart_from_solution(self, result, T):
+        """Copy a weighted incumbent into a horizon covering all its arrivals."""
+        if self.config.lp or self.config.retrieval_mode != "leave":
+            raise ValueError("Solution transfer requires an integer leave model")
+        if not result.get("has_solution"):
+            raise ValueError("Solution transfer requires a saved incumbent")
+        old_T = result["solution_horizon"]
+        if T < 0 or int(T) != T or T + 1 < result["makespan"]:
+            raise ValueError("The receiving horizon must cover every saved target arrival")
+        saved = result["solution_warmstart"]
+        start = {name: {key: value for key, value in saved[name].items() if key[1] <= T}
+                 for name in ("x_a", "x_e")}
+        start["q"] = dict(saved["q"])
+        start["removed_post_retrieval_movements"] = sum(
+            self.network["move_cost_e"][move] for (move, t), value in saved["x_e"].items()
+            if t > T and value > .5)
+        if T <= old_T:
+            return start
+
+        escorts = {move[2:] for (move, t), value in saved["x_e"].items()
+                   if t == old_T and value > .5}
+        arrivals = set()
+        for (move, t), value in saved["x_a"].items():
+            if t != old_T or value <= .5:
+                continue
+            if move[:2] in self.output_set:
+                escorts.add(move[2:])  # Completed one full period of output service.
+            elif move[2:] in self.output_set:
+                arrivals.add(move[2:])  # Needs its output-service period next.
+            else:
+                raise ValueError("Saved solution leaves a target unretrieved at the horizon")
+        for t in range(old_T + 1, T + 1):
+            for loc in escorts:
+                start["x_e"][(self.network["stay_move"][loc], t)] = 1.0
+            for loc in arrivals:
+                start["x_a"][(self.network["stay_move"][loc], t)] = 1.0
+            escorts.update(arrivals)
+            arrivals = set()
+        return start
+
     def build_feasible_leave_warmstart(self, target_positions, escort_positions):
         import OneStepHeuristic_v2
 
@@ -467,6 +511,8 @@ class StaticEscortFlowGurobiSolver:
             var.Start = warmstart["q"].get(output, 0.0)
 
     def solve(self, target_positions, escort_positions, T, warmstart=None, objective_cutoff=None):
+        if self.config.objective_mode != "legacy" and objective_cutoff is not None:
+            raise ValueError("Weighted/certification modes cannot use an objective cutoff")
         if self.config.lexicographic and objective_cutoff is not None:
             raise ValueError("A weighted objective cutoff is not valid for lexicographic optimization")
         target_set = set(target_positions)
@@ -640,7 +686,7 @@ class StaticEscortFlowGurobiSolver:
         model.update()
         if warmstart is not None and not self.config.lp:
             self._apply_warmstart(x_a, x_e, q, warmstart)
-        if self.config.lexicographic:
+        if self.config.lexicographic or self.config.objective_mode != "legacy":
             return self._solve_lexicographic_model(model, x_a, x_e, q, T, solve_start)
         model.optimize()
         cpu_time = time.perf_counter() - solve_start
@@ -708,11 +754,27 @@ class StaticEscortFlowGurobiSolver:
                  for t in range(T + 1) if x_a[(move, t)].X > 0.5),
                 default=0,
             )
-            return {
+            result = {
                 "makespan": makespan,
                 "animation_moves": self._extract_animation_moves(x_a, x_e, makespan),
             }
+            if self.config.objective_mode == "weighted_integer":
+                # Save the incumbent before the shared solve helper disposes its model.
+                result["solution_horizon"] = T
+                result["solution_warmstart"] = {
+                    "x_a": {key: 1.0 for key, var in x_a.items() if var.X > .5},
+                    "x_e": {key: 1.0 for key, var in x_e.items() if var.X > .5},
+                    "q": {key: float(round(var.X)) for key, var in q.items()},
+                }
+            return result
 
+        if self.config.objective_mode != "legacy":
+            from static_weighted_certification import solve_weighted_or_certificate
+            return solve_weighted_or_certificate(
+                model, flowtime_expr, movement_expr, extract_solution,
+                status_name=self._status_name, solve_start=solve_start,
+                mode=self.config.objective_mode, target=self.config.certification_target,
+            )
         return solve_lexicographic(
             model, flowtime_expr, movement_expr, extract_solution,
             status_name=self._status_name, solve_start=solve_start,
