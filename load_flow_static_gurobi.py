@@ -5,6 +5,8 @@ import time
 import gurobipy as gp
 from gurobipy import GRB
 
+from static_lexicographic import build_lex_csv_suffix, solve_lexicographic
+
 OPTIMALITY_TOLERANCE = 1e-4  # 0.01%
 OBJECTIVE_CUTOFF_TOLERANCE = 1e-6
 
@@ -18,15 +20,21 @@ class LoadFlowStaticGurobiConfig:
     alpha: float
     beta: float
     gamma: float
-    time_limit: int | None
+    time_limit: float | None
     work_limit: float | None = None
     mip_focus: int = 0
     lp: bool = False
     threads: int = 0
+    lexicographic: bool = False
+    phase1_time_limit: float | None = None
 
 
 class LoadFlowStaticGurobiSolver:
     def __init__(self, config):
+        if config.lexicographic and config.lp:
+            raise ValueError("Lexicographic optimization requires an integer model")
+        if config.phase1_time_limit is not None and not config.lexicographic:
+            raise ValueError("phase1_time_limit requires lexicographic optimization")
         self.config = config
         self.output_cells = tuple(config.output_cells)
         self.output_set = set(self.output_cells)
@@ -76,7 +84,7 @@ class LoadFlowStaticGurobiSolver:
                         outgoing_horizontal[(x, y)].append(move)
                     reverse_move[move] = (dest_x, dest_y, x, y)
 
-        nonstay_moves = [move for move in moves if move_cost[move] > 0.0]
+        nonstay_moves = [move for move in moves if move[:2] != move[2:]]
 
         return {
             "locations": locations,
@@ -144,6 +152,8 @@ class LoadFlowStaticGurobiSolver:
         return moves
 
     def solve(self, target_positions, escort_positions, T, objective_cutoff=None):
+        if self.config.lexicographic and objective_cutoff is not None:
+            raise ValueError("A weighted objective cutoff cannot be used with lexicographic optimization")
         target_set = set(target_positions)
         escort_set = set(escort_positions)
         blocking_set = set(self.network["locations"]) - target_set - escort_set
@@ -302,6 +312,29 @@ class LoadFlowStaticGurobiSolver:
                 for t in tr:
                     model.addConstr(t * q[(output, t)] <= z)
 
+        if self.config.lexicographic:
+            def extract_solution():
+                actual_makespan = max(
+                    (t for output in self.output_cells for t in tr if q[(output, t)].X > 1e-6),
+                    default=0,
+                )
+                return {
+                    "makespan": actual_makespan,
+                    "animation_moves": self._extract_animation_moves(x, q, actual_makespan),
+                }
+
+            return solve_lexicographic(
+                model,
+                flow_time_expr,
+                movement_expr,
+                extract_solution,
+                status_name=self._status_name,
+                solve_start=solve_start,
+                time_limit=self.config.time_limit,
+                phase1_time_limit=self.config.phase1_time_limit,
+                work_limit=self.config.work_limit,
+            )
+
         if objective_cutoff is not None:
             cutoff_value = objective_cutoff + OBJECTIVE_CUTOFF_TOLERANCE
             if self.config.lp:
@@ -355,6 +388,8 @@ class LoadFlowStaticGurobiSolver:
         return result
 
     def build_csv_suffix(self, result):
+        if self.config.lexicographic:
+            return build_lex_csv_suffix(result)
         if result["has_solution"]:
             return (
                 f",{self._format_result_value(result['makespan'])}, "

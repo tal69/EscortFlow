@@ -17,6 +17,7 @@ import subprocess
 import pickle
 import time
 import copy
+import math
 from PBSCom import *
 import numpy as np
 import argparse
@@ -64,9 +65,15 @@ parser.add_argument("--gamma", type=float, help="Weight of the movements in the 
 parser.add_argument("-T", "--T_factor", type=float,
                     help="multiplier of the planning horizon length when no heuristic is used to create an upper bound (default 2.0)",
                     default=2.0)
-parser.add_argument("-t", "--time_limit", type=int,
-                    help="Time limit for CPLEX/Gurobi in seconds (default 300 unless omitted while using only --work_limit)",
+parser.add_argument("--horizon", type=int, default=None,
+                    help="Explicit static planning horizon, overriding the heuristic/scaled horizon")
+parser.add_argument("-t", "--time_limit", "--total_time_limit", type=float,
+                    help="Solver time limit in seconds; total across both lexicographic phases (default 300 unless using only --work_limit)",
                     default=None)
+parser.add_argument("--lexicographic", action="store_true",
+                    help="Minimize integer flow time, then movements at the best flow time found (Gurobi only)")
+parser.add_argument("--phase1_time_limit", type=float, default=None,
+                    help="Maximum phase-one solver time in seconds; phase two receives total time minus actual phase-one runtime")
 parser.add_argument(
     "--num_threads",
     type=int,
@@ -112,6 +119,22 @@ if args.gurobi and args.opl:
     print("Panic: --gurobi and --opl cannot be combined")
     exit(1)
 args.gurobi = not args.opl
+if args.lexicographic:
+    if not args.gurobi or args.lp or args.cutoff:
+        parser.error("--lexicographic requires Gurobi MILP and cannot be combined with --opl, --lp, or --cutoff")
+    if args.retrieval_mode != "leave":
+        parser.error("The lexicographic load-flow model supports only --retrieval_mode leave")
+    if (args.alpha, args.beta, args.gamma) != (0, 1.0, 0.01):
+        parser.error("--lexicographic uses unweighted objectives; nondefault --alpha, --beta, and --gamma are unsupported")
+if args.phase1_time_limit is not None:
+    if not args.lexicographic:
+        parser.error("--phase1_time_limit requires --lexicographic")
+    if not math.isfinite(args.phase1_time_limit) or args.phase1_time_limit <= 0:
+        parser.error("--phase1_time_limit must be finite and positive")
+if args.time_limit is not None and (not math.isfinite(args.time_limit) or args.time_limit <= 0):
+    parser.error("--time_limit must be finite and positive")
+if args.horizon is not None and args.horizon < 0:
+    parser.error("--horizon must be nonnegative")
 result_csv_file = args.csv
 file_export = "out.txt" if args.export_animation else ""
 is_bm = not args.lm
@@ -157,8 +180,8 @@ if args.k_prime > 0:
             "Panic: DP-k' heuristic works now only for retrieval of one load and only in 'stay' mode")
         exit(1)
 
-if args.work_limit is not None and args.work_limit <= 0:
-    print("Panic: --work_limit must be positive")
+if args.work_limit is not None and (not math.isfinite(args.work_limit) or args.work_limit <= 0):
+    print("Panic: --work_limit must be finite and positive")
     exit(1)
 
 if args.num_threads < 0:
@@ -223,13 +246,19 @@ def planning_horizon_from_heuristic_makespan(makespan):
     return makespan + 1 if args.retrieval_mode == "leave" else makespan
 
 f = open(result_csv_file, 'a')
-f.write(
-    "\ndate, Moves, Model, MIP Emphasis, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed, makespan, flowtime, #load movements, obj, LB, Wall Clock Time, Work\n")
+csv_prefix_header = "\ndate, Moves, Model, MIP Emphasis, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, Target Loads, alpha, beta, gamma, k', seed"
+if args.lexicographic:
+    from static_lexicographic import LEX_RESULT_HEADER, build_lex_csv_suffix
+    f.write(csv_prefix_header + ", Horizon, " + LEX_RESULT_HEADER + "\n")
+else:
+    f.write(csv_prefix_header + ", makespan, flowtime, #load movements, obj, LB, Wall Clock Time, Work\n")
 f.close()
 
 model_name = "LP-Gurobi" if args.gurobi and args.lp else (
     "ILP-Gurobi" if args.gurobi else ("LP" if args.lp else "ILP")
 )
+if args.lexicographic:
+    model_name = "ILP-Gurobi-Lex"
 
 gurobi_solver = None
 if args.gurobi:
@@ -255,6 +284,8 @@ if args.gurobi:
             mip_focus=mip_emphasis_focus(),
             lp=args.lp,
             threads=solver_threads,
+            lexicographic=args.lexicographic,
+            phase1_time_limit=args.phase1_time_limit,
         )
     )
 
@@ -266,7 +297,12 @@ try:
 
             R, E = GeneretaeRandomInstance(rep, Locations, escort_num, load_num)
             objective_cutoff = None
-            if args.dp_file:
+            if args.horizon is not None:
+                moves = []
+                T = args.horizon
+                if args.cutoff and is_bm and args.retrieval_mode in ["continue", "leave"]:
+                    objective_cutoff = greedy_upper_bound_summary(R, E)["objective"]
+            elif args.dp_file:
                 if is_bm:
                     moves = PBS_DPHeuristic_bm.DOHueristicBM(S, R[0], E, Lx, Ly, O, args.k_prime, False)
                 else:
@@ -288,7 +324,7 @@ try:
                 f = open("pbs_load_flow.dat", "w")
                 f.write('file_export = "%s";\n' % file_export)
                 f.write(f'file_res = "{result_csv_file}";\n')
-                f.write('time_limit = %d;\n' % time_limit)
+                f.write('time_limit = %g;\n' % time_limit)
                 f.write('threads = %d;\n' % solver_threads)
                 f.write(f'MoveMethod = {"BM" if is_bm else "LM"};\n')
                 f.write('alpha=%f;\n' % alpha)
@@ -308,6 +344,8 @@ try:
                 f"{time.ctime()},{'BM' if is_bm else 'LM'}, {model_name}, {mip_emphasis_for_csv()},"
                 f"{args.retrieval_mode},{Lx}x{Ly}, {len(O)}, {len(E)}, {len(R)}, {tuple_opl(O)}, "
                 f"{tuple_opl(E)}, {tuple_opl(R)}, {alpha},{beta},{gamma},{args.k_prime},{rep}")
+            if args.lexicographic:
+                f.write(f",{T}")
             f.close()
 
             if args.gurobi:
@@ -316,7 +354,13 @@ try:
                 except Exception as exc:
                     print(f"Could not solve the model with Gurobi: {exc}")
                     f = open(result_csv_file, 'a')
-                    f.write(",-,-,-,-,-,-,-\n")
+                    if args.lexicographic:
+                        f.write(build_lex_csv_suffix({
+                            "status_name": "ERROR", "time_limit": time_limit,
+                            "phase1_time_limit": args.phase1_time_limit,
+                        }) + "\n")
+                    else:
+                        f.write(",-,-,-,-,-,-,-\n")
                     f.close()
                 else:
                     if result["status_name"] == "INTERRUPTED":

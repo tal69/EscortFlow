@@ -17,15 +17,21 @@ class StaticGurobiConfig:
     retrieval_mode: str
     beta: float
     gamma: float
-    time_limit: int | None
+    time_limit: float | None
     work_limit: float | None = None
     mip_focus: int = 0
     lp: bool = False
     threads: int = 0
+    lexicographic: bool = False
+    phase1_time_limit: float | None = None
 
 
 class StaticEscortFlowGurobiSolver:
     def __init__(self, config):
+        if config.lexicographic and config.lp:
+            raise ValueError("Lexicographic integer stopping is not supported for LP relaxations")
+        if config.phase1_time_limit is not None and not config.lexicographic:
+            raise ValueError("phase1_time_limit requires lexicographic optimization")
         self.config = config
         self.output_cells = tuple(config.output_cells)
         self.output_set = set(self.output_cells)
@@ -461,6 +467,8 @@ class StaticEscortFlowGurobiSolver:
             var.Start = warmstart["q"].get(output, 0.0)
 
     def solve(self, target_positions, escort_positions, T, warmstart=None, objective_cutoff=None):
+        if self.config.lexicographic and objective_cutoff is not None:
+            raise ValueError("A weighted objective cutoff is not valid for lexicographic optimization")
         target_set = set(target_positions)
         escort_set = set(escort_positions)
         loads_to_retrieve = len(target_set - self.output_set)
@@ -632,6 +640,8 @@ class StaticEscortFlowGurobiSolver:
         model.update()
         if warmstart is not None and not self.config.lp:
             self._apply_warmstart(x_a, x_e, q, warmstart)
+        if self.config.lexicographic:
+            return self._solve_lexicographic_model(model, x_a, x_e, q, T, solve_start)
         model.optimize()
         cpu_time = time.perf_counter() - solve_start
 
@@ -665,7 +675,7 @@ class StaticEscortFlowGurobiSolver:
                     (t + 1) * x_a[(move, t)].X
                     for output in self.output_cells
                     for move in self.network["incoming_output_moves"][output]
-                    for t in range(1, T + 1)
+                    for t in tr
                 )
                 result["movements"] = sum(
                     self.network["move_cost_e"][move] * x_e[(move, t)].X
@@ -683,7 +693,38 @@ class StaticEscortFlowGurobiSolver:
 
         return result
 
+    def _solve_lexicographic_model(self, model, x_a, x_e, q, T, solve_start, callback=None):
+        from static_lexicographic import solve_lexicographic
+
+        flowtime_expr = gp.quicksum(q.values())
+        movement_expr = gp.quicksum(
+            self.network["move_cost_e"][move] * x_e[(move, t)]
+            for move in self.network["moves_e"] for t in range(T + 1)
+        )
+
+        def extract_solution():
+            makespan = max(
+                (t + 1 for move in self.network["arrival_moves"]
+                 for t in range(T + 1) if x_a[(move, t)].X > 0.5),
+                default=0,
+            )
+            return {
+                "makespan": makespan,
+                "animation_moves": self._extract_animation_moves(x_a, x_e, makespan),
+            }
+
+        return solve_lexicographic(
+            model, flowtime_expr, movement_expr, extract_solution,
+            status_name=self._status_name, solve_start=solve_start,
+            time_limit=self.config.time_limit,
+            phase1_time_limit=self.config.phase1_time_limit,
+            work_limit=self.config.work_limit, callback=callback,
+        )
+
     def build_csv_suffix(self, result):
+        if self.config.lexicographic:
+            from static_lexicographic import build_lex_csv_suffix
+            return build_lex_csv_suffix(result)
         if result["has_solution"]:
             return (
                 f",{self._format_result_value(result['makespan'])}, "

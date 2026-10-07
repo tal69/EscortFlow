@@ -62,7 +62,9 @@ class LazyStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
 
         return callback
 
-    def solve(self, target_positions, escort_positions, T, warmstart=None):
+    def solve(self, target_positions, escort_positions, T, warmstart=None, objective_cutoff=None):
+        if objective_cutoff is not None:
+            raise ValueError("Objective cutoffs are not supported by the lazy backend")
         if self.config.lp:
             raise ValueError("Lazy static Gurobi backend does not support --lp")
 
@@ -230,6 +232,10 @@ class LazyStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
 
         model.update()
         callback = self._build_lazy_callback(x_a, x_e, lazy_tr)
+        if self.config.lexicographic:
+            if warmstart is not None:
+                self._apply_warmstart(x_a, x_e, q, warmstart)
+            return self._solve_lexicographic_model(model, x_a, x_e, q, T, solve_start, callback)
         if warmstart is not None:
             # First let Gurobi search without bias. If it fails to find any incumbent,
             # restart once and use the greedy solution as a fallback start.
@@ -274,7 +280,7 @@ class LazyStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                     (t + 1) * x_a[(move, t)].X
                     for output in self.output_cells
                     for move in self.network["incoming_output_moves"][output]
-                    for t in range(1, T + 1)
+                    for t in tr
                 )
                 result["movements"] = sum(
                     self.network["move_cost_e"][move] * x_e[(move, t)].X

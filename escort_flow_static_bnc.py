@@ -22,7 +22,8 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
         return 2 * T
 
     def _effective_lazy_cut_limit(self, T):
-        return 4 * T
+        # T=0 still contains one decision period and must reject infeasible incumbents.
+        return 4 * max(1, T)
 
     def _separate_movement_coupling(self, model, x_a_sol, x_e_sol, move_specs_by_t, tr, add_cut, max_cuts):
         tol = self.cut_tol
@@ -104,7 +105,9 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
 
         return callback
 
-    def solve(self, target_positions, escort_positions, T, warmstart=None):
+    def solve(self, target_positions, escort_positions, T, warmstart=None, objective_cutoff=None):
+        if objective_cutoff is not None:
+            raise ValueError("Objective cutoffs are not supported by the branch-and-cut backend")
         if self.config.lp:
             raise ValueError("Branch-and-cut static Gurobi backend does not support --lp")
 
@@ -294,6 +297,12 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
             node_cut_limit,
             lazy_cut_limit,
         )
+        if self.config.lexicographic:
+            if warmstart is not None:
+                self._apply_warmstart(x_a, x_e, q, warmstart)
+            result = self._solve_lexicographic_model(model, x_a, x_e, q, T, solve_start, callback)
+            result["user_cut_time"] = callback_stats["time"]
+            return result
         if warmstart is not None:
             # First let Gurobi search without bias. If it fails to find any incumbent,
             # restart once and use the greedy solution as a fallback start.
@@ -339,7 +348,7 @@ class BnCStaticEscortFlowGurobiSolver(StaticEscortFlowGurobiSolver):
                     (t + 1) * x_a[(move, t)].X
                     for output in self.output_cells
                     for move in self.network["incoming_output_moves"][output]
-                    for t in range(1, T + 1)
+                    for t in tr
                 )
                 result["movements"] = sum(
                     self.network["move_cost_e"][move] * x_e[(move, t)].X

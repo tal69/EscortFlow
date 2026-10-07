@@ -29,6 +29,7 @@ import pickle
 import time
 import os
 import socket
+import math
 
 import numpy as np
 
@@ -68,9 +69,15 @@ parser.add_argument("--gamma", type=float, help="Weight of the movements in the 
 parser.add_argument("-T", "--T_factor", type=float,
                     help="multiplier of the planning horizon length when no heuristic is used to create an upper bound (default 2.0)",
                     default=1.6)
-parser.add_argument("-t", "--time_limit", type=int,
-                    help="Time limit for CPLEX/Gurobi in seconds (default 300 unless omitted while using only --work_limit)",
+parser.add_argument("-t", "--time_limit", "--total_time_limit", type=float,
+                    help="Total solver time limit in seconds, shared by both lexicographic phases (default 300 unless using only --work_limit)",
                     default=None)
+parser.add_argument("--lexicographic", action="store_true",
+                    help="Minimize flow time first, then movements with the attained flow time fixed")
+parser.add_argument("--phase1_time_limit", type=float, default=None,
+                    help="Maximum phase-one solver seconds; also capped by --time_limit")
+parser.add_argument("--horizon", type=int, default=None,
+                    help="Explicit last decision index T, overriding heuristic horizon selection")
 parser.add_argument(
     "--num_threads",
     type=int,
@@ -118,6 +125,21 @@ parser.add_argument("--bnc", nargs="?", const=-1, default=None, type=int,
 
 parser.set_defaults(cutoff=False)
 args = parser.parse_args()
+if args.lexicographic:
+    if args.lp or args.opl or args.greedy or args.naive or args.cutoff:
+        parser.error("--lexicographic requires a Gurobi MILP and cannot use --lp, --opl, --greedy, --naive, or --cutoff")
+    if args.beta != 1.0 or args.gamma != 0.01:
+        parser.error("--lexicographic uses unweighted objectives; do not change --beta or --gamma")
+if args.phase1_time_limit is not None and not args.lexicographic:
+    parser.error("--phase1_time_limit requires --lexicographic or EscortFlowStaticLex.py")
+for name in ("time_limit", "phase1_time_limit", "work_limit"):
+    value = getattr(args, name)
+    if value is not None and (not math.isfinite(value) or value <= 0):
+        parser.error(f"--{name} must be finite and positive")
+if args.horizon is not None and args.horizon < 0:
+    parser.error("--horizon must be nonnegative")
+if args.cutoff and (args.lazy is not None or args.bnc is not None):
+    parser.error("--cutoff is not supported by --lazy or --bnc")
 requested_gurobi = args.gurobi
 requested_opl = args.opl
 if requested_gurobi and requested_opl:
@@ -422,6 +444,14 @@ regular_header_line = (
     "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , Greedy UB, Naive LB, "
     "ILP makespan, ILP flowtime, #load movements, obj, LB, Wall Clock Time, Work, User Cut Time, Solver Status"
 )
+if args.lexicographic:
+    from static_lexicographic import LEX_RESULT_HEADER, build_lex_csv_suffix
+    regular_header_line = (
+        "Machine Name,Time Stamp,version,Moves,Model,MIP Emphasis,Max User Cut Per Node,"
+        "Retrieval Mode,Lx x Ly,#IOs,# Escorts,#Loads,IOs,Escorts,Target Loads,seed,T,"
+        "Heuristic UB makespan,Heuristic UB movements,Greedy Flowtime UB,Flowtime Naive LB,"
+        + LEX_RESULT_HEADER
+    )
 greedy_header_line = (
     "Machine Name, Time Stamp, version, Moves, Model, MIP Emphasis, Max User Cut Per Node, Retrieval Mode, Lx x Ly, #IOs, # Escorts, #Loads, IOs, Escorts, "
     "Target Loads, beta, gamma, seed, T, Heuristic UB makespan, Heuristic UB movements , Greedy UB, Naive LB"
@@ -445,11 +475,12 @@ def model_name_for_instance(T):
     if args.greedy:
         return "Greedy"
     if args.gurobi:
+        suffix = "-Lex" if args.lexicographic else ""
         if args.bnc is not None:
-            return "ILP-Gurobi-BnC"
+            return "ILP-Gurobi-BnC" + suffix
         if args.lazy is not None:
-            return "ILP-Gurobi-Lazy"
-        return "LP-Gurobi" if args.lp else "ILP-Gurobi"
+            return "ILP-Gurobi-Lazy" + suffix
+        return "LP-Gurobi" if args.lp else "ILP-Gurobi" + suffix
     return "LP" if args.lp else "ILP"
 
 
@@ -479,7 +510,7 @@ def calculate_naive_lower_bound(target_positions):
         min(distance(target_loc, output_loc) for output_loc in O)
         for target_loc in target_positions
     )
-    return total_distance * (beta + gamma)
+    return total_distance if args.lexicographic else total_distance * (beta + gamma)
 
 
 def build_naive_csv_row(target_positions, escort_positions, rep, naive_lower_bound):
@@ -493,6 +524,14 @@ def build_naive_csv_row(target_positions, escort_positions, rep, naive_lower_bou
 def build_regular_csv_prefix(target_positions, escort_positions, rep, T, heuristic_ub_makespan,
                              heuristic_ub_movements, greedy_upper_bound, naive_lower_bound,
                              model_name, max_user_cut_per_node):
+    if args.lexicographic:
+        return (
+            f"{machine_name},{time.ctime()},{script_version},BM,{model_name},{mip_emphasis_for_csv()},"
+            f"{max_user_cut_per_node},{args.retrieval_mode},{Lx}x{Ly},{len(O)},"
+            f"{len(escort_positions)},{len(target_positions)},{tuple_opl(O)},{tuple_opl(escort_positions)},"
+            f"{tuple_opl(target_positions)},{rep},{T},{heuristic_ub_makespan},{heuristic_ub_movements},"
+            f"{greedy_upper_bound},{naive_lower_bound}"
+        )
     return (
         f"{machine_name}, {time.ctime()}, {script_version}, BM, {model_name}, {mip_emphasis_for_csv()}, {max_user_cut_per_node},"
         f"{args.retrieval_mode}, {Lx}x{Ly}, {len(O)}, {len(escort_positions)}, {len(target_positions)}, {tuple_opl(O)}, "
@@ -534,6 +573,8 @@ if args.gurobi and not args.greedy and not args.naive:
         mip_focus=mip_emphasis_focus(),
         lp=args.lp,
         threads=solver_threads,
+        lexicographic=args.lexicographic,
+        phase1_time_limit=args.phase1_time_limit,
     )
     if args.lazy is not None:
         config_kwargs["lazy_master_steps"] = args.lazy
@@ -687,7 +728,9 @@ try:
                 )
                 greedy_ub_makespan = greedy_solution["upper_bound_makespan"]
                 greedy_ub_movements = greedy_solution["upper_bound_movements"]
-                greedy_upper_bound = greedy_solution["upper_bound_objective"]
+                greedy_upper_bound = greedy_solution[
+                    "upper_bound_flowtime" if args.lexicographic else "upper_bound_objective"
+                ]
                 if args.cutoff:
                     objective_cutoff = greedy_solution["upper_bound_objective"]
 
@@ -706,6 +749,9 @@ try:
                 moves = []  # so it prints 0
                 T = int((Lx + Ly + len(R) ** 0.7 - len(O) - escort_num ** 0.5) * args.T_factor)
 
+            if args.horizon is not None:
+                T = args.horizon
+
             if args.warmstart and args.gurobi and greedy_solution is not None:
                 warmstart = gurobi_solver.build_warmstart_from_trace(
                     R,
@@ -722,7 +768,7 @@ try:
                 f = open(dat_file, "w")
                 f.write('file_export = "%s";\n' % file_export)
                 f.write(f'file_res = "{result_csv_file}";\n')
-                f.write('time_limit = %d;\n' % time_limit)
+                f.write('time_limit = %g;\n' % time_limit)
                 f.write('threads = %d;\n' % solver_threads)
                 f.write('beta=%f;\n' % beta)
                 f.write('gamma=%f;\n' % gamma)
@@ -765,7 +811,13 @@ try:
                     result = gurobi_solver.solve(R, E, T, warmstart=warmstart, objective_cutoff=objective_cutoff)
                 except Exception as exc:
                     print(f"Could not solve the model with Gurobi: {exc}")
-                    append_csv_text(result_csv_file, ",-,-,-,-,-,-,-,0.0000, ERROR")
+                    if args.lexicographic:
+                        append_csv_text(result_csv_file, build_lex_csv_suffix({
+                            "status_name": "ERROR", "time_limit": time_limit,
+                            "phase1_time_limit": args.phase1_time_limit,
+                        }))
+                    else:
+                        append_csv_text(result_csv_file, ",-,-,-,-,-,-,-,0.0000, ERROR")
                 else:
                     if result["status_name"] == "INTERRUPTED":
                         sys.exit(130)
