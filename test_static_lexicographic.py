@@ -208,7 +208,8 @@ class PhaseBudgetTests(unittest.TestCase):
         self.assertTrue(model.disposed)
         for call in model.calls:
             self.assertEqual(call["mip_gap"], 0)
-            self.assertEqual(call["absolute_gap"], 1)
+            self.assertGreater(call["absolute_gap"], 0)
+            self.assertLess(call["absolute_gap"], 1)
         return result, model
 
     def test_phase_one_limit_continues_at_best_attained_flow(self):
@@ -279,6 +280,22 @@ class PhaseBudgetTests(unittest.TestCase):
                 ], time_limit=10, phase1_time_limit=3)
                 self.assertEqual(result["phase1"]["proven_optimal"], proven)
                 self.assertEqual(result["lexicographic_optimal"], proven)
+
+    def test_solver_optimal_status_with_one_movement_gap_is_not_certified(self):
+        # Actual Linux results returned OPTIMAL at integer gaps 61-60, 57-56,
+        # and 53-52 before the solver's absolute tolerance was tightened. Raw
+        # floating-point values can lie just below the corresponding integer.
+        for movements, bound in ((61, 60), (56.99999999999999, 56)):
+            with self.subTest(movements=movements):
+                result, _ = self.solve_runs([
+                    scripted_run(movements=83),
+                    scripted_run(movements=movements, status=GRB.OPTIMAL, bound=bound),
+                ], time_limit=300, phase1_time_limit=270)
+                self.assertEqual(result["phase2"]["status_name"], "OPTIMAL")
+                self.assertEqual(result["phase2"]["absolute_gap"], 1)
+                self.assertFalse(result["phase2"]["proven_optimal"])
+                self.assertFalse(result["lexicographic_optimal"])
+                self.assertEqual(result["status_name"], "MOVEMENTS_NOT_PROVEN")
 
     def test_phase_one_cap_without_total_limit(self):
         _, model = self.solve_runs([

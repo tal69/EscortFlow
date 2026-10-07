@@ -11,6 +11,10 @@ from gurobipy import GRB
 
 
 ABSOLUTE_GAP_LIMIT = 1.0
+# Gurobi can return OPTIMAL at a raw floating-point gap just below one while
+# the integer incumbent and reported bound still differ by exactly one. Keep
+# a numerical margin in the solver setting; certification remains strictly < 1.
+SOLVER_ABSOLUTE_GAP_LIMIT = 0.999
 LEX_RESULT_HEADER = (
     "makespan,flowtime,#load movements,Flowtime LB,Movement LB,Wall Clock Time,"
     "Work,User Cut Time,Phase 1 Status,Phase 1 Proven,Phase 1 Flowtime,"
@@ -97,7 +101,7 @@ def solve_lexicographic(
         first_limit = min(caps) if caps else None
         # Relative gap termination could otherwise accept a gap of one or more.
         model.Params.MIPGap = 0.0
-        model.Params.MIPGapAbs = ABSOLUTE_GAP_LIMIT
+        model.Params.MIPGapAbs = SOLVER_ABSOLUTE_GAP_LIMIT
         model.Params.TimeLimit = first_limit if first_limit is not None else GRB.INFINITY
         model.Params.WorkLimit = work_limit if work_limit is not None else GRB.INFINITY
         model.setObjective(flowtime_expr, GRB.MINIMIZE)
@@ -146,6 +150,9 @@ def solve_lexicographic(
                 result["status_name"] = "OPTIMAL"
             elif phase2["proven_optimal"]:
                 result["status_name"] = "FLOWTIME_NOT_PROVEN"
+            elif phase2["status_name"] == "OPTIMAL":
+                # A tolerance-based solver status is not an integer certificate.
+                result["status_name"] = "MOVEMENTS_NOT_PROVEN"
             else:
                 result["status_name"] = phase2["status_name"]
         if result["phase2_skip_reason"] and result["status_name"] == "OPTIMAL":

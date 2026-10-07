@@ -125,9 +125,12 @@ default to separate `res_escort_flow_lex.csv` and `res_load_flow_lex.csv` files.
    then minimize the unweighted number of load movements. An escort block move
    counts one movement per load shifted.
 
-Both phases use `MIPGap=0` and `MIPGapAbs=1`: an absolute incumbent-to-bound gap
-strictly below one proves optimality for an integer objective. No weighted
-objective cutoff is carried into either phase. See the
+Both phases use `MIPGap=0` and `MIPGapAbs=0.999`. The small margin below one avoids
+premature stopping at the numerical boundary: the original setting of exactly
+one produced some Gurobi `OPTIMAL` results whose integer incumbent and reported
+bound still differed by one. Certification separately requires the integer
+incumbent-to-bound gap to be strictly below one. No weighted objective cutoff is
+carried into either phase. See the
 [Gurobi gap parameter definitions](https://docs.gurobi.com/projects/optimizer/en/current/reference/parameters.html#mipgapabs).
 
 Use two time limits, in seconds:
@@ -174,7 +177,9 @@ instance metadata.
 The lexicographic CSV records each phase's status, bound, absolute gap, solver
 runtime, work, and proof flag, plus both time caps and the computed phase-two
 limit. `Lexicographic Optimal=1` requires proof in both phases. A movement optimum
-at an unproven flow time has `Solver Status=FLOWTIME_NOT_PROVEN`. Flow-time and
+at an unproven flow time has `Solver Status=FLOWTIME_NOT_PROVEN`. If Gurobi returns
+`OPTIMAL` for phase 2 but its integer gap does not prove optimality, the overall
+status is `MOVEMENTS_NOT_PROVEN`; the raw phase status remains available. Flow-time and
 movement bounds are reported separately in their own units. Use separate CSVs
 for weighted and lexicographic runs because their result columns differ.
 

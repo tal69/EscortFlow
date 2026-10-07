@@ -75,7 +75,8 @@ This file is a working context snapshot for future sessions on this repo.
   static entry points also accept `--lexicographic`; weighted mode remains the default.
 - Shared implementation: `static_lexicographic.py`, two explicit Gurobi solves.
   First minimize integer flow time, then fix its best incumbent by equality and
-  minimize integer load movements. Both phases set `MIPGap=0`, `MIPGapAbs=1`.
+  minimize integer load movements. Both phases set `MIPGap=0`, `MIPGapAbs=0.999`,
+  with a separate strict integer-gap certificate below 1.
 - `--phase1_time_limit` caps phase 1. `--time_limit` / `--total_time_limit` caps
   total solver runtime. Phase 2 receives the total minus actual phase-one Gurobi
   `Runtime`. Work limits are shared in the same manner.
@@ -102,6 +103,12 @@ This file is a working context snapshot for future sessions on this repo.
   environment/command record in a new results directory. Full experiment not
   launched during script creation; command scope and orchestration were checked.
   The older static shell scripts retain an additional 9x5 layout outside Table 2.
+- Numerical stopping correction: the first Linux 13x7 batch contained three rows
+  with phase-two `OPTIMAL` but integer gap exactly 1 (escorts/seed: 3/94, 5/57,
+  6/14). Changed the solver tolerance from 1 to 0.999, retaining the strict <1
+  certificate, and report `MOVEMENTS_NOT_PROVEN` if raw `OPTIMAL` lacks that
+  certificate. Local reruns proved the same flow time 11 and respective movement
+  counts 61, 57, 53. Original Linux runtimes are not replaced by local rerun times.
 
 ## Static BnC Status
 
