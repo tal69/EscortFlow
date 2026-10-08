@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Table 2(a,b), sufficient integer weights and conditional flow certification.
+# Table 2(a,b), sufficient integer weights and first flow-proof timing.
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -18,13 +18,14 @@ Usage: bash RunTable2SafeWeighted.sh [options]
 
 Run escort-flow and load-flow Table 2(a,b) with the same greedy warm starts.
 Each instance uses integer R*F+M, with R=(N-e)*H+1 and a sufficient horizon H
-derived from its greedy feasible flow time. The first 300 solver seconds
-attempt full weighted optimality. A gap below 1 proves global lexicographic optimality.
-At 300 seconds freeze the reported solution and check its flow-time proof.
-Only if needed, continue the same branch-and-bound search for up to another
-300 seconds, stopping when that flow time is proved or a better flow is found.
-Report the frozen solution and the final solution separately. One optimize call
-preserves the search tree, incumbent, cuts, objective, and model throughout.
+derived from its greedy feasible flow time. The first phase attempts both
+objectives for up to 300 solver seconds. A gap below 1 proves global
+lexicographic optimality. Check flow optimality when the lower bound improves
+or a smaller candidate flow is found. Record the first observed proof time.
+If flow remains unproved at 300 seconds, extend the same search for up to another
+300 seconds, stopping on its flow proof or a lower-flow counterexample.
+Preserve the 300-second result and report the final result separately.
+One optimize call preserves the search tree, incumbent, cuts, and objective.
 
 Options:
   --python PATH                   Python with numpy, gurobipy, and Gurobi license
@@ -32,7 +33,7 @@ Options:
   --seeds RANGE                   Seed range (default: 1-100)
   --part a|b|both                  Table part (default: both)
   --weighted-time-limit SECONDS   Initial reporting cutoff (default: 300)
-  --extension-time-limit SECONDS  Additional search budget (default: 300)
+  --extension-time-limit SECONDS  Conditional extra search budget (default: 300)
   --certification-time-limit SEC  Alias for --extension-time-limit
   --output-dir DIR                New results directory; existing paths rejected
   --dry-run                       Print commands without solving or creating files
@@ -44,8 +45,8 @@ Examples:
 
 All batches run sequentially: four layouts, both formulations, leave retrieval,
 simultaneous block movements. Part (a): one target and 3-8 escorts. Part (b):
-four targets and 8/12/16 escorts. Each per-instance log reports stage transitions.
-CSV weighted results remain unchanged if certification finds a better flow time.
+four targets and 8/12/16 escorts. CSVs report the first flow-proof time and total
+solve time. The cutoff and final solutions are saved separately.
 USAGE
 }
 
@@ -104,23 +105,26 @@ if sys.version_info < (3, 10):
 import numpy
 import gurobipy as gp
 sys.path.insert(0, sys.argv[1])
-from RunSafeWeightedStatic import parse_range, positive_number
+from RunSafeWeightedStatic import parse_range, positive_number, nonnegative_number
 seed_values = parse_range(sys.argv[3], minimum=0)
 weighted = positive_number(sys.argv[5])
-extension = positive_number(sys.argv[6])
+extension = nonnegative_number(sys.argv[6])
 print("NumPy:", numpy.__version__)
 print("Gurobi:", ".".join(map(str, gp.gurobi.version())))
 print("Threads:", sys.argv[2])
 print("Seeds:", sys.argv[3], "count:", len(seed_values))
 print("Table part:", sys.argv[4])
-print(f"Initial reporting cutoff: {weighted:g} seconds; conditional extension: {extension:g} seconds; total cap: {weighted+extension:g} seconds")
+print(f"First-phase cutoff: {weighted:g} seconds; conditional extension: {extension:g} seconds; total cap: {weighted+extension:g} seconds")
 print("Objective: integer R*F+M; R=(N-e)*H+1 per instance; MIPGap=0; MIPGapAbs=0.999")
 print("Horizon: H=greedy_F-sum(d_i)+max(d_i), covering a global lexicographic optimum")
-print("Flow proof: weighted optimality or incumbent-specific bound; extend the same search only if needed")
-print("Report initial-cutoff solution and final solution separately; certify the initial solution")
+print("Flow proof checks: improved lower bound or smaller candidate flow; mandatory cutoff and final checks")
+print("Cached flow criterion; unchanged bounds and movement-only improvements skip proof comparisons")
+print("Record the first observed flow proof; first phase attempts both objectives")
+print("Extend only if the cutoff flow is unproved; stop on its proof, a lower-flow counterexample, or the total cap")
+print("Report first flow-proof time and total runtime, plus cutoff and final solutions separately")
 print("Mode: leave; movement: BM; sequential jobs")
 print("Warm start: common complete greedy plan; one continuous solve preserves all search state")
-print("MIPFocus: 0 throughout. Callback checks enforce flow stopping after the initial budget.")
+print("MIPFocus: 0 throughout. Flow proof ends the extension, but does not end the first phase early.")
 source = Path(sys.argv[1])
 for arguments in (["rev-parse", "HEAD"], ["status", "--short"]):
     try:

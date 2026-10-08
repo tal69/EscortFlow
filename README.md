@@ -206,7 +206,7 @@ budget allocation, callbacks, and retained incumbents:
 python3 test_static_lexicographic.py
 ```
 
-### Sufficient integer weights with conditional certification
+### Sufficient integer weights with flow-proof timing
 
 Run the new version on Linux, including inside an existing tmux session:
 
@@ -215,10 +215,11 @@ bash RunTable2SafeWeighted.sh --threads 16
 ```
 
 This runs the same Table 2(a,b) instances and both formulations sequentially.
-Defaults are 16 threads, a 300-second reporting cutoff, and up to 300 additional
-seconds of the same weighted branch-and-bound search only when needed. There is
-one optimization call and a complete common greedy warm start. The objective,
-model, search tree, cuts, and incumbent remain in place during the extension.
+Defaults are 16 threads, a 300-second first phase, and a conditional extension
+of up to 300 more seconds. There is one optimization call and a complete common
+greedy warm start. The solver records the first observed flow-time proof while
+the first phase continues toward proving both objectives. If flow time remains
+unproved at the cutoff, the extension attempts to certify that saved solution.
 
 For each instance, the program derives a sufficient physical horizon `H` from
 the greedy solution's flow time and target-to-output distance lower bounds.
@@ -231,23 +232,29 @@ globally lexicographically optimal. The coefficient and bounds are saved per row
 The weighted solve uses `MIPGap=0` and `MIPGapAbs=0.999`:
 
 1. An independently verified integer gap below one proves both objectives.
-2. At the initial cutoff, freeze the best incumbent observed by that time. Use
-   it to bound movements in any hypothetical better-flow plan, then check the
-   weighted lower bound. This can certify
-   flow time even when movement optimality remains unresolved. A matching
-   analytical distance lower bound also certifies flow time immediately.
-3. Only if these checks fail, continue the same search until the frozen
-   solution's flow time is proved, a lower-flow counterexample is found, or the
-   total 600-second cap is reached. `MIPFocus=0` remains unchanged. There is no
-   second model or weighted-gap eligibility gate in this version.
+2. During the search, check flow optimality whenever the observed weighted
+   lower bound improves or a new candidate has smaller flow. Unchanged bounds
+   and movement-only improvements skip the proof comparison. Check the reporting
+   cutoff and final result unconditionally.
+   The incumbent-specific movement bound can prove flow time while movement
+   optimality remains unresolved. A matching analytical distance bound also
+   proves flow time.
+3. Save the first observed proof time, flow value, node count, bound, and proof
+   source. A flow proof alone does not stop the first phase. At the cutoff,
+   freeze the incumbent observed by that time. Continue only if its flow is
+   unproved, stopping on its proof, a lower-flow counterexample, or the total
+   600-second cap. `MIPFocus=0` remains unchanged throughout.
 
-`--weighted-time-limit` and `--extension-time-limit` control the reporting
-cutoff and extra search allowance. `--certification-time-limit` is an alias for
-the latter. Solver callbacks enforce the phase transition and proof stopping at
-available checkpoints; termination can have a small overhead. The snapshot
+`--weighted-time-limit` controls the first-phase limit and reporting cutoff
+(default 300 seconds). Proof checks are triggered by bound or flow changes,
+with no time or node interval setting.
+`--extension-time-limit` supplies up to 300 additional solver seconds by default,
+used only when the saved candidate's flow remains unproved.
+`--certification-time-limit` remains an alias for that option. The snapshot
 uses incumbents and bounds observed by the reporting cutoff, never a later
 solution retroactively. If no incumbent is available by that cutoff, the row
-explicitly records that condition and no candidate-specific extension is run.
+explicitly records that condition and stops without inventing a candidate to
+certify. Final solutions remain separately reported.
 
 Results are saved under a new `results_table2_safe_weighted_<timestamp>_<pid>/`
 directory, with per-layout CSVs in `parts/`, solver logs in `logs/`, and merged
@@ -270,6 +277,25 @@ the extension alone. `extension_runtime` measures elapsed solver time beyond
 the cutoff, including termination overhead. `weighted_cpu_time` adds model
 construction and is marked as an estimate when the snapshot was taken during
 the ongoing search. These are elapsed times, not summed CPU time over threads.
+
+`first_flow_proof_runtime` is the first observed proof time measured in solver
+seconds. `first_flow_proof_cpu_time` adds model construction to that observation.
+`first_flow_proof_flowtime` identifies the certified flow value, and
+`first_flow_proof_node_count`, `first_flow_proof_scaled_bound`, and
+`first_flow_proof_work` record its checkpoint. The source identifies a callback
+or the final-result check; the method identifies the mathematical certificate.
+These fields are blank when no reliable proof was observed. Gurobi controls when
+callbacks run, so this time is an upper bound on the actual instant
+when proof became possible. `final_runtime` still records total solver time.
+CSV protocol `safe_integer_flow_timing_v4` and check mode `bound_or_flow_change`
+identify this version. It differs from the earlier untimed and interval-based
+continuation results.
+
+Monitoring computes distance bounds once and caches the scalar proof criterion
+by flow value. Movement improvements reuse that criterion. Bound-change checks
+use the saved candidate and strongest observed bound, without additional
+solution-vector reads. Once flow is proved, routine proof checks stop; cutoff
+handling, contradictory-solution detection, and final validation remain active.
 
 ### Fixed-weight Table 2 experiment
 

@@ -2,7 +2,7 @@
 
 Method notes for the revision, October 8, 2026. These notes describe the mathematical claims and implemented experiment protocol. They do not assert that the new experiments have already established those claims.
 
-## Additional version: sufficient integer weights and conditional certification
+## Additional version: sufficient integer weights and flow-proof timing
 
 `RunSafeWeightedStatic.py` and `RunTable2SafeWeighted.sh` implement a separate
 protocol from the fixed `F+0.01*M` experiment described below. They use an
@@ -37,32 +37,40 @@ objective minimizes movements. This argument needs a bound on an optimal
 representative, not on every plan with redundant post-retrieval movements.
 The zero-flow case gives `H_g=U_g=0` and `R=1`.
 
-The weighted search uses one uninterrupted optimization call, with an initial
-300-second reporting cutoff and a conditional extension of up to 300 seconds.
+The weighted search uses one uninterrupted optimization call with a 300-second
+first-phase limit and a conditional extension of up to 300 seconds. It records
+the first observed flow-time proof while the first phase continues toward
+proving both objectives. Tal corrected the briefly selected 300-second overall
+limit to restore this conditional extension.
 The objective remains `R*F+M`, `MIPFocus=0` remains unchanged, and the same model,
 incumbent, cuts, and branch-and-bound tree remain active. `TimeLimit` is the sum
-of the two allowances, and a callback implements conditional stopping. There
+of the allowances, and the callback implements conditional stopping. There
 is no model rebuild, second optimization call, or change to a pure-flow
 objective. The initial complete greedy warm start is applied once.
 
-Before the reporting cutoff the solver attempts to optimize both objectives,
-using `MIPGap=0` and `MIPGapAbs=0.999`. Flow optimality alone does not stop this
-initial search early. The reporting and stopping rules are:
+The solver retains the same weighted objective, `MIPGap=0`, and
+`MIPGapAbs=0.999`. Flow optimality does not stop the first phase early, but ends
+the extension when it certifies the saved first-phase candidate.
+The reporting and stopping rules are:
 
 1. A reliable, consistent weighted lower bound with reconstructed integer gap
    below `1-1e-6` proves global lexicographic optimality under the coefficient
    and horizon guarantee above. The solver can finish before the cutoff in
    this case.
-2. At the reporting cutoff, freeze the best feasible incumbent observed by
-   that time, together with the weighted bound observed by that time. Check
-   its flow time using the analytical distance bound or weighted bound below.
-   If proved, stop at the next supported callback checkpoint.
-3. Only if the frozen flow time remains unproved, continue the same search.
-   Stop when the weighted lower bound certifies that original flow time, when
-   a feasible lower-flow counterexample is found, or when the total time cap
-   is reached. There is no weighted-gap eligibility gate. If no solution was
-   available by the cutoff, record that condition and stop without inventing
-   an initial candidate to certify.
+2. At available MIP/MIPSOL callbacks, compare the proof criterion only when
+   the weighted lower bound improves or a new candidate has smaller flow,
+   including candidates that do not improve the weighted incumbent. Reuse the
+   strongest valid observed bound when a later candidate arrives with a weaker
+   bound. Record the first certified flow
+   value and its observed runtime, node count, bound, work, observation source,
+   and certificate method. The final result receives an unconditional check.
+3. At the cutoff, freeze the solution and bound observed by that time. If its
+   flow time is already proved, stop at the next supported checkpoint. Otherwise
+   continue the same search until that flow is certified, a lower-flow feasible
+   counterexample disproves it, or the combined 600-second cap is reached.
+   Report the initial and final solutions separately. Missing cutoff candidates
+   are recorded without filling them using later solutions; no candidate-specific
+   extension is run in that case.
 
 The callback observes each new feasible solution and keeps only improving
 weighted incumbents for the initial snapshot. A first callback after the
@@ -100,6 +108,33 @@ certificate for the final incumbent is recomputed using that final incumbent.
 The initial a posteriori check requires no extra search when it succeeds. It
 proves flow time alone; the CSV must not mark movement or full lexicographic
 optimality unless separately established.
+
+Target-to-output distance bounds and the initial load count are computed once.
+The scalar bound threshold for a candidate flow value is cached and recalculated
+only when that value changes. Movement improvements at the same flow value do
+not change the threshold. Bound-change monitoring reuses the saved candidate and
+compares an improved weighted bound to this cached criterion, without reading
+another solution vector. Unchanged or weaker bounds and movement-only
+improvements require no proof comparison. Mandatory cutoff and final checks
+remain active, even when bounds do not change. Once a certificate is recorded,
+routine checking ends while contradiction detection and final validation remain.
+
+`first_flow_proof_runtime` is the observed solver time of the first proof.
+`first_flow_proof_cpu_time` adds model construction; both are elapsed time,
+not CPU time accumulated across threads. `first_flow_proof_flowtime` identifies
+the flow value proved, which must match a reported candidate before attaching
+that proof to the candidate. `first_flow_proof_source` distinguishes MIP,
+MIPSOL, and final-result observations; `first_flow_proof_method` distinguishes
+distance, weighted-gap, and full-weighted-optimum certificates. The timestamp
+is an upper bound on the instant proof became possible. There is no artificial
+time/node sampling delay, but a long operation without a supported callback can
+delay observation. If proof is first established by the final-result check,
+the timestamp is the final runtime. Unproved cases have blank timing fields.
+Unreliable final solver statuses or a later contradiction invalidate recorded
+proof timing. Protocol `safe_integer_flow_timing_v4`, with recorded check mode
+`bound_or_flow_change`, separates these results from the earlier untimed and
+interval-based campaigns. Gurobi still invokes callbacks at its own checkpoints;
+the event filtering takes place inside the callback.
 
 CSV rows identify the coefficient, horizon, movement bound, integer and
 normalized objectives/bounds/gaps, gap-certificate threshold and outcome,

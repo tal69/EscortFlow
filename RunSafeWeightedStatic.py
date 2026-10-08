@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe integer PBS objective with a conditional continuation of one search tree.
+"""Safe integer PBS objective with flow-proof timing in one weighted search.
 
 The first budget's incumbent remains the primary experimental result. If its
 flow time is unproved, the same weighted search continues for another budget.
@@ -24,7 +24,8 @@ from static_weighted_certification import (
     safe_weight_parameters,
 )
 
-PROTOCOL = "safe_integer_continuation_v1"
+PROTOCOL = "safe_integer_flow_timing_v4"
+FLOW_PROOF_CHECK_MODE = "bound_or_flow_change"
 SOLUTION_FIELDS = (
     "has_solution", "makespan", "flowtime", "movements", "objective", "best_bound",
     "absolute_gap", "scaled_objective", "scaled_best_bound", "scaled_absolute_gap", "weighted_proven",
@@ -37,6 +38,7 @@ FIELDNAMES = [
     "weighted_horizon", "weighted_physical_horizon", "weighted_global_scope", "greedy_makespan",
     "greedy_flowtime", "greedy_movements", "greedy_objective", "greedy_scaled_objective", "greedy_time",
     "weighted_time_limit", "extension_time_limit", "total_time_limit", "Solver Status",
+    "flow_proof_check_mode",
     *SOLUTION_FIELDS, "weighted_bound_consistent", "weighted_runtime", "weighted_cpu_time",
     "weighted_cpu_time_is_estimate", "weighted_work", "phase1_flow_proven", "phase1_flow_proof_source",
     "phase1_incumbent_runtime", "phase1_snapshot_source", "phase1_snapshot_missing",
@@ -51,7 +53,10 @@ FIELDNAMES = [
     "weighted_gap_threshold", "proof_scaled_best_bound", "proof_scaled_absolute_gap",
     "flow_lower_bound", "flow_proven", "flow_proof_source", "counterexample",
     "counterexample_flowtime", "counterexample_movements", "counterexample_scaled_objective",
-    "lexicographic_proven", "total_wall_time", "error",
+    "lexicographic_proven", "first_flow_proof_runtime", "first_flow_proof_cpu_time",
+    "first_flow_proof_node_count", "first_flow_proof_flowtime", "first_flow_proof_source",
+    "first_flow_proof_scaled_bound", "first_flow_proof_work", "first_flow_proof_method",
+    "flow_proof_invalidated", "flow_proof_invalidation_reason", "total_wall_time", "error",
 ]
 
 
@@ -61,6 +66,7 @@ def make_solver(args, *, flow_weight):
         beta=1, gamma=1 / flow_weight, weight_scale=flow_weight,
         time_limit=args.weighted_time_limit, threads=args.threads, mip_focus=0,
         objective_mode="weighted_integer", flow_proof_extension_time_limit=args.extension_time_limit,
+        stop_on_flow_proof=True,
     )
     if args.formulation == "escortflow":
         from escort_flow_static_gurobi import StaticGurobiConfig, StaticEscortFlowGurobiSolver
@@ -105,6 +111,7 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
         "objective_units": "F+M/R", "scaled_objective_units": "R*F+M",
         "weighted_time_limit": args.weighted_time_limit, "extension_time_limit": args.extension_time_limit,
         "total_time_limit": args.weighted_time_limit + args.extension_time_limit,
+        "flow_proof_check_mode": FLOW_PROOF_CHECK_MODE,
         "extension_used": 0, "extension_runtime": 0, "optimization_calls": 0,
         "gap_flow_proven": 0, "flow_proven": 0, "counterexample": 0, "lexicographic_proven": 0,
         "final_flow_proven": 0, "final_lexicographic_proven": 0,
@@ -173,6 +180,10 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
                    optimization_calls=search.get("optimization_calls", 0))
         for key in ("runtime", "cpu_time", "work"):
             row[f"final_{key}"] = final.get(key)
+        for key in ("runtime", "cpu_time", "node_count", "flowtime", "source", "scaled_bound", "work", "method"):
+            row[f"first_flow_proof_{key}"] = final.get(f"first_flow_proof_{key}")
+        row["flow_proof_invalidated"] = int(bool(final.get("flow_proof_invalidated")))
+        row["flow_proof_invalidation_reason"] = final.get("flow_proof_invalidation_reason", "")
         if row["optimization_calls"] != 1:
             raise ValueError("Safe weighted continuation must use exactly one optimization call")
 
@@ -229,16 +240,30 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
         row.update(final_flow_proven=int(bool(final_certificate["flow_proven"])),
                    final_flow_proof_source=final_certificate["proof_source"])
         if final.get("weighted_proven"):
+            known_flow = row.get("first_flow_proof_flowtime")
+            if ((witness is not None and witness.get("flowtime", final["flowtime"]) < final["flowtime"])
+                    or (known_flow is not None and known_flow < final["flowtime"])):
+                raise ValueError("Final weighted optimality contradicts a known feasible smaller flow")
             _check_weighted_proof(final, coefficient, flow, row["greedy_scaled_objective"],
                                   parameters["movement_bound"], scope)
             row.update(final_flow_proven=1, final_lexicographic_proven=1,
                        final_flow_proof_source="safe_weighted_optimum")
+        if (row["flow_proof_invalidated"]
+                and row["flow_proof_invalidation_reason"] != "UNRELIABLE_FINAL_STATUS"):
+            raise ValueError(f"Flow proof invalidated: {row['flow_proof_invalidation_reason']}")
         print(f"seed={seed} escorts={escort_count}: first-budget F={weighted.get('flowtime')} "
               f"M={weighted.get('movements')} integer gap={weighted.get('scaled_absolute_gap')}; "
               f"final F={final.get('flowtime')} M={final.get('movements')} "
-              f"extension_used={row['extension_used']}, stop={row['search_stop_reason']}", flush=True)
+              f"flow first proved at {row['first_flow_proof_runtime']} solver seconds; "
+              f"total solve={row['final_runtime']}s, stop={row['search_stop_reason']}", flush=True)
     except Exception as exc:
         row["error"] = f"{type(exc).__name__}: {exc}"
+        for key in ("weighted_proven", "final_weighted_proven", "phase1_flow_proven",
+                    "flow_proven", "gap_flow_proven", "lexicographic_proven",
+                    "final_flow_proven", "final_lexicographic_proven"):
+            row[key] = 0
+        for key in ("runtime", "cpu_time", "node_count", "flowtime", "source", "scaled_bound", "work", "method"):
+            row[f"first_flow_proof_{key}"] = None
         if not row["Solver Status"]:
             row["Solver Status"] = "ERROR"
         print(f"seed={seed} escorts={escort_count}: ERROR: {row['error']}", flush=True)
@@ -276,6 +301,7 @@ def merge_batch(source, destination, seeds, escorts, weighted_limit, extension_l
                 or row["movement_integer_weight"] != "1"
                 or int(row["flow_weight"]) != int(row["safe_movement_bound"]) + 1
                 or row["weighted_global_scope"] != "1" or row["optimization_calls"] != "1"
+                or row["flow_proof_check_mode"] != FLOW_PROOF_CHECK_MODE
                 or float(row["movement_weight"]) != 1 / int(row["flow_weight"])):
             raise ValueError(f"Unexpected warm-start, continuation, or safe objective setting: {source}")
     exists = destination.exists()
@@ -291,6 +317,13 @@ def merge_batch(source, destination, seeds, escorts, weighted_limit, extension_l
     print(f"Validated and saved {len(rows)} instance results to {destination}", flush=True)
 
 
+def nonnegative_number(value):
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise argparse.ArgumentTypeError("Expected a finite nonnegative number")
+    return result
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--formulation", choices=("escortflow", "loadflow"), required=True)
@@ -304,8 +337,8 @@ def parse_args(argv=None):
     parser.add_argument("--weighted-time-limit", type=positive_number, default=300,
                         help="initial weighted search budget in solver seconds (default: 300)")
     parser.add_argument("--extension-time-limit", "--certification-time-limit", dest="extension_time_limit",
-                        type=positive_number, default=300,
-                        help="additional seconds in the same weighted search tree if flow is unproved (default: 300)")
+                        type=nonnegative_number, default=300,
+                        help="additional search budget only if first-phase flow is unproved (default: 300)")
     parser.add_argument("-f", "--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:

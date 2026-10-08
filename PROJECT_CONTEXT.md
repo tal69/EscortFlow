@@ -131,8 +131,8 @@ retrieval and has at most `(N-e)*H_g` movements, which proves the weight is
 sufficient. The same coefficient is used in both formulations. Backend
 `weight_scale` defaults to 100, preserving the existing fixed-weight behavior.
 
-Tal then requested preserving the same branch-and-bound tree for the extra
-time, rather than rebuilding a pure-flow model. Defaults are 300 seconds for
+Earlier, Tal requested preserving the same branch-and-bound tree for the extra
+time, rather than rebuilding a pure-flow model. The original defaults were 300 seconds for
 the initial reporting cutoff, up to 300 seconds of additional search, and 16
 threads. There is one continuous optimize call with a 600-second total cap,
 unchanged integer objective and MIPFocus 0, and callback-controlled stopping.
@@ -171,6 +171,50 @@ both formulations preserved the cutoff candidate `F=25,M=113` and reported the
 later `F=25,M=112` separately; neither falsely certified flow time. These smoke
 runs use shortened limits and are not numerical-campaign results. Shell syntax,
 the 16-batch dry run, CSV merging, and diff whitespace checks passed.
+
+On October 8, Tal revised this protocol to measure the first flow-time proof.
+He briefly selected a 300-second overall limit, then corrected it: the first
+phase has 300 seconds, followed by up to 300 extra seconds only if the saved
+candidate's flow remains unproved. `RunTable2SafeWeighted.sh` and
+`RunSafeWeightedStatic.py` now use protocol `safe_integer_flow_timing_v4`, default
+to a 300-second extension allowance, and request `stop_on_flow_proof=True` in
+both backends. Tal then requested replacing time/node sampling with checks
+only when the lower bound improves or a new candidate has smaller flow.
+Unchanged/weaker bounds and movement-only improvements skip proof comparisons.
+Mandatory cutoff and final checks always remain active. The
+flow-specific threshold is cached and recalculated only when flow changes;
+distance bounds and load count are computed once. Monitoring uses existing
+candidate data and adds no solution-vector reads when checking bound changes.
+
+New `first_flow_proof_*` fields record observed solver runtime, elapsed time
+including model construction, certified flow, node count, bound, work,
+observation source, and mathematical method. Unproved or invalidated proof
+times are blank. `final_runtime` remains the total solve time. Callback sampling
+can delay observation, so the time is an observed upper bound rather than an
+exact latent proof instant. There is no additional time/node sampling delay.
+The strongest valid observed bound is reused for a new candidate. Once a proof
+is recorded, routine proof checks stop while contradiction detection and final
+validation remain active. CSV check mode is `bound_or_flow_change`.
+The cutoff candidate and final candidate remain
+separate. Flow proof alone does not stop the first phase early, but the extension
+stops when that candidate is certified, disproved by a lower-flow counterexample,
+or the combined time limit expires. Existing fixed-weight entry points retain their separate certification
+behavior, and the backends keep the old conditional stop as a compatible default
+for callers that do not request the new tracking mode.
+
+Validation of the timing revision: 149 unit/integration tests passed, including
+event filtering, cached-threshold and no-extra-solution-read assertions,
+bound validation against the smallest known feasible weighted objective, reliable proof timing,
+continued first-phase search after flow proof, exact conditional-stop observation
+times, and blank times for unproved instances.
+Six live tiny EF/LF solves matched flow, movements, and coefficient, produced
+valid first-proof timestamps no later than total runtime, and proved both
+objectives. CSV merging, shell syntax, all 16 dry-run commands, and whitespace
+checks passed. Two short-budget live 10x10, three-escort, seed-23 runs in EF/LF
+verified conditional extension and time-limit reporting while preserving the
+initial candidate `F=25,M=113`; LF's later `F=25,M=112` remained separate. No
+flow proof was falsely reported. These are validation runs, not new paper
+experiment results.
 
 ### Earlier two-phase implementation
 

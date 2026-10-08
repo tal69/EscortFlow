@@ -31,6 +31,7 @@ class LoadFlowStaticGurobiConfig:
     certification_target: int | None = None
     weight_scale: int = 100
     flow_proof_extension_time_limit: float | None = None
+    stop_on_flow_proof: bool = True
 
 
 class LoadFlowStaticGurobiSolver:
@@ -484,7 +485,8 @@ class LoadFlowStaticGurobiSolver:
                         targets=tuple(target_set), outputs=self.output_cells,
                         cell_count=self.config.Lx * self.config.Ly, escort_count=len(escort_set),
                         physical_horizon=T, weighted_time_limit=self.config.time_limit,
-                        extension_time_limit=self.config.flow_proof_extension_time_limit)
+                        extension_time_limit=self.config.flow_proof_extension_time_limit,
+                        stop_on_flow_proof=self.config.stop_on_flow_proof)
 
                 def extract_callback_metrics(callback_model):
                     retrievals = [(t, q[(output, t)]) for output in self.output_cells for t in tr]

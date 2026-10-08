@@ -291,6 +291,9 @@ class SafeWeightedRunnerTests(unittest.TestCase):
                 self.assertEqual(config.objective_mode, "weighted_integer")
                 self.assertEqual(config.time_limit, 300)
                 self.assertEqual(config.flow_proof_extension_time_limit, 71)
+                self.assertTrue(config.stop_on_flow_proof)
+                self.assertFalse(hasattr(config, "flow_proof_check_seconds"))
+                self.assertFalse(hasattr(config, "flow_proof_check_nodes"))
                 self.assertEqual(config.threads, 16)
 
     def test_merge_validates_coverage_coefficients_and_budgets(self):
@@ -316,12 +319,17 @@ class SafeWeightedRunnerTests(unittest.TestCase):
         write(dict(row, flow_weight=100))
         with self.assertRaisesRegex(ValueError, "safe objective"):
             runner.merge_batch(source, destination, "7", "2", 300, 71)
+        write(dict(row, flow_proof_check_mode="time_or_nodes"))
+        with self.assertRaisesRegex(ValueError, "safe objective"):
+            runner.merge_batch(source, destination, "7", "2", 300, 71)
 
     def test_cli_defaults_alias_and_existing_result_protection(self):
         arguments = ["--formulation", "escortflow", "-x", "3", "-y", "3", "-O", "0", "0",
                      "-e", "2", "-f", str(self.args.output)]
         args = runner.parse_args(arguments)
         self.assertEqual((args.threads, args.weighted_time_limit, args.extension_time_limit), (16, 300, 300))
+        self.assertFalse(hasattr(args, "flow_proof_check_seconds"))
+        self.assertFalse(hasattr(args, "flow_proof_check_nodes"))
         alias = runner.parse_args(arguments + ["--certification-time-limit", "71"])
         self.assertEqual(alias.extension_time_limit, 71)
         self.assertFalse(hasattr(args, "certification_gap_threshold"))
@@ -329,6 +337,64 @@ class SafeWeightedRunnerTests(unittest.TestCase):
         with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
             runner.parse_args(arguments)
         self.assertEqual(self.args.output.read_text(), "preserve\n")
+
+    def test_first_flow_proof_timing_remains_distinct_from_total_runtime(self):
+        row, _, _ = self.run_fake(
+            first_flow_proof_runtime=12.5, first_flow_proof_cpu_time=13.2,
+            first_flow_proof_flowtime=4, first_flow_proof_source="weighted_gap",
+            first_flow_proof_method="weighted_gap",
+            first_flow_proof_node_count=24, first_flow_proof_scaled_bound=130,
+            first_flow_proof_work=2.5)
+        self.assertEqual(row["first_flow_proof_runtime"], 12.5)
+        self.assertEqual(row["first_flow_proof_cpu_time"], 13.2)
+        self.assertEqual(row["first_flow_proof_flowtime"], 4)
+        self.assertEqual(row["first_flow_proof_source"], "weighted_gap")
+        self.assertEqual(row["first_flow_proof_method"], "weighted_gap")
+        self.assertEqual(row["final_runtime"], 371)
+        self.assertEqual(row["weighted_runtime"], 300)
+
+    def test_unobserved_flow_proof_time_is_missing(self):
+        row, _, _ = self.run_fake()
+        self.assertIsNone(row["first_flow_proof_runtime"])
+        self.assertIsNone(row["first_flow_proof_cpu_time"])
+
+    def test_contradictory_recorded_proof_clears_claims_but_keeps_metrics(self):
+        exact = self.solution(weighted_proven=True, status_name="OPTIMAL", scaled_best_bound=154, runtime=2)
+        row, _, _ = self.run_fake(initial=exact, final=exact,
+                                  first_flow_proof_runtime=1, first_flow_proof_flowtime=3)
+        self.assertIn("contradicts", row["error"])
+        self.assertEqual(row["flowtime"], 4)
+        self.assertEqual(row["final_runtime"], 2)
+        for key in ["weighted_proven", "final_weighted_proven", "flow_proven", "lexicographic_proven",
+                    "final_flow_proven", "final_lexicographic_proven"]:
+            self.assertEqual(row[key], 0)
+        self.assertIsNone(row["first_flow_proof_runtime"])
+
+    def test_invalidated_proof_is_a_recorded_error_with_no_certificates(self):
+        row, _, _ = self.run_fake(flow_proof_invalidated=True,
+                                  flow_proof_invalidation_reason="BETTER_FLOW_AFTER_RECORDED_PROOF")
+        self.assertIn("Flow proof invalidated", row["error"])
+        self.assertEqual(row["flow_proof_invalidated"], 1)
+        self.assertEqual(row["final_runtime"], 371)
+        self.assertEqual(row["flow_proven"], 0)
+
+    def test_cli_accepts_zero_extension_and_rejects_obsolete_check_intervals(self):
+        arguments = ["--formulation", "loadflow", "-x", "3", "-y", "3", "-O", "0", "0",
+                     "-e", "2", "-f", str(self.args.output)]
+        args = runner.parse_args(arguments + ["--extension-time-limit", "0"])
+        self.assertEqual(args.extension_time_limit, 0)
+        for option, value in [("--extension-time-limit", "-1"), ("--extension-time-limit", "nan"),
+                              ("--flow-proof-check-seconds", "0"), ("--flow-proof-check-nodes", "0"),
+                              ("--flow-proof-check-nodes", "1.5")]:
+            with self.subTest(option=option, value=value), self.assertRaises(SystemExit), \
+                    patch("sys.stderr", new=io.StringIO()):
+                runner.parse_args(arguments + [option, value])
+
+    def test_report_identifies_bound_or_flow_change_checks(self):
+        row, _, _ = self.run_fake()
+        self.assertEqual(row["flow_proof_check_mode"], "bound_or_flow_change")
+        self.assertNotIn("flow_proof_check_seconds", row)
+        self.assertNotIn("flow_proof_check_nodes", row)
 
 
 if __name__ == "__main__":

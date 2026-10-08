@@ -41,6 +41,8 @@ def validate_objective_mode(config):
             raise ValueError("The flow-proof extension time limit must be finite and nonnegative")
         if config.time_limit is None or not math.isfinite(config.time_limit) or config.time_limit <= 0:
             raise ValueError("A flow-proof extension requires a positive finite weighted time limit")
+        if not isinstance(getattr(config, "stop_on_flow_proof", True), bool):
+            raise ValueError("stop_on_flow_proof must be a boolean")
     if mode not in {"legacy", "weighted_integer", "flow_certificate"}:
         raise ValueError(f"Unknown objective mode: {mode}")
     if mode == "legacy":
@@ -289,6 +291,9 @@ def solve_weighted_or_certificate(model, flow_expr, movement_expr, extract_solut
                 result["absolute_gap"] = abs(result["flowtime"] - bound)
         if continuation is not None:
             result.update(continuation.finalize(result))
+            proof_runtime = result.get("first_flow_proof_runtime")
+            result["first_flow_proof_cpu_time"] = (
+                None if proof_runtime is None else model_build_time + proof_runtime)
             snapshot = result["phase1_snapshot"]
             snapshot["cpu_time_is_estimate"] = snapshot["snapshot_source"] != "SOLVE_FINISHED"
             snapshot["cpu_time"] = (model_build_time + snapshot["runtime"]

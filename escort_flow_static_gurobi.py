@@ -28,6 +28,7 @@ class StaticGurobiConfig:
     certification_target: int | None = None
     weight_scale: int = 100
     flow_proof_extension_time_limit: float | None = None
+    stop_on_flow_proof: bool = True
 
 
 class StaticEscortFlowGurobiSolver:
@@ -695,7 +696,8 @@ class StaticEscortFlowGurobiSolver:
                     targets=tuple(target_set), outputs=self.output_cells,
                     cell_count=self.config.Lx * self.config.Ly, escort_count=len(escort_set),
                     physical_horizon=T + 1, weighted_time_limit=self.config.time_limit,
-                    extension_time_limit=self.config.flow_proof_extension_time_limit)
+                    extension_time_limit=self.config.flow_proof_extension_time_limit,
+                    stop_on_flow_proof=self.config.stop_on_flow_proof)
             return self._solve_lexicographic_model(
                 model, x_a, x_e, q, T, solve_start, flow_proof_context=flow_proof_context)
         model.optimize()
