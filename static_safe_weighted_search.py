@@ -80,8 +80,8 @@ class SafeWeightedContinuation:
         objective = self.flow_weight * flow + movements
         if not self._finite(reported_objective) or abs(reported_objective - objective) > (self.flow_weight + 1) * 1e-4 + CERTIFICATE_GAP_MARGIN:
             raise ValueError("Callback weighted objective disagrees with its flow and movement expressions")
-        if flow < 0 or movements < 0:
-            raise ValueError("Callback returned invalid integer weighted objective components")
+        if flow < self.distance_sum or movements < self.distance_sum:
+            raise ValueError("Callback objective components are below the target-distance lower bound")
         candidate = dict(has_solution=True, flowtime=flow, movements=movements,
                          scaled_objective=objective, incumbent_runtime=runtime)
         if self.best_observed_weighted_objective is None or objective < self.best_observed_weighted_objective:
@@ -126,7 +126,8 @@ class SafeWeightedContinuation:
             candidate, self.context["targets"], self.context["outputs"],
             self.context["cell_count"], self.context["escort_count"],
             self.context["physical_horizon"], self.flow_weight)
-        if candidate.get("has_solution") and status in RELIABLE_FINISHED_STATUSES and bound is not None:
+        if (candidate.get("has_solution") and status in RELIABLE_FINISHED_STATUSES
+                and bound is not None and proof["reason"] in {"", "WEIGHTED_GAP_TOO_LARGE"}):
             objective = self.flow_weight * candidate["flowtime"] + candidate["movements"]
             if self._finite(bound) and bound <= objective + CERTIFICATE_GAP_MARGIN and abs(objective - bound) < 1 - CERTIFICATE_GAP_MARGIN:
                 params = safe_weight_parameters(
@@ -156,7 +157,7 @@ class SafeWeightedContinuation:
             gap_horizon_sufficient=self.context["physical_horizon"] >= better_horizon,
             bound_threshold=(self.flow_weight * (flow - 1) + self.load_count * better_horizon
                              + WEIGHTED_BOUND_MARGIN + CERTIFICATE_GAP_MARGIN),
-            weighted_optimum_scope=(self.flow_weight >= self.load_count * flow_horizon + 1
+            weighted_optimum_scope=(self.flow_weight >= self.load_count * flow_horizon - self.distance_sum + 1
                                     and self.context["physical_horizon"] >= flow_horizon),
         )
 
@@ -172,7 +173,8 @@ class SafeWeightedContinuation:
         flow, movements = incumbent.get("flowtime"), incumbent.get("movements")
         if (not isinstance(flow, (int, float)) or not isinstance(movements, (int, float))
                 or not math.isfinite(flow) or not math.isfinite(movements)
-                or flow < self.distance_sum or movements < 0 or int(flow) != flow or int(movements) != movements
+                or flow < self.distance_sum or movements < self.distance_sum
+                or int(flow) != flow or int(movements) != movements
                 or incumbent.get("weight_scale", self.flow_weight) != self.flow_weight):
             return None
         objective = self.flow_weight * flow + movements
@@ -337,7 +339,7 @@ class SafeWeightedContinuation:
             flow, movements = result.get("flowtime"), result.get("movements")
             if (isinstance(flow, (int, float)) and isinstance(movements, (int, float))
                     and math.isfinite(flow) and math.isfinite(movements)
-                    and flow >= self.distance_sum and movements >= 0
+                    and flow >= self.distance_sum and movements >= self.distance_sum
                     and int(flow) == flow and int(movements) == movements
                     and result.get("weight_scale", self.flow_weight) == self.flow_weight
                     and final_objective is not None and self._finite(final_objective)

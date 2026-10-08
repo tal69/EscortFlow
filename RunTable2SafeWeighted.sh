@@ -17,8 +17,9 @@ usage() {
 Usage: bash RunTable2SafeWeighted.sh [options]
 
 Run escort-flow and load-flow Table 2(a,b) with the same greedy warm starts.
-Each instance uses integer R*F+M, with R=(N-e)*H+1 and a sufficient horizon H
-derived from its greedy feasible flow time. The first phase attempts both
+Each instance uses integer R*F+M, with R=(N-e)*H-D+1, where D=sum(d_i) is the
+nearest-output distance lower bound and H is a sufficient horizon derived
+from its greedy feasible flow time. The first phase attempts both
 objectives for up to 300 solver seconds. A gap below 1 proves global
 lexicographic optimality. Check flow optimality when the lower bound improves
 or a smaller candidate flow is found. Record the first observed proof time.
@@ -105,7 +106,7 @@ if sys.version_info < (3, 10):
 import numpy
 import gurobipy as gp
 sys.path.insert(0, sys.argv[1])
-from RunSafeWeightedStatic import parse_range, positive_number, nonnegative_number
+from RunSafeWeightedStatic import PROTOCOL, parse_range, positive_number, nonnegative_number
 seed_values = parse_range(sys.argv[3], minimum=0)
 weighted = positive_number(sys.argv[5])
 extension = nonnegative_number(sys.argv[6])
@@ -115,7 +116,9 @@ print("Threads:", sys.argv[2])
 print("Seeds:", sys.argv[3], "count:", len(seed_values))
 print("Table part:", sys.argv[4])
 print(f"First-phase cutoff: {weighted:g} seconds; conditional extension: {extension:g} seconds; total cap: {weighted+extension:g} seconds")
-print("Objective: integer R*F+M; R=(N-e)*H+1 per instance; MIPGap=0; MIPGapAbs=0.999")
+print("Protocol:", PROTOCOL)
+print("Objective: integer R*F+M; R=(N-e)*H-D+1 per instance; D=sum(d_i); MIPGap=0; MIPGapAbs=0.999")
+print("Movement bounds: lower D=sum(d_i); upper U=(N-e)*H; coefficient R=U-D+1")
 print("Horizon: H=greedy_F-sum(d_i)+max(d_i), covering a global lexicographic optimum")
 print("Flow proof checks: improved lower bound or smaller candidate flow; mandatory cutoff and final checks")
 print("Cached flow criterion; unchanged bounds and movement-only improvements skip proof comparisons")

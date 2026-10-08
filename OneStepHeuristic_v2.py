@@ -464,6 +464,11 @@ def SolveGreedy(
     if retrieval_mode == "leave":
         A = {loc: target_id for loc, target_id in all_targets.items() if loc not in O}
         current_output_stays = {loc: target_id for loc, target_id in all_targets.items() if loc in O}
+    elif retrieval_mode == "continue":
+        # Retrieval changes target status, not occupancy. Targets at outputs
+        # are already served at time zero and remain ordinary blocking loads.
+        A = {loc: target_id for loc, target_id in all_targets.items() if loc not in O}
+        current_output_stays = {}
     else:
         A = dict(all_targets)
         current_output_stays = {}
@@ -509,6 +514,11 @@ def SolveGreedy(
             A = {loc: target_id for loc, target_id in next_A.items() if loc not in O}
             E = set(next_E) | set(current_output_stays)
             current_output_stays = {loc: target_id for loc, target_id in next_A.items() if loc in O}
+        elif retrieval_mode == "continue":
+            # Arrival after this transition is the retrieval time. Counting
+            # these targets in another iteration adds a spurious unit of F.
+            A = {loc: target_id for loc, target_id in next_A.items() if loc not in O}
+            E = next_E
         else:
             A, E = next_A, next_E
 
@@ -523,9 +533,8 @@ def SolveGreedy(
         movements += len(mv)
 
 
-        if makespan >= max_steps:
-            print(f"Panic: could not solve in {max_steps} steps")
-            exit(1)
+        if A and makespan >= max_steps:
+            raise RuntimeError(f"Greedy could not retrieve every target in {max_steps} steps")
 
     if return_trace:
         return makespan, flow_time, movements, move_history, escort_move_history, target_move_history

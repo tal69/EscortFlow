@@ -296,7 +296,7 @@ class WeightedIntegrationTests(unittest.TestCase):
                    dict(objective_mode="flow_certificate", certification_target=-1),
                    dict(objective_mode="flow_certificate", certification_target=8.5)]
         for backend in self.BACKENDS:
-            special = [dict(alpha=1), dict(move_method="LM")] if backend[0] == "load" else [dict(retrieval_mode="continue")]
+            special = [dict(alpha=1), dict(move_method="LM")] if backend[0] == "load" else [dict(retrieval_mode="stay")]
             for overrides in invalid + special:
                 with self.subTest(backend=backend[0], overrides=overrides), self.assertRaises(ValueError):
                     backend[1](self.configuration(backend, **overrides))

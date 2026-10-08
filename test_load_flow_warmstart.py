@@ -125,7 +125,7 @@ class LoadFlowWarmStartTests(unittest.TestCase):
     def test_unsupported_cli_combinations_fail_before_solving(self):
         script = Path(__file__).with_name("LoadFlowStatic.py")
         for extra in (["--lm"], ["--lp"], ["--opl"],
-                      ["--retrieval_mode", "continue"], ["--dp_file", "missing.p"]):
+                      ["--retrieval_mode", "stay"], ["--dp_file", "missing.p"]):
             with self.subTest(extra=extra):
                 result = subprocess.run(
                     [sys.executable, str(script), "-x", "3", "-y", "2", "-O", "0", "0",

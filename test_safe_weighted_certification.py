@@ -30,24 +30,54 @@ class SafeWeightMathematicsTests(unittest.TestCase):
                                     horizon, weight)
 
     def test_safe_weight_uses_flow_upper_bound_and_initial_load_count(self):
-        # d=(1,2); H=5-3+2=4, at most ten loads move in each period.
+        # d=(1,2); H=5-3+2=4, at most ten loads move in each period,
+        # and every plan needs at least D=3 movements: R=40-3+1=38.
         self.assertEqual(safe_weight_parameters(self.TARGETS, self.OUTPUTS, 12, 2, 5),
-                         dict(flow_weight=41, movement_bound=40, flow_horizon=4))
+                         dict(flow_weight=38, movement_bound=40,
+                              movement_lower_bound=3, flow_horizon=4))
         self.assertEqual(safe_weight_parameters(((0, 0),), self.OUTPUTS, 12, 2, 0),
-                         dict(flow_weight=1, movement_bound=0, flow_horizon=0))
+                         dict(flow_weight=1, movement_bound=0,
+                              movement_lower_bound=0, flow_horizon=0))
+
+    def test_safe_weight_stays_positive_when_movement_bounds_coincide(self):
+        params = safe_weight_parameters(((1, 0),), self.OUTPUTS, 2, 1, 1)
+        self.assertEqual(params["flow_weight"], 1)
+        self.assertEqual(params["movement_bound"], params["movement_lower_bound"])
+        empty = safe_weight_parameters((), (), 2, 2, 0)
+        self.assertEqual(empty["flow_weight"], 1)
+        self.assertEqual(empty["flow_horizon"], 0)
 
     def test_safe_weight_separates_every_worse_flow_from_bounded_lex_optimum(self):
         # This exhausts a small abstract objective space, including plans with
         # redundant movement counts exceeding U. Only a lex-optimal plan needs
         # to satisfy the movement upper bound used in the proof.
         for upper_movements in range(12):
-            weight = upper_movements + 1
-            for optimal_flow in range(5):
-                for optimal_movements in range(upper_movements + 1):
-                    optimal_value = weight * optimal_flow + optimal_movements
-                    for worse_flow in range(optimal_flow + 1, optimal_flow + 4):
-                        for worse_movements in range(2 * upper_movements + 3):
-                            self.assertLess(optimal_value, weight * worse_flow + worse_movements)
+            for lower_movements in range(upper_movements + 1):
+                weight = upper_movements - lower_movements + 1
+                for optimal_flow in range(5):
+                    for optimal_movements in range(lower_movements, upper_movements + 1):
+                        optimal_value = weight * optimal_flow + optimal_movements
+                        for worse_flow in range(optimal_flow + 1, optimal_flow + 4):
+                            for worse_movements in range(lower_movements, 2 * upper_movements + 3):
+                                self.assertLess(optimal_value, weight * worse_flow + worse_movements)
+
+    def test_new_weight_flow_certificate_uses_its_own_bound_and_strict_threshold(self):
+        # R=38, Fw=5, Mw=7, U_minus=30: critical lower bound 182,
+        # and the gap threshold is 15 before numerical safeguards.
+        for bound, proven in ((182, False), (182.0010005, False), (182.001002, True)):
+            with self.subTest(bound=bound):
+                result = self.certificate(weight=38, bound=bound)
+                self.assertEqual(result["flow_proven"], proven)
+                self.assertAlmostEqual(result["weighted_bound_threshold"], 182.001)
+                self.assertAlmostEqual(result["weighted_gap_threshold"], 14.999)
+        result = self.certificate(weight=38, bound=183)
+        self.assertTrue(result["flow_proven"])
+        self.assertEqual(result["scaled_absolute_gap"], 14)
+
+    def test_movement_count_below_distance_bound_cannot_be_certified(self):
+        result = self.certificate(flow=3, movements=2, weight=38, bound=115.5)
+        self.assertFalse(result["flow_proven"])
+        self.assertEqual(result["reason"], "MOVEMENTS_BELOW_DISTANCE_BOUND")
 
     def test_safe_parameters_reject_impossible_or_noninteger_inputs(self):
         for cell_count, escorts, flow in ((0, 0, 5), (12, 13, 5), (12, 11, 5),

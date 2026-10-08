@@ -1,8 +1,8 @@
 # Weighted retrieval and flow-time certification
 
-Method notes for the revision, October 8, 2026. These notes describe the mathematical claims and implemented experiment protocol. They do not assert that the new experiments have already established those claims.
+Method notes for the revision, updated October 9, 2026. These notes describe the mathematical claims and implemented experiment protocol. They do not assert that the new experiments have already established those claims.
 
-## Additional version: sufficient integer weights and flow-proof timing
+## Current version: sufficient integer weights and flow-proof timing (v5)
 
 `RunSafeWeightedStatic.py` and `RunTable2SafeWeighted.sh` implement a separate
 protocol from the fixed `F+0.01*M` experiment described below. They use an
@@ -15,27 +15,79 @@ initial number of escorts, and `d_i` target i's nearest-output Manhattan distanc
 Set
 
 ```text
-H_g = F_g - sum_i(d_i) + max_i(d_i)
-U_g = (N-e)*H_g
-R   = U_g + 1.
+D   = sum_i(d_i)
+K   = N-e
+H_g = F_g - D + max_i(d_i)
+U_g = K*H_g
+R   = U_g - D + 1.
 ```
 
-The weighted horizon covers `H_g`, as well as the complete greedy trace. In
-escort-flow the implementation uses `T=max(H_g,C_g-1)`; in load-flow it uses
-`T=max(H_g,C_g+1)`, where `C_g` is the greedy makespan. These indices reflect
-different terminal/retrieval conventions. A horizon supplied only by the greedy
+Every feasible retrieval plan has `M >= D`: each target requires at least its
+nearest-output Manhattan distance in individual load movements, and blocking-load
+movements can only increase the total.
+
+The weighted horizon covers `H_g`, as well as the complete greedy trace. Both
+formulations use the same physical horizon `H=max(H_g,C_g+1)`, where `C_g`
+is the greedy makespan. Escort-flow uses movement index `T=H-1`, with arrivals
+at `t+1`; load-flow uses retrieval index `T=H`. The extra greedy tail preserves
+output service in the complete warm start. A horizon supplied only by the greedy
 makespan would not be sufficient for the following global guarantee.
 
 To prove the guarantee, choose a minimum-flow plan with the fewest movements.
 Its flow is at most `F_g`, so its final retrieval occurs by `H_g`. Remove all
 movements after its final retrieval. At most `N-e` loads can move in a period,
 so this plan has at most `U_g` movements and is represented by the weighted
-model. Any plan with flow time at least one greater has weighted objective at
-least `R*(F_star+1)`, whereas this plan's objective is at most
-`R*F_star+U_g < R*(F_star+1)`. Among minimum-flow plans, minimizing the weighted
-objective minimizes movements. This argument needs a bound on an optimal
-representative, not on every plan with redundant post-retrieval movements.
-The zero-flow case gives `H_g=U_g=0` and `R=1`.
+model. Write its objectives as `(F_star,M_star)`, with `D <= M_star <= U_g`.
+Any plan with flow time at least one greater has weighted objective at least
+`R*(F_star+1)+D`, whereas the selected plan's objective is at most
+`R*F_star+U_g`. Their separation is at least
+
+```text
+R + D - U_g = 1.
+```
+
+Thus `R > U_g-D` suffices, and the integer choice `R=U_g-D+1` guarantees
+lexicographic optimality. Among minimum-flow plans, minimizing the weighted
+objective minimizes movements. This argument needs an upper bound on an optimal
+representative and a lower bound on every feasible plan, not an upper bound on
+every plan with redundant post-retrieval movements. The same feasible
+representative establishes `U_g >= D`, so `R >= 1`. Invalid inputs that violate
+this consistency must not be treated as a valid coefficient certificate.
+The zero-flow case gives `D=H_g=U_g=0` and `R=1`.
+
+### Retrieval modes and expanded campaigns
+
+The same sufficient coefficient, horizon and lower-bound certificate apply to
+leave and continue retrieval. In leave mode the number of stored loads decreases;
+in continue mode it stays at `K=N-e`. In both modes, at most `K` loads move in
+one period and all movement can stop after the final target retrieval. The
+nearest-output distance bound and the last-retrieval bound are unchanged.
+
+`RunSafeWeightedStatic.py --retrieval-mode continue` uses the common continue
+greedy trace. A target is served immediately upon arrival and becomes an
+ordinary blocking load, preserving escort count. Initially output-located
+targets are already served at time zero. The greedy flow time sums arrival
+times without an extra post-arrival iteration. EF represents served targets
+implicitly as blockers; LF explicitly transfers their flow from commodity 1
+to commodity 2 through `q`. Unlike leave mode, continue mode has no output
+service takt blocking movement of the retrieved load. Complete starts preserve
+these conventions, including initial output targets and repeated use of an output.
+
+`Run70Percent.py` now prepares four additional four-target Table 2(b) rows on
+all four layouts, using escort counts 27, 30, 48 and 81. Occupancy is 64/91 on
+13x7 and exactly 70% on the other layouts. `RunContinue.py` combines 2, 4 and
+6 targets with escort counts 8, 12, 16 and the approximately 70% category on
+each layout. `RunTable2Targets.py` prepares the same categories in leave mode
+with 2 and 6 targets. All use the shared `RunStaticCampaign.py`, frozen source
+copies, common coefficients and physical horizons, and the existing v5
+main/extension reporting rules. These campaigns are intended for the same Linux
+machine, native solver version and thread count as the main numerical study.
+
+Mode labels and source hashes distinguish runs; existing leave-mode files and
+the earlier Mac 70% campaigns must remain separate. No stored result is rewritten.
+The launchers reject mixed retrieval modes when merging CSVs. Their native
+Gurobi preflight records the actual linked solver version, rather than relying
+only on the Python package version.
 
 The weighted search uses one uninterrupted optimization call with a 300-second
 first-phase limit and a conditional extension of up to 300 seconds. It records
@@ -82,13 +134,13 @@ incumbent. The final weighted incumbent is also reported in separate columns.
 Raw callback termination status is distinguished from the proof outcome.
 
 For the gap check, let `(F_w,M_w)` be the frozen initial incumbent and `L_Q` a valid
-weighted lower bound. Put `B=F_w-1`. If `B < sum_i(d_i)`, the distance bound
+weighted lower bound. Put `B=F_w-1`. If `B < D`, the distance bound
 already proves minimum flow. Otherwise a hypothetical minimum-flow plan with
 flow at most `B` can be normalized to have
 
 ```text
-H_minus = B - sum_i(d_i) + max_i(d_i)
-U_minus = (N-e)*H_minus.
+H_minus = B - D + max_i(d_i)
+U_minus = K*H_minus.
 ```
 
 Provided the weighted model covers that physical horizon, such a plan would
@@ -99,8 +151,16 @@ L_Q > R*B + U_minus
 ```
 
 proves minimum flow. Equivalently, with `gap=R*F_w+M_w-L_Q`, the sufficient
-threshold is `gap < R+M_w-U_minus`. The implementation leaves a `0.001` margin
-from this critical boundary, plus the common numerical comparison margin.
+threshold remains `gap < R+M_w-U_minus`. Substituting the v5 coefficient gives
+
+```text
+R+M_w-U_minus = 1 + M_w - D + K*(F_g-F_w+1).
+```
+
+Only this substitution changes; the lower-bound proof and the independent
+full-integer-gap criterion below one are unchanged. The implementation leaves a
+`0.001` margin from the flow-certificate boundary, plus the common numerical
+comparison margin.
 Missing, nonfinite, inconsistent, or unreliable solver bounds cannot establish
 this gap certificate. The threshold is derived for the frozen candidate and
 continues to refer to that same candidate as the bound improves. Any separate
@@ -131,14 +191,17 @@ time/node sampling delay, but a long operation without a supported callback can
 delay observation. If proof is first established by the final-result check,
 the timestamp is the final runtime. Unproved cases have blank timing fields.
 Unreliable final solver statuses or a later contradiction invalidate recorded
-proof timing. Protocol `safe_integer_flow_timing_v4`, with recorded check mode
+proof timing. Protocol `safe_integer_flow_timing_v5`, with recorded check mode
 `bound_or_flow_change`, separates these results from the earlier untimed and
 interval-based campaigns. Gurobi still invokes callbacks at its own checkpoints;
 the event filtering takes place inside the callback.
 
-CSV rows identify the coefficient, horizon, movement bound, integer and
+CSV rows identify the coefficient, horizon, movement bounds, integer and
 normalized objectives/bounds/gaps, gap-certificate threshold and outcome,
 proof source, time before/after the reporting cutoff, and any counterexample.
+The new `safe_movement_lower_bound` field records `D`. The existing
+`safe_movement_bound` field continues to record the upper bound `U_g`, not the
+range `U_g-D`; therefore `R=safe_movement_bound-safe_movement_lower_bound+1`.
 The main solution, bound, and gap columns belong to the initial reporting
 cutoff; final columns belong to the end of the continuous search. A certificate
 using a later bound must not be represented as a bound obtained within the
@@ -151,9 +214,30 @@ entry points and their separate pure-flow certification remain unchanged.
 The implementation uses Gurobi's documented [MIP and MIPSOL callback data](https://docs.gurobi.com/projects/optimizer/en/current/reference/numericcodes/callbacks.html)
 and [callback termination mechanism](https://docs.gurobi.com/projects/optimizer/en/current/reference/python/model.html#Model.terminate).
 
-## Fixed-weight objective and claims
+### Protocol history and result separation
 
-Let `F` denote total integer flow time and `M` the integer number of individual one-cell load movements, including movements of blocking loads. A block movement contributes its length to `M`. The revised problem objective is
+Archived protocol `safe_integer_flow_timing_v4` used `R=U_g+1`. That larger
+coefficient remains sufficient, and changing to v5 does not invalidate earlier
+certificates established under their recorded coefficient and horizon. V5 uses
+the movement lower bound to reduce the coefficient and records the new CSV field.
+Timing, event filtering, frozen-cutoff reporting, and the conditional extension
+retain their existing rules.
+
+Start any v5 campaign in a fresh results directory. Preserve v4 outputs and their
+protocol identifiers; do not append v5 rows to a v4 campaign or reinterpret old
+weighted bounds, gaps, or proof times under the new coefficient. A solver bound
+belongs to its objective, so an old bound cannot be reused as a bound on the new
+`R*F+M`. Recomputing an incumbent's score from its `F` and `M` does not convert its
+old solver bound or timing into a v5 result.
+
+Validation of v5: 154 unit/integration tests passed across the safe-weight, callback timing, runner, fixed-weight certification, warm-start, and lexicographic suites. Six tiny paired EF/LF solves (3x2, two targets, two escorts, seeds 1, 3, and 4) matched in coefficient, flow time, and movement count; all certified both objectives with one optimization call. Source/destination CSV validation, protocol separation, shell syntax, and whitespace checks passed. These are smoke checks, not the full numerical campaign. Evidence: `revision_R1/v5_tight_weight_smoke_rgn8ddbj/summary.json`.
+
+## Earlier fixed-weight objective and claims
+
+The following sections document the separate fixed-weight workflow and its
+certification rationale. They do not redefine the current v5 safe-weight protocol.
+
+Let `F` denote total integer flow time and `M` the integer number of individual one-cell load movements, including movements of blocking loads. A block movement contributes its length to `M`. The earlier fixed-weight protocol uses
 
 ```text
 minimize Z = F + alpha * M, with alpha = 0.01.

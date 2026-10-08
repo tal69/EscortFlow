@@ -166,10 +166,10 @@ class ContinuousSearchTests(unittest.TestCase):
     def test_late_equal_flow_movement_improvement_does_not_replace_snapshot(self):
         self.seed_candidate(bound=180)
         # The first callback after the cutoff is itself an improved solution.
-        self.event(GRB.Callback.MIPSOL, 301, flow=5, movements=2, best=212, bound=180)
+        self.event(GRB.Callback.MIPSOL, 301, flow=5, movements=3, best=212, bound=180)
         self.assertEqual(self.model.termination_count, 0)
-        self.event(GRB.Callback.MIP, 310, best=207, bound=195)
-        extra = self.callback.finalize(self.result(movements=2, runtime=310))
+        self.event(GRB.Callback.MIP, 310, best=208, bound=195)
+        extra = self.callback.finalize(self.result(movements=3, runtime=310))
         snapshot = extra["phase1_snapshot"]
         self.assertEqual((snapshot["flowtime"], snapshot["movements"]), (5, 7))
         self.assertEqual(snapshot["scaled_objective"], 212)
@@ -272,13 +272,13 @@ class ContinuousSearchTests(unittest.TestCase):
     def test_final_improved_solution_is_separate_and_finalize_does_not_mutate_it(self):
         self.seed_candidate(bound=180)
         self.event(GRB.Callback.MIP, 301, bound=180)
-        self.event(GRB.Callback.MIPSOL, 320, flow=5, movements=2, best=212, bound=195)
-        final = self.result(movements=2, bound=195, runtime=320)
+        self.event(GRB.Callback.MIPSOL, 320, flow=5, movements=3, best=212, bound=195)
+        final = self.result(movements=3, bound=195, runtime=320)
         saved = dict(final)
         extra = self.callback.finalize(final)
         self.assertEqual(final, saved)
         self.assertEqual(extra["phase1_snapshot"]["movements"], 7)
-        self.assertEqual(final["movements"], 2)
+        self.assertEqual(final["movements"], 3)
         self.assertEqual(extra["phase1_snapshot"]["scaled_best_bound"], 180)
         self.assertEqual(final["scaled_best_bound"], 195)
 
@@ -655,6 +655,67 @@ class FlowProofTimingTests(unittest.TestCase):
                     self.assertEqual(method or "", authoritative["proof_source"])
 
 
+class TightenedCoefficientTests(unittest.TestCase):
+    def callback(self, weight=38):
+        return SafeWeightedContinuation(
+            CallbackExpression([("flow", 1)]),
+            CallbackExpression([("movement", 1)]), weight,
+            dict(ContinuousSearchTests.CONTEXT))
+
+    @staticmethod
+    def incumbent(weight=38, movements=7):
+        return dict(has_solution=True, flowtime=5, movements=movements,
+                    scaled_objective=5 * weight + movements, weight_scale=weight)
+
+    def test_full_optimality_scope_accepts_new_minimum_and_rejects_one_less(self):
+        # D=3, H(5)=4 and U=40, so the sufficient coefficient is 38.
+        # A larger previously used coefficient remains valid.
+        for weight, sufficient in ((37, False), (38, True), (41, True)):
+            with self.subTest(weight=weight):
+                callback = self.callback(weight)
+                self.assertEqual(callback._build_flow_criterion(5)["weighted_optimum_scope"], sufficient)
+                incumbent = self.incumbent(weight)
+                bound = incumbent["scaled_objective"] - .5
+                method = callback._cached_flow_proof_method(incumbent, bound)
+                self.assertEqual(method == "weighted_optimum", sufficient)
+                self.assertEqual(method, callback._proof(incumbent, bound)["proof_source"])
+
+    def test_new_weight_cached_and_final_flow_checks_agree_at_strict_boundary(self):
+        callback = self.callback()
+        incumbent = self.incumbent()
+        for bound, proven in ((182, False), (182.0010005, False), (182.001002, True), (183, True)):
+            with self.subTest(bound=bound):
+                method = callback._cached_flow_proof_method(incumbent, bound)
+                authoritative = callback._proof(incumbent, bound)
+                self.assertEqual(bool(method), proven)
+                self.assertEqual(authoritative["flow_proven"], proven)
+                self.assertEqual(method or "", authoritative["proof_source"])
+
+    def test_invalid_movement_count_cannot_bypass_checks_with_a_tight_gap(self):
+        callback = self.callback()
+        incumbent = self.incumbent(movements=2)
+        bound = incumbent["scaled_objective"] - .5
+        self.assertIsNone(callback._cached_flow_proof_method(incumbent, bound))
+        self.assertFalse(callback._proof(incumbent, bound)["flow_proven"])
+        model = CallbackModel().set_event(
+            GRB.Callback.MIPSOL, 20, flow=5, movements=2,
+            objective=incumbent["scaled_objective"], bound=bound)
+        callback(model, GRB.Callback.MIPSOL)
+        with self.assertRaisesRegex(RuntimeError, "callback failed") as error:
+            callback.raise_if_failed()
+        self.assertRegex(str(error.exception.__cause__), "target-distance lower bound")
+
+    def test_invalid_final_movement_count_is_not_trusted_as_a_weighted_incumbent(self):
+        callback = self.callback()
+        result = self.incumbent(movements=2)
+        result.update(runtime=20, status_name="TIME_LIMIT",
+                      scaled_best_bound=result["scaled_objective"] - .5)
+        extra = callback.finalize(result)
+        self.assertIsNone(callback.best_observed_weighted_objective)
+        self.assertFalse(extra["flow_proven"])
+        self.assertFalse(extra["final_flow_proven"])
+
+
 class CountingModel:
     def __init__(self, model):
         self.model = model
@@ -693,7 +754,7 @@ class LiveContinuousSearchTests(unittest.TestCase):
             model.Params.Threads = 1
             model.Params.MIPFocus = 0
             flow = model.addVar(lb=3, vtype=GRB.INTEGER)
-            movement = model.addVar(lb=2, vtype=GRB.INTEGER)
+            movement = model.addVar(lb=3, vtype=GRB.INTEGER)
             flow_expression, movement_expression = gp.LinExpr(flow), gp.LinExpr(movement)
             context = dict(ContinuousSearchTests.CONTEXT,
                            weighted_time_limit=15, extension_time_limit=2)
@@ -702,7 +763,7 @@ class LiveContinuousSearchTests(unittest.TestCase):
                 lambda: dict(makespan=2, animation_moves=[]),
                 status_name=StaticEscortFlowGurobiSolver._status_name,
                 solve_start=time.perf_counter(), mode="weighted_integer",
-                weight_scale=41, flow_proof_context=context)
+                weight_scale=38, flow_proof_context=context)
         self.assertTrue(model.disposed)
         self.assertEqual(len(model.optimize_calls), 1)
         call = model.optimize_calls[0]
@@ -712,13 +773,13 @@ class LiveContinuousSearchTests(unittest.TestCase):
         self.assertEqual(call["absolute_gap"], .999)
         self.assertIsInstance(call["callback"], SafeWeightedContinuation)
         self.assertEqual(len(model.objectives), 1)
-        self.assertEqual([model.objectives[0][0].getCoeff(i) for i in range(2)], [41, 1])
+        self.assertEqual([model.objectives[0][0].getCoeff(i) for i in range(2)], [38, 1])
         self.assertTrue(result["weighted_proven"])
         self.assertTrue(result["flow_proven"])
         self.assertTrue(result["final_flow_proven"])
         self.assertFalse(result["extension_used"])
         self.assertEqual(result["optimization_calls"], 1)
-        self.assertEqual((result["flowtime"], result["movements"]), (3, 2))
+        self.assertEqual((result["flowtime"], result["movements"]), (3, 3))
         self.assertEqual(result["phase1_snapshot"]["flowtime"], 3)
         self.assertEqual(result["phase1_snapshot"]["snapshot_source"], "SOLVE_FINISHED")
 

@@ -221,13 +221,30 @@ greedy warm start. The solver records the first observed flow-time proof while
 the first phase continues toward proving both objectives. If flow time remains
 unproved at the cutoff, the extension attempts to certify that saved solution.
 
-For each instance, the program derives a sufficient physical horizon `H` from
-the greedy solution's flow time and target-to-output distance lower bounds.
-With `N` cells and `e` escorts, it minimizes the integer objective `R*F+M`, where
-`R=(N-e)*H+1`. The weighted model covers this sufficient horizon, which can be
-longer than the old greedy-makespan horizon. The same instance has the same
-coefficient in both formulations. This guarantees that a weighted optimum is
-globally lexicographically optimal. The coefficient and bounds are saved per row.
+For each instance, let `F_g` be the greedy solution's flow time, `D=sum(d_i)`
+the sum of the targets' nearest-output Manhattan distances, `N` the number of
+cells, and `e` the initial number of escorts. The program sets
+
+```text
+K   = N-e
+H_g = F_g-D+max(d_i)
+U_g = K*H_g
+R   = U_g-D+1
+```
+
+and minimizes the integer objective `R*F+M`. Every feasible plan has `M >= D`,
+and a minimum-flow, minimum-movement plan has `M_star <= U_g`. Consequently
+`R > U_g-D` guarantees that a weighted optimum is globally lexicographically
+optimal. The feasible representative implies `U_g >= D`, so `R >= 1`.
+The zero-flow case uses `D=H_g=U_g=0` and `R=1`. The weighted model covers the
+sufficient physical horizon `H_g`, which can be longer than the old
+greedy-makespan horizon. The same instance has the same coefficient in both
+formulations. The coefficient and both movement bounds are saved per row:
+`safe_movement_lower_bound=D` and `safe_movement_bound=U_g` (the latter retains
+its meaning as an upper bound, not the range `U_g-D`).
+Both formulations use physical horizon `H=max(H_g,C_g+1)`, retaining the
+complete greedy trace. Their array indices differ: EF uses `T=H-1`, whereas
+LF uses `T=H`. The CSV records both the index and the physical horizon.
 
 The weighted solve uses `MIPGap=0` and `MIPGapAbs=0.999`:
 
@@ -244,6 +261,14 @@ The weighted solve uses `MIPGap=0` and `MIPGapAbs=0.999`:
    freeze the incumbent observed by that time. Continue only if its flow is
    unproved, stopping on its proof, a lower-flow counterexample, or the total
    600-second cap. `MIPFocus=0` remains unchanged throughout.
+
+The flow-only gap certificate retains the criterion
+`gap < R+M_w-U_minus`, where `gap=R*F_w+M_w-L_Q`,
+`H_minus=F_w-1-D+max(d_i)`, and `U_minus=K*H_minus`.
+For v5 the threshold simplifies to `1+M_w-D+K*(F_g-F_w+1)`.
+The model must cover `H_minus`; when `F_w-1 < D`, the distance bound already
+proves minimum flow. The existing numerical margins and the independent
+full-integer-gap certificate below one remain unchanged.
 
 `--weighted-time-limit` controls the first-phase limit and reporting cutoff
 (default 300 seconds). Proof checks are triggered by bound or flow changes,
@@ -287,15 +312,133 @@ or the final-result check; the method identifies the mathematical certificate.
 These fields are blank when no reliable proof was observed. Gurobi controls when
 callbacks run, so this time is an upper bound on the actual instant
 when proof became possible. `final_runtime` still records total solver time.
-CSV protocol `safe_integer_flow_timing_v4` and check mode `bound_or_flow_change`
-identify this version. It differs from the earlier untimed and interval-based
-continuation results.
+CSV protocol `safe_integer_flow_timing_v5` and check mode `bound_or_flow_change`
+identify this version. Archived v4 used the larger, still sufficient coefficient
+`R=U_g+1`. V5 retains its timing and conditional-extension rules while reducing
+the coefficient using the movement lower bound. Always start v5 in a fresh
+results directory; preserve v4 outputs and do not append v5 rows to them.
+Old weighted bounds, gaps, and proof times must not be reused under the new
+coefficient or reported as v5 results.
 
 Monitoring computes distance bounds once and caches the scalar proof criterion
 by flow value. Movement improvements reuse that criterion. Bound-change checks
 use the saved candidate and strongest observed bound, without additional
 solution-vector reads. Once flow is proved, routine proof checks stop; cutoff
 handling, contradictory-solution detection, and final validation remain active.
+
+### Targeted 70%-occupancy experiment
+
+`Run70Percent.py` runs four-target, leave-mode SBM cases on all four
+Table 2 layouts and output locations. It compares EF and LF on the same 100
+initial-state seeds per layout:
+
+| Layout | Escorts | Occupancy | Outputs |
+| --- | ---: | ---: | --- |
+| 13x7 | 27 | 70.33% | (6,0) |
+| 10x10 | 30 | 70% | (0,0) |
+| 16x10 | 48 | 70% | (4,0), (11,0) |
+| 27x10 | 81 | 70% | (4,0), (13,0), (22,0) |
+
+There are 400 distinct instances and 800 solver runs, producing four additional
+configuration rows for Table 2(b). Escort counts are the nearest integer to
+30% of the cells, so 13x7 cannot have exactly 70% occupancy. Occupancy counts all
+stored loads, including the four targets. Both formulations receive the same
+complete greedy start and share the sufficient integer coefficient and
+physical horizon. The main budget is 300 solver seconds, followed only when
+flow remains unproved by a same-tree extension of up to 300 seconds. Main
+solution quality, bound and proof rates use the initial-cutoff columns;
+extension results remain separate. The event-driven flow-proof tracking is
+the same as in the safe weighted Table 2 runner.
+
+From this repository on Linux or macOS, with NumPy, gurobipy and a working
+Gurobi license in the selected Python environment:
+
+```bash
+python3 Run70Percent.py --dry-run
+python3 -u Run70Percent.py --threads 16
+```
+
+The default thread count uses the Mac's performance cores or up to 16 threads
+on Linux. Use `--threads 16` on the numerical-experiment Linux box to retain
+the current campaign setting. `--threads` overrides
+it, and `--python /path/to/python3` selects another solver environment.
+`NUM_THREADS` and `PYTHON` are also respected. Without `PYTHON` or `--python`,
+the solver uses the interpreter running the launcher. `python` and `python3`
+can select different installations; the launcher prints the selected executable
+and includes its actual version in preflight diagnostics. To explicitly use
+the active Conda `python` environment, run:
+
+```bash
+python -u Run70Percent.py --python python
+```
+
+For a short trial before the full campaign:
+
+```bash
+python3 -u Run70Percent.py --seeds 1-3
+```
+
+Each launch creates a fresh `results_70percent_<timestamp>_<pid>/` directory.
+It saves partial per-layout CSVs in `parts/`, solver logs in `logs/`, and merged
+`occupancy70_escortflow.csv` and `occupancy70_loadflow.csv` at the top level.
+`environment.json` records hardware, solver version, budgets, threads, protocol,
+Git state and source hashes. A frozen `source/` copy supplies every batch.
+`commands.sh` records the exact solver commands, and `pairing.json` confirms
+identical instances and common settings after all batches complete. Existing
+result directories are never overwritten; interrupted runs retain written rows.
+
+Run the expanded campaign on the same Linux box, with the same thread setting
+and native Gurobi version as the Table 2 baseline. Preserve the earlier Mac
+campaigns separately. Cross-machine runtime comparisons do not isolate the
+effect of occupancy.
+
+### Continue-mode and additional target-count campaigns
+
+All three launchers share `RunStaticCampaign.py`, use both EF and LF, and retain
+the same source snapshots, pairing checks, integer objective, greedy warm starts,
+300-second main budget, and conditional 300-second extension. The new campaigns
+use the Table 2(b) escort counts **8, 12, 16**, plus the layout-specific
+approximately 70%-occupancy counts **27, 30, 48, 81** above.
+
+| Launcher | Retrieval mode | Targets | Configuration rows | Distinct instances | Solver runs |
+| --- | --- | --- | ---: | ---: | ---: |
+| `Run70Percent.py` | leave | 4 | 4 | 400 | 800 |
+| `RunContinue.py` | continue | 2, 4, 6 | 48 | 4,800 | 9,600 |
+| `RunTable2Targets.py` | leave | 2, 6 | 32 | 3,200 | 6,400 |
+
+Counts assume all four layouts and seeds 1-100. Commands for the Linux box:
+
+```bash
+python3 -u Run70Percent.py --threads 16
+python3 -u RunContinue.py --threads 16
+python3 -u RunTable2Targets.py --threads 16
+```
+
+Run the campaigns separately so their processes do not compete for memory or
+solver threads. Add `--dry-run` to inspect commands, `--seeds 1-3` for a pilot,
+or `--layouts 13x7` to select one layout. All launchers accept `--python`,
+`--weighted-time-limit`, `--extension-time-limit`, and `--output-dir`. In tmux,
+no `nohup` is necessary. Fresh result directories are respectively
+`results_70percent_*`, `results_continue_*`, and `results_table2b_targets_*`.
+Merged files are `occupancy70_{escortflow,loadflow}.csv`,
+`continue_{escortflow,loadflow}.csv`, and
+`table2b_targets_{escortflow,loadflow}.csv`. Per-configuration files include
+the target and escort counts whenever these vary.
+
+In continue mode, a target is served when it reaches an output and immediately
+becomes an ordinary blocking load. It does not create an escort. An initially
+output-located target is already served at time zero. The greedy trace and both
+Gurobi formulations use these same conventions. The LF target-to-blocker
+conversion preserves occupancy and permits the retrieved blocker to move again;
+there is no leave-mode output-service delay. The corrected greedy flow time sums
+actual target arrival times without adding an extra iteration after retrieval.
+
+EF and LF match initial states within every configuration. Equal seeds also
+match leave and continue modes at a given target and escort count. Across target
+counts, the existing generator gives nested target sets but different escort
+locations because escorts follow the target prefix of the permutation. The
+campaigns hold escort **counts** constant; they do not claim identical escort
+locations across 2, 4, and 6 targets.
 
 ### Fixed-weight Table 2 experiment
 

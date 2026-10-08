@@ -261,7 +261,8 @@ class StaticEscortFlowGurobiSolver:
         }
 
         active_targets = {loc for loc in target_positions if loc not in self.output_set}
-        current_output_stays = {loc for loc in target_positions if loc in self.output_set}
+        current_output_stays = ({loc for loc in target_positions if loc in self.output_set}
+                                if self.config.retrieval_mode != "continue" else set())
         active_escorts = set(escort_positions)
 
         for t in range(T + 1):
@@ -630,7 +631,8 @@ class StaticEscortFlowGurobiSolver:
 
         # (4) and (5) in the paper: supply at the initial locations of target loads and escorts.
         for loc in self.network["locations"]:
-            supply_a = 1 if loc in target_set else 0
+            supply_a = int(loc in target_set and not (
+                self.config.retrieval_mode == "continue" and loc in self.output_set))
             supply_e = 1 if loc in escort_set else 0
             model.addConstr(
                 gp.quicksum(x_a[(move, 0)] for move in self.network["outgoing_a"][loc]) == supply_a

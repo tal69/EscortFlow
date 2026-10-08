@@ -2,6 +2,10 @@
 
 This file is a working context snapshot for future sessions on this repo.
 
+The remaining review tasks and current experiment/reporting decisions are
+maintained in `tasks.md`. Read that checklist before resuming revision work;
+it includes decisions that supersede older proposed plans in the response letter.
+
 ## Active Tracks
 
 - Dynamic simulator:
@@ -69,17 +73,17 @@ This file is a working context snapshot for future sessions on this repo.
   - Gurobi Python backends
   - OPL/CPLEX models via a `threads` data parameter
 
-## Two-Phase Static Version (October 7, 2026)
+## Static Objective Protocols (October 7-8, 2026)
 
-### Revised strategy (October 8, 2026)
+### Earlier fixed-weight strategy (October 8, 2026)
 
-The user superseded the two-phase experiment as the main revision strategy.
-The problem will use the weighted objective `F + 0.01*M`; minimum flow time is
+The user first superseded the two-phase experiment with a fixed-weight strategy.
+That version uses the weighted objective `F + 0.01*M`; minimum flow time is
 an instance-specific empirical certificate, not a claimed universal property.
 The user authorized experiment code and method notes first, without further
 manuscript or reviewer-response edits at this stage.
 
-`RunTable2Weighted.sh` and `RunWeightedStatic.py` implement the new protocol:
+`RunTable2Weighted.sh` and `RunWeightedStatic.py` implement that separate protocol:
 300 seconds for integer-scaled `100*F+M`, with a separate configurable 300-second
 pure-flow certificate budget. Complete greedy starts are enabled for both
 weighted formulations. Certification receives the saved weighted solution, with
@@ -123,13 +127,24 @@ coefficients and conditional certification. `RunTable2SafeWeighted.sh` and
 experiment remains available, and this request does not authorize manuscript or
 response-letter changes.
 
-Each instance gets `R=(N-e)*H_g+1` in `R*F+M`, where
-`H_g=F_g-sum(d_i)+max(d_i)` uses the common greedy feasible flow time.
+The current protocol is `safe_integer_flow_timing_v5`. For each instance, let
+`D=sum(d_i)` be the sum of the targets' nearest-output Manhattan distances,
+`K=N-e`, `H_g=F_g-D+max(d_i)`, and `U_g=K*H_g`. It uses
+`R=U_g-D+1` in `R*F+M`, with the same coefficient for both formulations.
 The weighted model covers this sufficient physical horizon, not merely the
-greedy makespan. A minimum-flow plan can stop all movements after its final
-retrieval and has at most `(N-e)*H_g` movements, which proves the weight is
-sufficient. The same coefficient is used in both formulations. Backend
-`weight_scale` defaults to 100, preserving the existing fixed-weight behavior.
+greedy makespan. A minimum-flow, minimum-movement plan can stop all movements
+after its final retrieval and has `M_star <= U_g`. Every feasible plan has
+`M >= D`. A worse-flow plan therefore costs at least
+`R*(F_star+1)+D > R*F_star+U_g`, which proves the coefficient is sufficient.
+The feasible representative also implies `U_g >= D`, hence `R >= 1`; the
+zero-flow case has `D=H_g=U_g=0` and `R=1`. Backend `weight_scale` defaults to
+100, preserving the existing fixed-weight behavior.
+
+Archived v4 used the larger coefficient `R=U_g+1`, which remains valid. V5
+changes the sufficient coefficient, not the certificate or timing semantics.
+New v5 runs must use a fresh results directory. Preserve archived v4 outputs;
+do not reuse their objective-specific bounds, gaps, or proof times under the
+new coefficient, and do not mix protocol versions in a campaign.
 
 Earlier, Tal requested preserving the same branch-and-bound tree for the extra
 time, rather than rebuilding a pure-flow model. The original defaults were 300 seconds for
@@ -140,7 +155,11 @@ Before the initial cutoff it attempts both objectives (`MIPGap=0`,
 `MIPGapAbs=0.999`). A checked gap below one proves global lexicographic
 optimality. Otherwise it tries a distance bound and an incumbent-specific proof:
 `L_Q > R*(F_w-1)+(N-e)*H_minus`, with a 0.001 boundary margin, where
-`H_minus=F_w-1-sum(d_i)+max(d_i)`. The weighted horizon must cover `H_minus`.
+`H_minus=F_w-1-D+max(d_i)`. The weighted horizon must cover `H_minus`.
+For `gap=R*F_w+M_w-L_Q`, the unchanged sufficient criterion is
+`gap < R+M_w-U_minus`, where `U_minus=K*H_minus`; in v5 its right-hand side is
+`1+M_w-D+K*(F_g-F_w+1)`. The full lexicographic integer-gap criterion remains
+strictly below one with the existing numerical safeguards.
 If this certifies flow time at the initial cutoff, it stops and movements can
 remain unproved. Otherwise the same search continues until the frozen flow
 time is certified, a lower-flow counterexample is found, or the total budget
@@ -158,10 +177,14 @@ initial cutoff has no incumbent.
 
 The CSV records coefficients, movement/horizon bounds, integer and normalized
 gaps, proof source, extension timing, separate initial/final solutions, and
-distinct flow/lexicographic proof flags. Results go in a separate
-`results_table2_safe_weighted_*` directory. Method notes contain the proofs.
+distinct flow/lexicographic proof flags. V5 adds `safe_movement_lower_bound=D`;
+`safe_movement_bound` remains the upper bound `U_g`, not `U_g-D`. Results go in a
+fresh `results_table2_safe_weighted_*` directory. Method notes contain the proofs.
 
-Validation of this version: 115 unit/integration tests passed, including the
+Validation of v5: 154 unit/integration tests passed across the safe-weight, callback timing, runner, fixed-weight certification, warm-start, and lexicographic suites. Six tiny paired EF/LF solves (3x2, two targets, two escorts, seeds 1, 3, and 4) matched in coefficient, flow time, and movement count; all certified both objectives with one optimization call. Source/destination CSV validation, protocol separation, shell syntax, and whitespace checks passed. These are smoke checks, not the full numerical campaign. Evidence: `revision_R1/v5_tight_weight_smoke_rgn8ddbj/summary.json`.
+
+Historical validation of the initial safe-weight version: 115 unit/integration
+tests passed, including the
 existing lexicographic/fixed-weight/warm-start suites, the new certificate
 math, frozen-cutoff callback cases, and runner reporting. A live Gurobi test
 asserted one optimize call, unchanged objective/focus, and the combined budget.
@@ -176,8 +199,8 @@ On October 8, Tal revised this protocol to measure the first flow-time proof.
 He briefly selected a 300-second overall limit, then corrected it: the first
 phase has 300 seconds, followed by up to 300 extra seconds only if the saved
 candidate's flow remains unproved. `RunTable2SafeWeighted.sh` and
-`RunSafeWeightedStatic.py` now use protocol `safe_integer_flow_timing_v4`, default
-to a 300-second extension allowance, and request `stop_on_flow_proof=True` in
+`RunSafeWeightedStatic.py` then used protocol `safe_integer_flow_timing_v4`, with
+a 300-second extension allowance and `stop_on_flow_proof=True` in
 both backends. Tal then requested replacing time/node sampling with checks
 only when the lower bound improves or a new candidate has smaller flow.
 Unchanged/weaker bounds and movement-only improvements skip proof comparisons.
@@ -202,7 +225,8 @@ or the combined time limit expires. Existing fixed-weight entry points retain th
 behavior, and the backends keep the old conditional stop as a compatible default
 for callers that do not request the new tracking mode.
 
-Validation of the timing revision: 149 unit/integration tests passed, including
+Historical validation of the v4 timing revision: 149 unit/integration tests
+passed, including
 event filtering, cached-threshold and no-extra-solution-read assertions,
 bound validation against the smallest known feasible weighted objective, reliable proof timing,
 continued first-phase search after flow proof, exact conditional-stop observation
@@ -369,3 +393,140 @@ At Tal's request, the SBM LP-dominance result is now Theorem 2 in Section 3.3 of
 The built-in standalone compiler could not resolve this project's external figures and auxiliary files. Both actual project sources passed local `pdflatex -draftmode` and bibliography/reference checks with all new references resolved, without producing another PDF. Their existing auxiliary reference files were updated to resolve the new theorem and Section E. Existing citation duplication and layout warnings outside the added proof remain. The open response letter was not edited during this integration.
 
 Tal then requested the corresponding response-letter update. The existing `revision_R1/response_letter_R1.tex` now reports Theorem 2 and Supplement Section E as completed in AE.2, R1.2, R1.3, R2.2, R2.7, and R3.1, with consistent introductory progress notes. It explains the output-boundary clarifications and A.13, distinguishes weak SBM LP dominance from computational performance and SLM, and keeps physical recovery and reverse integer equivalence pending. R2.7 retains the requested check of Bukchin and Raviv (2023). All 26 reviewer-comment quotations were preserved exactly. The built-in editor compiler confirmed successful compilation of the updated response letter.
+
+### R3.M4 Follow-Up After Expanded Experiments (October 8, 2026)
+
+Tal explicitly requested returning to Referee 3 minor comment M4 after the new
+experiments are complete, including the different numbers of escorts and the
+continue retrieval mode. Keep this item open until that expanded campaign has
+been completed and checked; code implementation or smoke tests are not enough.
+
+Then recompute the greedy-relative improvements on common matched instance
+sets, examine the findings by escort count and retrieval mode, and update both
+the manuscript discussion and the R3.M4 response. Distinguish incumbent quality
+from feasibility, LP bounds, optimality certification, and runtime. State the
+population and aggregation method explicitly, and do not assume the current
+leave-mode findings transfer to continue mode.
+
+The October 8 audit corrected the historical comparison to 21.9% for both
+formulations on the same 32 rows (3,200 instances). This is an interim result,
+not the answer for the expanded campaign. Evidence and the reproducible audit
+are in `revision_R1/r3_revision_2026-10-08/audit_m3_m4.py` and `.json`.
+Recheck the recorded historical objective-component discrepancies and revised
+initial-state, objective, and horizon conventions when replacing those results.
+The response letter is `revision_R1/response_letter_R1.tex`; the canonical main
+paper remains in the linked Overleaf source directory.
+
+### R3.3 Computational Movement Scope (October 8, 2026)
+
+Tal chose to reinforce the paper's existing focus on simultaneous block
+movement rather than add SLM experiments. The opening of Section 4 in the
+canonical main manuscript now states that all reported computational results
+and comparative performance conclusions concern SBM. The SLM formulation in
+the supplement is presented as an extension of the modeling framework.
+Response R3.3 reports this clarification, and its pending list no longer asks
+whether to add SLM evidence. The continue-mode experiments and remaining
+computational audit and reporting work are still open.
+
+### Targeted 70%-Occupancy Launcher (October 8, 2026)
+
+Tal authorized preparing the limited high-escort experiment for his 96 GB Mac
+Studio. `Run70Percent.py` now launches leave-mode SBM runs with four targets,
+seeds 1-100, and both formulations on 16x10 with 48 escorts and outputs (4,0),
+(11,0), and 27x10 with 81 escorts and outputs (4,0), (13,0), (22,0). This is
+exactly 70% occupancy, 200 distinct instances and 400 solves. Default budgets
+are 300 solver seconds for the main result and a conditional additional 300
+seconds in the same search only when its flow time remains unproved.
+
+The launcher detects Mac performance cores by default, supports a thread and
+Python override, checks the Gurobi license, and records the actual machine,
+memory, versions, source hashes and protocol. It freezes the Python sources
+for the campaign, preserves partial per-layout CSVs and logs, merges results
+by formulation, and validates paired initial states and common settings.
+Use `python3 -u Run70Percent.py` from Code on the Mac Studio. The README has
+preview and short-trial commands and documents all result files. Interpret
+cross-machine runtime comparisons separately from the paired comparison on
+the Mac Studio.
+
+The multi-target smoke check exposed an index mismatch in the safe runner's
+horizon policy. Both formulations now share physical horizon
+`H=max(H_g,C_g+1)`; EF uses `T=H-1` and LF uses `T=H`. This preserves the
+complete common greedy start and the sufficient-horizon guarantee. Existing
+archived v4 results are unchanged. The new campaign uses the current v5
+coefficient `R=U_g-D+1`, with the actual protocol and horizon saved per row.
+
+Validation passed 101 safe-runner/certificate/search tests, 16 warm-start
+tests, CLI preview/override/overwrite checks, and four licensed Gurobi smoke
+solves (one seed per layout and formulation, two threads, five-second budget).
+All four accepted the starts and proved both objectives; paired instances,
+coefficients, physical horizons and objective values matched. Smoke evidence
+is in `revision_R1/occupancy70_launcher_smoke_matched_2026-10-08/`.
+The initial one-second smoke directory is retained and records the mismatch
+that was then corrected. The full 400-solve campaign has not been launched,
+and task 4 in `tasks.md`, R2.5 reporting and the expanded R3.M4 analysis remain
+open until those results are collected and audited.
+
+### Expanded static campaigns and continue mode (October 9, 2026)
+
+Tal requested rerunning approximately 70% occupancy on the same Linux box as
+the main experiment and adding four rows to Table 2(b). `Run70Percent.py`
+now covers 13x7 with 27 escorts, 10x10 with 30, 16x10 with 48, and 27x10 with
+81, preserving the paper's output locations. The first occupancy is 64/91
+(70.33%); the remaining three are exactly 70%. With four targets and seeds
+1-100, this is 400 distinct instances and 800 solves. The earlier completed
+two-layout Mac Gurobi 13.0.1 campaign is audited separately in
+`revision_R1/occupancy70_analysis_2026-10-09/`; it does not replace the new Linux
+campaign. Earlier launch-status statements above are historical.
+
+New entry points share `RunStaticCampaign.py`:
+
+- `RunContinue.py`: continue mode, 2/4/6 targets, four layouts, and 8/12/16
+  escorts plus the approximately 70% category. Default: 4,800 instances and
+  9,600 solves.
+- `RunTable2Targets.py`: leave mode, 2/6 targets, the same layouts and escort
+  categories. Default: 3,200 instances and 6,400 solves. This supersedes the
+  earlier proposed 2/3-target plan in `tasks.md`.
+
+All use the safe v5 objective, paired greedy starts, sufficient common physical
+horizons, 300-second main results, and conditional 300-second extensions.
+Linux defaults to at most 16 threads; explicitly pass `--threads 16` on the
+experiment machine. Mac defaults to performance cores. `--layouts` and
+`--seeds` allow a pilot; `--dry-run` creates no files or solver processes.
+Every campaign freezes its Python sources, logs actual Gurobi/native versions
+and machine settings, preserves partial files and validates paired settings.
+The README lists merged CSV names and launch commands.
+
+Continue-mode readiness required substantive corrections. `SolveGreedy` now
+serves initial output targets at time zero and removes targets from the active
+set upon arrival, so it does not add one extra flow-time unit per target or an
+extra terminal iteration. Escort count is constant. It raises a catchable
+error on a failed step cap and accepts success at the exact cap. The safe
+runner uses a conservative step cap independent of high escort counts.
+EF treats initially served output targets as ordinary blockers. LF now has an
+explicit retrieval-mode config: continue retrieval transfers `q` units from
+target flow to blocking flow, including time-zero supply, with no leave-mode
+service delay. Both complete-start encoders implement these same semantics.
+The legacy `LoadFlowStatic.py` CLI also passes its mode correctly and accepts
+continue BM warm starts. Unsupported Gurobi stay requests fail explicitly.
+CSV merging rejects mixing leave and continue modes. The coefficient and
+certificate proofs remain valid because `K=N-e` is an upper bound on the
+number of loads moving per period in either mode.
+
+Validation evidence is in `revision_R1/continue_validation_2026-10-09/`.
+All 4,800 planned continue greedy traces (48 configurations, seeds 1-100)
+were physically replayed and checked for disjoint legal block shifts, constant
+escort count, complete retrieval, exact flow time and movement count. Tiny
+continue cases with 2/4/6 targets accepted complete fixed starts in both
+models; optima agreed between EF/LF and with independent physical-state
+Dijkstra searches where enumerated. Initial output targets, all targets at
+outputs, repeated output use and blocker conversion are covered. These are
+validation checks, not completed paper experiments.
+
+The final static suite passed 173 unit/integration tests with native Gurobi
+13.0.3. Three launcher smoke campaigns completed: eight solves across all four
+70% layouts, 24 continue solves covering every target/escort category on 13x7,
+and 16 additional-target leave solves on 13x7. All 48 accepted complete starts
+and retained feasible incumbents; pairing and proof timestamps passed checks.
+Short budgets (15 seconds for the 70% smoke, two seconds for the other two,
+no extensions, one thread) deliberately allow incomplete objective proofs.
+`validation_summary.json` records these distinctions and current source hashes.

@@ -32,12 +32,15 @@ class LoadFlowStaticGurobiConfig:
     weight_scale: int = 100
     flow_proof_extension_time_limit: float | None = None
     stop_on_flow_proof: bool = True
+    retrieval_mode: str = "leave"
 
 
 class LoadFlowStaticGurobiSolver:
     def __init__(self, config):
         from static_weighted_certification import validate_objective_mode
         validate_objective_mode(config)
+        if config.retrieval_mode not in {"leave", "continue"}:
+            raise ValueError("Gurobi load flow supports leave and continue retrieval")
         if config.lexicographic and config.lp:
             raise ValueError("Lexicographic optimization requires an integer model")
         if config.phase1_time_limit is not None and not config.lexicographic:
@@ -153,20 +156,21 @@ class LoadFlowStaticGurobiSolver:
                 if sum(x[(move, t, commodity)].X for commodity in (1, 2)) > 0.99:
                     one_step_moves.append(((move[0], move[1]), (move[2], move[3])))
             for output in self.output_cells:
-                if q[(output, t)].X > 0.99:
+                if self.config.retrieval_mode == "leave" and q[(output, t)].X > 0.99:
                     one_step_moves.append((output, (None, None)))
             moves.append(one_step_moves)
         return moves
 
     def build_warmstart_from_trace(self, target_positions, escort_positions, T,
                                    target_move_history, escort_move_history):
-        """Encode the same BM leave trace used by the escort-flow solver.
+        """Encode the common BM trace for leave or continue retrieval.
 
         A straight escort move shifts each load on its path by one cell in
         the opposite direction. Commodity 1 tracks target loads; commodity 2
         tracks all remaining loads. A target arriving after transition t is
         retrieved through q at t + 1. During that retrieval period the output
-        stays unavailable, as in the greedy trace and escort-flow model.
+        stays unavailable in leave mode. In continue mode, the retrieved
+        target immediately becomes a blocking load and can move again.
 
         Store nonzero values sparsely; _apply_warmstart explicitly supplies
         zero for every other variable, so Gurobi receives a complete start.
@@ -192,7 +196,10 @@ class LoadFlowStaticGurobiSolver:
             for loc in retrieved:
                 warmstart["q"][(loc, t)] = 1.0
                 warmstart["z"] = float(t)
-                del occupied[loc]
+                if self.config.retrieval_mode == "continue":
+                    occupied[loc] = 2
+                else:
+                    del occupied[loc]
 
             escort_moves = escort_move_history[t] if t < len(escort_move_history) else []
             target_moves = target_move_history[t] if t < len(target_move_history) else {}
@@ -219,7 +226,8 @@ class LoadFlowStaticGurobiSolver:
                     load_destinations[source] = current
                     path.add(source)
                     current = source
-                if path & (used_cells | retrieved):
+                service_cells = retrieved if self.config.retrieval_mode == "leave" else set()
+                if path & (used_cells | service_cells):
                     raise ValueError(f"Trace has conflicting movements or output service at period {t}")
                 used_cells.update(path)
 
@@ -351,20 +359,27 @@ class LoadFlowStaticGurobiSolver:
                     gp.quicksum(x[(move, t - 1, 1)] for move in self.network["incoming"][loc]) ==
                     gp.quicksum(x[(move, t, 1)] for move in self.network["outgoing"][loc]) + q_term
                 )
+                converted = q_term if self.config.retrieval_mode == "continue" else 0.0
                 model.addConstr(
-                    gp.quicksum(x[(move, t - 1, 2)] for move in self.network["incoming"][loc]) ==
+                    gp.quicksum(x[(move, t - 1, 2)] for move in self.network["incoming"][loc]) + converted ==
                     gp.quicksum(x[(move, t, 2)] for move in self.network["outgoing"][loc])
                 )
 
         for output in self.output_cells:
             for t in tr:
-                model.addConstr(
-                    gp.quicksum(
-                        x[(move, t, commodity)]
-                        for commodity in (1, 2)
-                        for move in self.network["incoming_nonstay"][output]
-                    ) <= 1 - q[(output, t)]
-                )
+                if self.config.retrieval_mode == "continue":
+                    # Retire on arrival. q converts target flow into blocker
+                    # flow without freeing a cell or imposing a service takt.
+                    model.addConstr(gp.quicksum(
+                        x[(move, t, 1)] for move in self.network["outgoing"][output]) == 0)
+                else:
+                    model.addConstr(
+                        gp.quicksum(
+                            x[(move, t, commodity)]
+                            for commodity in (1, 2)
+                            for move in self.network["incoming_nonstay"][output]
+                        ) <= 1 - q[(output, t)]
+                    )
 
         for output in self.output_cells:
             supply_target = 1 if output in target_set else 0
@@ -381,8 +396,10 @@ class LoadFlowStaticGurobiSolver:
 
         for loc in self.network["locations"]:
             supply_blocking = 1 if loc in blocking_set else 0
+            converted = (q[(loc, 0)] if self.config.retrieval_mode == "continue"
+                         and loc in self.output_set else 0.0)
             model.addConstr(
-                gp.quicksum(x[(move, 0, 2)] for move in self.network["outgoing"][loc]) == supply_blocking
+                gp.quicksum(x[(move, 0, 2)] for move in self.network["outgoing"][loc]) == supply_blocking + converted
             )
 
         model.addConstr(gp.quicksum(q.values()) == len(target_set))

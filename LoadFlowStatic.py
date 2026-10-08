@@ -52,8 +52,7 @@ parser.add_argument(
     default=1,
 )
 parser.add_argument('-m', '--retrieval_mode', choices=['stay', 'leave', 'continue'],
-                    help='Select a retrieval mode. Default is stay. Also note that for stay mode the number '
-                         'of output cells must be greater or equal the number target loads  (ONLY LEAVE IS SUPPORTED FOR NOW)',
+                    help='Retrieval mode (default leave). Gurobi supports leave and continue; stay uses the legacy OPL model.',
                     default='leave')
 parser.add_argument("-f","--csv", help="File name of the result csv file", default="res_load_flow.csv")
 parser.add_argument("--alpha", type=float, help="Weight of the makespan in the objective function (default 0.0)",
@@ -124,15 +123,15 @@ args.gurobi = not args.opl
 if args.warmstart:
     if not args.gurobi or args.lp:
         parser.error("--warmstart requires a Gurobi integer model and cannot use --opl or --lp")
-    if args.lm or args.retrieval_mode != "leave":
-        parser.error("--warmstart currently supports only BM movement and --retrieval_mode leave")
+    if args.lm or args.retrieval_mode not in {"leave", "continue"}:
+        parser.error("--warmstart supports BM movement with leave or continue retrieval")
     if args.dp_file:
         parser.error("--warmstart uses the common greedy trace and cannot be combined with --dp_file")
 if args.lexicographic:
     if not args.gurobi or args.lp or args.cutoff:
         parser.error("--lexicographic requires Gurobi MILP and cannot be combined with --opl, --lp, or --cutoff")
-    if args.retrieval_mode != "leave":
-        parser.error("The lexicographic load-flow model supports only --retrieval_mode leave")
+    if args.retrieval_mode not in {"leave", "continue"}:
+        parser.error("The lexicographic load-flow model supports leave or continue retrieval")
     if (args.alpha, args.beta, args.gamma) != (0, 1.0, 0.01):
         parser.error("--lexicographic uses unweighted objectives; nondefault --alpha, --beta, and --gamma are unsupported")
 if args.phase1_time_limit is not None:
@@ -140,6 +139,8 @@ if args.phase1_time_limit is not None:
         parser.error("--phase1_time_limit requires --lexicographic")
     if not math.isfinite(args.phase1_time_limit) or args.phase1_time_limit <= 0:
         parser.error("--phase1_time_limit must be finite and positive")
+if args.gurobi and args.retrieval_mode == "stay":
+    parser.error("Gurobi load flow supports leave and continue retrieval; stay requires --opl")
 if args.time_limit is not None and (not math.isfinite(args.time_limit) or args.time_limit <= 0):
     parser.error("--time_limit must be finite and positive")
 if args.horizon is not None and args.horizon < 0:
@@ -290,6 +291,7 @@ if args.gurobi:
             Lx=Lx,
             Ly=Ly,
             output_cells=tuple(O),
+            retrieval_mode=args.retrieval_mode,
             move_method="BM" if is_bm else "LM",
             alpha=alpha,
             beta=beta,

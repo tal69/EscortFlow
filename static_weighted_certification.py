@@ -53,8 +53,9 @@ def validate_objective_mode(config):
         raise ValueError("Weighted/certification modes require a non-lexicographic integer model")
     if config.beta != 1 or config.gamma != 1 / scale or getattr(config, "alpha", 0) != 0:
         raise ValueError("Weighted/certification modes require F + M / weight_scale")
-    if getattr(config, "retrieval_mode", "leave") != "leave" or getattr(config, "move_method", "BM") != "BM":
-        raise ValueError("Weighted/certification modes support BM leave retrieval")
+    if (getattr(config, "retrieval_mode", "leave") not in {"leave", "continue"}
+            or getattr(config, "move_method", "BM") != "BM"):
+        raise ValueError("Weighted/certification modes support BM leave or continue retrieval")
     target = config.certification_target
     if mode == "flow_certificate":
         if target is None or not math.isfinite(target) or target < 0 or int(target) != target:
@@ -124,7 +125,8 @@ def safe_weight_parameters(targets, outputs, cell_count, escort_count, feasible_
 
     A feasible flow bound gives H containing all minimum-flow schedules.
     Some minimum-flow schedule has no movements after its last retrieval,
-    hence M <= (N - e) H. R = (N - e) H + 1 makes any worse flow inferior
+    hence M <= (N - e) H. Every feasible plan needs at least D = sum(d_i)
+    movements, so R = (N - e) H - D + 1 makes any worse flow inferior
     to that schedule. The weighted model must also contain this horizon.
     The movement bound does not apply to arbitrary redundant schedules.
     """
@@ -135,7 +137,8 @@ def safe_weight_parameters(targets, outputs, cell_count, escort_count, feasible_
         raise ValueError("Feasible flow cannot be below the distance lower bound")
     horizon = max(0, feasible_flow - distance_sum + distance_max)
     movement_bound = load_count * horizon
-    return dict(flow_weight=movement_bound + 1, movement_bound=movement_bound,
+    return dict(flow_weight=movement_bound - distance_sum + 1,
+                movement_bound=movement_bound, movement_lower_bound=distance_sum,
                 flow_horizon=horizon)
 
 
@@ -174,6 +177,8 @@ def gap_flow_certificate(weighted, targets, outputs, cell_count, escort_count,
         return reject("INVALID_WEIGHTED_INCUMBENT")
     if flow < distance_sum:
         return reject("FLOW_BELOW_DISTANCE_BOUND")
+    if movements < distance_sum:
+        return reject("MOVEMENTS_BELOW_DISTANCE_BOUND")
     if weighted.get("weight_scale", flow_weight) != flow_weight:
         return reject("INCONSISTENT_WEIGHT_SCALE")
     integer_objective = flow_weight * flow + movements
