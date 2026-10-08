@@ -115,6 +115,63 @@ and correctly skipped certification because its weighted gap was too large.
 The shell's 16-batch dry run and syntax checks passed. These checks are not the
 new numerical campaign and must not be reported as its results.
 
+### Additional safe-weight experiment (October 8, 2026)
+
+Tal subsequently requested a separate version with sufficient integer objective
+coefficients and conditional certification. `RunTable2SafeWeighted.sh` and
+`RunSafeWeightedStatic.py` implement this version. The fixed `alpha=0.01`
+experiment remains available, and this request does not authorize manuscript or
+response-letter changes.
+
+Each instance gets `R=(N-e)*H_g+1` in `R*F+M`, where
+`H_g=F_g-sum(d_i)+max(d_i)` uses the common greedy feasible flow time.
+The weighted model covers this sufficient physical horizon, not merely the
+greedy makespan. A minimum-flow plan can stop all movements after its final
+retrieval and has at most `(N-e)*H_g` movements, which proves the weight is
+sufficient. The same coefficient is used in both formulations. Backend
+`weight_scale` defaults to 100, preserving the existing fixed-weight behavior.
+
+Tal then requested preserving the same branch-and-bound tree for the extra
+time, rather than rebuilding a pure-flow model. Defaults are 300 seconds for
+the initial reporting cutoff, up to 300 seconds of additional search, and 16
+threads. There is one continuous optimize call with a 600-second total cap,
+unchanged integer objective and MIPFocus 0, and callback-controlled stopping.
+Before the initial cutoff it attempts both objectives (`MIPGap=0`,
+`MIPGapAbs=0.999`). A checked gap below one proves global lexicographic
+optimality. Otherwise it tries a distance bound and an incumbent-specific proof:
+`L_Q > R*(F_w-1)+(N-e)*H_minus`, with a 0.001 boundary margin, where
+`H_minus=F_w-1-sum(d_i)+max(d_i)`. The weighted horizon must cover `H_minus`.
+If this certifies flow time at the initial cutoff, it stops and movements can
+remain unproved. Otherwise the same search continues until the frozen flow
+time is certified, a lower-flow counterexample is found, or the total budget
+expires. The previous gap gate does not apply to this version.
+
+Tal explicitly requested reporting BOTH the initial-cutoff solution and final
+solution separately, with the initial solution as the main experimental
+result. Later improvements must never overwrite the main candidate or its
+initial bound/gap. The extension certifies the original candidate's flow time.
+The callback freezes the best incumbent observed at or before the cutoff,
+before processing a later solution. Missing incumbents/bounds are recorded
+explicitly, and callback observation times distinguish checkpoint delays from
+the nominal cutoff. No candidate-specific extension is attempted when the
+initial cutoff has no incumbent.
+
+The CSV records coefficients, movement/horizon bounds, integer and normalized
+gaps, proof source, extension timing, separate initial/final solutions, and
+distinct flow/lexicographic proof flags. Results go in a separate
+`results_table2_safe_weighted_*` directory. Method notes contain the proofs.
+
+Validation of this version: 115 unit/integration tests passed, including the
+existing lexicographic/fixed-weight/warm-start suites, the new certificate
+math, frozen-cutoff callback cases, and runner reporting. A live Gurobi test
+asserted one optimize call, unchanged objective/focus, and the combined budget.
+Six tiny EF/LF solves matched in coefficient and solution and proved both
+objectives without extension. Short-budget 10x10, three-escort, seed-23 runs in
+both formulations preserved the cutoff candidate `F=25,M=113` and reported the
+later `F=25,M=112` separately; neither falsely certified flow time. These smoke
+runs use shortened limits and are not numerical-campaign results. Shell syntax,
+the 16-batch dry run, CSV merging, and diff whitespace checks passed.
+
 ### Earlier two-phase implementation
 
 - New entry points: `EscortFlowStaticLex.py` and `LoadFlowStaticLex.py`. Existing

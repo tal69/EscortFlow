@@ -92,9 +92,11 @@ The legacy weighted benchmark campaign in "Escort-Flow Formulation for Simultane
 - Single target: five layouts, 3--8 escorts, 100 random instances per row.
 - Four targets: five layouts, 8, 12, and 16 escorts, 100 random instances per row.
 
-For the revised weighted experiment and separate flow-time check matching
-Table 2(a,b), use `RunTable2Weighted.sh`, described below. `RunTable2Lex.sh`
-retains the earlier two-phase lexicographic experiment.
+For the fixed `F+0.01*M` experiment and separate flow-time check matching
+Table 2(a,b), use `RunTable2Weighted.sh`, described below. The additional
+`RunTable2SafeWeighted.sh` version uses sufficient integer weights and continues
+the same search only when the initial result cannot already prove minimum flow
+time. `RunTable2Lex.sh` retains the two-phase lexicographic experiment.
 
 Use this block for a clean formulation-paper replication:
 
@@ -204,7 +206,72 @@ budget allocation, callbacks, and retained incumbents:
 python3 test_static_lexicographic.py
 ```
 
-### Revised weighted Table 2 experiment
+### Sufficient integer weights with conditional certification
+
+Run the new version on Linux, including inside an existing tmux session:
+
+```bash
+bash RunTable2SafeWeighted.sh --threads 16
+```
+
+This runs the same Table 2(a,b) instances and both formulations sequentially.
+Defaults are 16 threads, a 300-second reporting cutoff, and up to 300 additional
+seconds of the same weighted branch-and-bound search only when needed. There is
+one optimization call and a complete common greedy warm start. The objective,
+model, search tree, cuts, and incumbent remain in place during the extension.
+
+For each instance, the program derives a sufficient physical horizon `H` from
+the greedy solution's flow time and target-to-output distance lower bounds.
+With `N` cells and `e` escorts, it minimizes the integer objective `R*F+M`, where
+`R=(N-e)*H+1`. The weighted model covers this sufficient horizon, which can be
+longer than the old greedy-makespan horizon. The same instance has the same
+coefficient in both formulations. This guarantees that a weighted optimum is
+globally lexicographically optimal. The coefficient and bounds are saved per row.
+
+The weighted solve uses `MIPGap=0` and `MIPGapAbs=0.999`:
+
+1. An independently verified integer gap below one proves both objectives.
+2. At the initial cutoff, freeze the best incumbent observed by that time. Use
+   it to bound movements in any hypothetical better-flow plan, then check the
+   weighted lower bound. This can certify
+   flow time even when movement optimality remains unresolved. A matching
+   analytical distance lower bound also certifies flow time immediately.
+3. Only if these checks fail, continue the same search until the frozen
+   solution's flow time is proved, a lower-flow counterexample is found, or the
+   total 600-second cap is reached. `MIPFocus=0` remains unchanged. There is no
+   second model or weighted-gap eligibility gate in this version.
+
+`--weighted-time-limit` and `--extension-time-limit` control the reporting
+cutoff and extra search allowance. `--certification-time-limit` is an alias for
+the latter. Solver callbacks enforce the phase transition and proof stopping at
+available checkpoints; termination can have a small overhead. The snapshot
+uses incumbents and bounds observed by the reporting cutoff, never a later
+solution retroactively. If no incumbent is available by that cutoff, the row
+explicitly records that condition and no candidate-specific extension is run.
+
+Results are saved under a new `results_table2_safe_weighted_<timestamp>_<pid>/`
+directory, with per-layout CSVs in `parts/`, solver logs in `logs/`, and merged
+CSVs in the top level. The main solution columns describe the initial-cutoff
+candidate. Separate final-solution columns show the result after any extension,
+with separate bounds, proof flags, and elapsed times. A later improvement never
+overwrites the main experimental result. The original candidate's flow proof
+is reported as certified, disproved, or unresolved. `--dry-run` previews all
+16 batch commands. `RunSafeWeightedStatic.py --help` describes individual batches.
+See [the method notes](weighted_flow_certification_notes.md) for the guarantees.
+
+The main `flowtime`, `movements`, `scaled_best_bound`, and `scaled_absolute_gap`
+columns belong to the reporting cutoff. Their `final_` counterparts belong to
+the end of the search. `flow_proven` and `lexicographic_proven` assess the initial
+candidate using all available evidence; `phase1_flow_proven` records whether
+flow was already proved by the cutoff. `final_flow_proven` and
+`final_lexicographic_proven` assess the final candidate. `weighted_runtime` is
+the initial-stage runtime; `final_runtime` is the entire solver runtime, not
+the extension alone. `extension_runtime` measures elapsed solver time beyond
+the cutoff, including termination overhead. `weighted_cpu_time` adds model
+construction and is marked as an estimate when the snapshot was taken during
+the ongoing search. These are elapsed times, not summed CPU time over threads.
+
+### Fixed-weight Table 2 experiment
 
 `RunTable2Weighted.sh` runs both formulations on the current Table 2(a,b)
 instances with **300 seconds for the weighted solve** and an independent

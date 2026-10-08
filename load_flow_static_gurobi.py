@@ -29,6 +29,8 @@ class LoadFlowStaticGurobiConfig:
     phase1_time_limit: float | None = None
     objective_mode: str = "legacy"
     certification_target: int | None = None
+    weight_scale: int = 100
+    flow_proof_extension_time_limit: float | None = None
 
 
 class LoadFlowStaticGurobiSolver:
@@ -476,10 +478,27 @@ class LoadFlowStaticGurobiSolver:
 
             if self.config.objective_mode != "legacy":
                 from static_weighted_certification import solve_weighted_or_certificate
+                flow_proof_context = None
+                if self.config.flow_proof_extension_time_limit is not None:
+                    flow_proof_context = dict(
+                        targets=tuple(target_set), outputs=self.output_cells,
+                        cell_count=self.config.Lx * self.config.Ly, escort_count=len(escort_set),
+                        physical_horizon=T, weighted_time_limit=self.config.time_limit,
+                        extension_time_limit=self.config.flow_proof_extension_time_limit)
+
+                def extract_callback_metrics(callback_model):
+                    retrievals = [(t, q[(output, t)]) for output in self.output_cells for t in tr]
+                    values = callback_model.cbGetSolution([var for _, var in retrievals])
+                    return dict(makespan=max((retrieval for (retrieval, _), value in zip(retrievals, values)
+                                              if value > .5), default=0))
+
                 return solve_weighted_or_certificate(
                     model, flow_time_expr, movement_expr, extract_solution,
                     status_name=self._status_name, solve_start=solve_start,
                     mode=self.config.objective_mode, target=self.config.certification_target,
+                    weight_scale=self.config.weight_scale,
+                    flow_proof_context=flow_proof_context,
+                    extract_callback_metrics=extract_callback_metrics,
                 )
             return solve_lexicographic(
                 model,

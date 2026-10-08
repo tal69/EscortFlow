@@ -26,6 +26,8 @@ class StaticGurobiConfig:
     phase1_time_limit: float | None = None
     objective_mode: str = "legacy"
     certification_target: int | None = None
+    weight_scale: int = 100
+    flow_proof_extension_time_limit: float | None = None
 
 
 class StaticEscortFlowGurobiSolver:
@@ -687,7 +689,15 @@ class StaticEscortFlowGurobiSolver:
         if warmstart is not None and not self.config.lp:
             self._apply_warmstart(x_a, x_e, q, warmstart)
         if self.config.lexicographic or self.config.objective_mode != "legacy":
-            return self._solve_lexicographic_model(model, x_a, x_e, q, T, solve_start)
+            flow_proof_context = None
+            if self.config.flow_proof_extension_time_limit is not None:
+                flow_proof_context = dict(
+                    targets=tuple(target_set), outputs=self.output_cells,
+                    cell_count=self.config.Lx * self.config.Ly, escort_count=len(escort_set),
+                    physical_horizon=T + 1, weighted_time_limit=self.config.time_limit,
+                    extension_time_limit=self.config.flow_proof_extension_time_limit)
+            return self._solve_lexicographic_model(
+                model, x_a, x_e, q, T, solve_start, flow_proof_context=flow_proof_context)
         model.optimize()
         cpu_time = time.perf_counter() - solve_start
 
@@ -739,7 +749,8 @@ class StaticEscortFlowGurobiSolver:
 
         return result
 
-    def _solve_lexicographic_model(self, model, x_a, x_e, q, T, solve_start, callback=None):
+    def _solve_lexicographic_model(self, model, x_a, x_e, q, T, solve_start, callback=None,
+                                  flow_proof_context=None):
         from static_lexicographic import solve_lexicographic
 
         flowtime_expr = gp.quicksum(q.values())
@@ -770,10 +781,21 @@ class StaticEscortFlowGurobiSolver:
 
         if self.config.objective_mode != "legacy":
             from static_weighted_certification import solve_weighted_or_certificate
+
+            def extract_callback_metrics(callback_model):
+                arrivals = [(t + 1, x_a[(move, t)]) for move in self.network["arrival_moves"]
+                            for t in range(T + 1)]
+                values = callback_model.cbGetSolution([var for _, var in arrivals])
+                return dict(makespan=max((arrival for (arrival, _), value in zip(arrivals, values)
+                                          if value > .5), default=0))
+
             return solve_weighted_or_certificate(
                 model, flowtime_expr, movement_expr, extract_solution,
                 status_name=self._status_name, solve_start=solve_start,
                 mode=self.config.objective_mode, target=self.config.certification_target,
+                weight_scale=self.config.weight_scale,
+                flow_proof_context=flow_proof_context,
+                extract_callback_metrics=extract_callback_metrics,
             )
         return solve_lexicographic(
             model, flowtime_expr, movement_expr, extract_solution,

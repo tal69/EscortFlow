@@ -1,8 +1,122 @@
-# Weighted retrieval and separate flow-time certification
+# Weighted retrieval and flow-time certification
 
 Method notes for the revision, October 8, 2026. These notes describe the mathematical claims and implemented experiment protocol. They do not assert that the new experiments have already established those claims.
 
-## Objective and claims
+## Additional version: sufficient integer weights and conditional certification
+
+`RunSafeWeightedStatic.py` and `RunTable2SafeWeighted.sh` implement a separate
+protocol from the fixed `F+0.01*M` experiment described below. They use an
+instance-specific integer objective `Q=R*F+M` that guarantees lexicographic
+optimality when solved to an integer absolute gap below one. Both formulations
+receive the same greedy physical start and use the same coefficient per instance.
+
+Let `F_g` be the greedy feasible flow time, `N` the number of cells, `e` the
+initial number of escorts, and `d_i` target i's nearest-output Manhattan distance.
+Set
+
+```text
+H_g = F_g - sum_i(d_i) + max_i(d_i)
+U_g = (N-e)*H_g
+R   = U_g + 1.
+```
+
+The weighted horizon covers `H_g`, as well as the complete greedy trace. In
+escort-flow the implementation uses `T=max(H_g,C_g-1)`; in load-flow it uses
+`T=max(H_g,C_g+1)`, where `C_g` is the greedy makespan. These indices reflect
+different terminal/retrieval conventions. A horizon supplied only by the greedy
+makespan would not be sufficient for the following global guarantee.
+
+To prove the guarantee, choose a minimum-flow plan with the fewest movements.
+Its flow is at most `F_g`, so its final retrieval occurs by `H_g`. Remove all
+movements after its final retrieval. At most `N-e` loads can move in a period,
+so this plan has at most `U_g` movements and is represented by the weighted
+model. Any plan with flow time at least one greater has weighted objective at
+least `R*(F_star+1)`, whereas this plan's objective is at most
+`R*F_star+U_g < R*(F_star+1)`. Among minimum-flow plans, minimizing the weighted
+objective minimizes movements. This argument needs a bound on an optimal
+representative, not on every plan with redundant post-retrieval movements.
+The zero-flow case gives `H_g=U_g=0` and `R=1`.
+
+The weighted search uses one uninterrupted optimization call, with an initial
+300-second reporting cutoff and a conditional extension of up to 300 seconds.
+The objective remains `R*F+M`, `MIPFocus=0` remains unchanged, and the same model,
+incumbent, cuts, and branch-and-bound tree remain active. `TimeLimit` is the sum
+of the two allowances, and a callback implements conditional stopping. There
+is no model rebuild, second optimization call, or change to a pure-flow
+objective. The initial complete greedy warm start is applied once.
+
+Before the reporting cutoff the solver attempts to optimize both objectives,
+using `MIPGap=0` and `MIPGapAbs=0.999`. Flow optimality alone does not stop this
+initial search early. The reporting and stopping rules are:
+
+1. A reliable, consistent weighted lower bound with reconstructed integer gap
+   below `1-1e-6` proves global lexicographic optimality under the coefficient
+   and horizon guarantee above. The solver can finish before the cutoff in
+   this case.
+2. At the reporting cutoff, freeze the best feasible incumbent observed by
+   that time, together with the weighted bound observed by that time. Check
+   its flow time using the analytical distance bound or weighted bound below.
+   If proved, stop at the next supported callback checkpoint.
+3. Only if the frozen flow time remains unproved, continue the same search.
+   Stop when the weighted lower bound certifies that original flow time, when
+   a feasible lower-flow counterexample is found, or when the total time cap
+   is reached. There is no weighted-gap eligibility gate. If no solution was
+   available by the cutoff, record that condition and stop without inventing
+   an initial candidate to certify.
+
+The callback observes each new feasible solution and keeps only improving
+weighted incumbents for the initial snapshot. A first callback after the
+cutoff must freeze the earlier cached candidate before processing any new
+post-cutoff candidate. Later movement or flow improvements never overwrite the
+initial experiment result. Any late feasible solution with smaller flow is a
+counterexample, even if its weighted objective does not improve the current
+incumbent. The final weighted incumbent is also reported in separate columns.
+Raw callback termination status is distinguished from the proof outcome.
+
+For the gap check, let `(F_w,M_w)` be the frozen initial incumbent and `L_Q` a valid
+weighted lower bound. Put `B=F_w-1`. If `B < sum_i(d_i)`, the distance bound
+already proves minimum flow. Otherwise a hypothetical minimum-flow plan with
+flow at most `B` can be normalized to have
+
+```text
+H_minus = B - sum_i(d_i) + max_i(d_i)
+U_minus = (N-e)*H_minus.
+```
+
+Provided the weighted model covers that physical horizon, such a plan would
+have objective at most `R*B+U_minus`. Therefore
+
+```text
+L_Q > R*B + U_minus
+```
+
+proves minimum flow. Equivalently, with `gap=R*F_w+M_w-L_Q`, the sufficient
+threshold is `gap < R+M_w-U_minus`. The implementation leaves a `0.001` margin
+from this critical boundary, plus the common numerical comparison margin.
+Missing, nonfinite, inconsistent, or unreliable solver bounds cannot establish
+this gap certificate. The threshold is derived for the frozen candidate and
+continues to refer to that same candidate as the bound improves. Any separate
+certificate for the final incumbent is recomputed using that final incumbent.
+The initial a posteriori check requires no extra search when it succeeds. It
+proves flow time alone; the CSV must not mark movement or full lexicographic
+optimality unless separately established.
+
+CSV rows identify the coefficient, horizon, movement bound, integer and
+normalized objectives/bounds/gaps, gap-certificate threshold and outcome,
+proof source, time before/after the reporting cutoff, and any counterexample.
+The main solution, bound, and gap columns belong to the initial reporting
+cutoff; final columns belong to the end of the continuous search. A certificate
+using a later bound must not be represented as a bound obtained within the
+initial 300 seconds. Snapshot observation times make callback timing explicit.
+Callbacks execute at solver checkpoints, so the phase transition and stopping
+request can lag the nominal cutoff. Gurobi's termination overhead can also
+exceed the time cap slightly. Missing initial incumbents or bounds are recorded
+explicitly rather than filled with later observations. Existing fixed-weight
+entry points and their separate pure-flow certification remain unchanged.
+The implementation uses Gurobi's documented [MIP and MIPSOL callback data](https://docs.gurobi.com/projects/optimizer/en/current/reference/numericcodes/callbacks.html)
+and [callback termination mechanism](https://docs.gurobi.com/projects/optimizer/en/current/reference/python/model.html#Model.terminate).
+
+## Fixed-weight objective and claims
 
 Let `F` denote total integer flow time and `M` the integer number of individual one-cell load movements, including movements of blocking loads. A block movement contributes its length to `M`. The revised problem objective is
 
