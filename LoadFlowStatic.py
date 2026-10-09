@@ -101,7 +101,9 @@ parser.add_argument("--dp_file",
 parser.add_argument("-k", "--k_prime", type=int,
                     help="k' value for the dp based heuristic (provide only if you provided dp_file)", default=0)
 parser.add_argument("--lp", action="store_true",
-                    help="Run lp relaxation work only with bm movement regime (default False)")
+                    help="Solve the continuous LP relaxation of the static model (default False)")
+parser.add_argument("--flow-weight", "--flow_weight", type=int, default=None,
+                    help="With --lp, use the recorded positive integer R in F + M/R; requires Gurobi")
 parser.add_argument("--gurobi", action="store_true",
                     help="Solve the static load-flow model with the Gurobi Python API (default)")
 parser.add_argument("--warmstart", action="store_true",
@@ -116,6 +118,12 @@ parser.add_argument("--no_cutoff", dest="cutoff", action="store_false", help=arg
 
 parser.set_defaults(cutoff=False)
 args = parser.parse_args()
+if args.flow_weight is not None:
+    if not args.lp or args.opl or args.flow_weight <= 0:
+        parser.error("--flow-weight requires --lp, Gurobi, and a positive integer R")
+    if (args.alpha, args.beta, args.gamma) != (0, 1.0, 0.01) or args.cutoff:
+        parser.error("--flow-weight sets F + M/R; do not change --alpha/--beta/--gamma or use --cutoff")
+    args.gamma = 1.0 / args.flow_weight
 if args.gurobi and args.opl:
     print("Panic: --gurobi and --opl cannot be combined")
     exit(1)

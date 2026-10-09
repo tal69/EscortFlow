@@ -103,7 +103,9 @@ parser.add_argument("-k", "--k_prime", type=int,
 parser.add_argument("-a", "--export_animation", action="store_true",
                     help="Export animation files, one for each instance")
 parser.add_argument("--lp", action="store_true",
-                    help="Run lp relaxation work only with bm movement regime (default False)")
+                    help="Solve the continuous LP relaxation of the static model (default False)")
+parser.add_argument("--flow-weight", "--flow_weight", type=int, default=None,
+                    help="With --lp, use the recorded positive integer R in F + M/R; requires Gurobi")
 parser.add_argument("--greedy", action="store_true",
                     help="Solve the static instance with OneStepHeuristic_v2.SolveGreedy instead of the MILP backend")
 parser.add_argument("--gurobi", action="store_true",
@@ -125,6 +127,12 @@ parser.add_argument("--bnc", nargs="?", const=-1, default=None, type=int,
 
 parser.set_defaults(cutoff=False)
 args = parser.parse_args()
+if args.flow_weight is not None:
+    if not args.lp or args.opl or args.flow_weight <= 0:
+        parser.error("--flow-weight requires --lp, Gurobi, and a positive integer R")
+    if args.beta != 1.0 or args.gamma != 0.01 or args.cutoff:
+        parser.error("--flow-weight sets F + M/R; do not change --beta/--gamma or use --cutoff")
+    args.gamma = 1.0 / args.flow_weight
 if args.lexicographic:
     if args.lp or args.opl or args.greedy or args.naive or args.cutoff:
         parser.error("--lexicographic requires a Gurobi MILP and cannot use --lp, --opl, --greedy, --naive, or --cutoff")

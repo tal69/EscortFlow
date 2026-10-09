@@ -26,9 +26,21 @@ class CampaignTests(unittest.TestCase):
     def test_all_campaigns_have_exact_configurations_and_budgets(self):
         for script, count, mode, loads in [("Run70Percent.py", 8, "leave", {4}),
                                            ("RunContinue.py", 96, "continue", {2, 4, 6}),
-                                           ("RunTable2Targets.py", 64, "leave", {2, 6})]:
+                                           ("RunTable2Targets.py", 56, "leave", {2, 6})]:
             with self.subTest(script=script):
                 commands = self.dry_run(script)
+                if script == "RunTable2Targets.py":
+                    relaxation = commands.pop()
+                    option = lambda name: relaxation[relaxation.index(name) + 1]
+                    self.assertEqual(Path(relaxation[2]).name, "RunStaticLP.py")
+                    self.assertEqual(option("--workers"), "1")
+                    self.assertEqual(option("--threads"), "1")
+                    self.assertEqual(option("--time-limit"), "300")
+                    self.assertEqual(option("--retry-time-limit"), "600")
+                    self.assertEqual(Path(option("-f")).name, "lp_results.csv")
+                    self.assertEqual([Path(p).name for p in
+                                      relaxation[relaxation.index("--input") + 1:relaxation.index("--source-dir")]],
+                                     ["table2b_targets_escortflow.csv", "table2b_targets_loadflow.csv"])
                 self.assertEqual(len(commands), count)
                 observed, destinations = set(), set()
                 for command in commands:
@@ -45,9 +57,22 @@ class CampaignTests(unittest.TestCase):
                 self.assertEqual({x[3] for x in observed}, loads)
                 self.assertEqual({(x[0], x[1]) for x in observed}, {("13", "7"), ("10", "10"), ("16", "10"), ("27", "10")})
                 for lx, ly, occupancy_escorts, _ in campaign.LAYOUTS:
-                    counts = {int(x[2]) for x in observed if (x[0], x[1]) == (str(lx), str(ly))}
-                    expected = {occupancy_escorts} if script == "Run70Percent.py" else {8, 12, 16, occupancy_escorts}
-                    self.assertEqual(counts, expected)
+                    for load_count in loads:
+                        counts = {int(x[2]) for x in observed
+                                  if (x[0], x[1], x[3]) == (str(lx), str(ly), load_count)}
+                        if script == "RunTable2Targets.py":
+                            expected = {8, 12, 16} if load_count == 2 else {8, 12, 16, 20}
+                        else:
+                            expected = {occupancy_escorts} if script == "Run70Percent.py" else {8, 12, 16, occupancy_escorts}
+                        self.assertEqual(counts, expected)
+
+    def test_target_campaign_can_skip_lp_for_an_integer_only_pilot(self):
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(campaign.main("target_counts", ["--dry-run", "--no-lp", "--layouts", "13x7",
+                                                              "--seeds", "1"]), 0)
+        commands = [shlex.split(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(commands), 14)
+        self.assertTrue(all(Path(command[2]).name == "RunSafeWeightedStatic.py" for command in commands))
 
     def test_exact_occupancy_is_recorded(self):
         layouts = ["{}x{}".format(x, y) for x, y, _, _ in campaign.LAYOUTS]

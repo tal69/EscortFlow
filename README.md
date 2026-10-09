@@ -18,6 +18,7 @@ The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic 
 - `EscortFlowSim_v8.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
 - `EscortFlowStatic.py`: static escort-flow experiment runner for single-load and multi-load instances, defaulting to the Gurobi Python backend and also supporting greedy-only and naive-lower-bound modes
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and the Gurobi Python API is the default backend
+- `RunStaticLP.py`: reproducible continuous LP replay from recorded coordinates, weights, and horizons, including archived Table 3 inputs
 - `EscortFlowStaticLex.py` and `LoadFlowStaticLex.py`: two-phase integer optimization, first flow time, then load movements at the best flow time found
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
 - `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v8.py`
@@ -113,7 +114,11 @@ Reference outputs from previous runs are stored under:
 - `/Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Experiment_Static_May2026/`
 - `/Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Experiment_Mar2026_take2/`
 
-Separate LP-relaxation helper scripts are no longer needed because their commands are now part of `SingleLoadStatic.sh` and `FourLoadsStatic.sh`.
+The historical LP commands in these shell scripts use `F+0.01*M`. For the
+LP gaps in Table 2, use `RunStaticLP.py` with the recorded per-instance `R` and
+matched physical horizons. The separate
+[LP reproducibility guide](LP_REPRODUCIBILITY.md) gives the full command and the
+self-contained `reproducibility/table3_lp.zip` package.
 
 ### Two-phase lexicographic static retrieval
 
@@ -396,22 +401,24 @@ effect of occupancy.
 
 All three launchers share `RunStaticCampaign.py`, use both EF and LF, and retain
 the same source snapshots, pairing checks, integer objective, greedy warm starts,
-300-second main budget, and conditional 300-second extension. The new campaigns
-use the Table 2(b) escort counts **8, 12, 16**, plus the layout-specific
-approximately 70%-occupancy counts **27, 30, 48, 81** above.
+300-second main budget, and conditional 300-second extension. `RunContinue.py`
+uses escort counts **8, 12, 16**, plus the layout-specific approximately
+70%-occupancy counts **27, 30, 48, 81** above. `RunTable2Targets.py` uses
+**8, 12, 16** escorts for **2 targets**, and **8, 12, 16, 20** for **6 targets**.
+It also calculates both LP relaxations automatically after the integer runs.
 
-| Launcher | Retrieval mode | Targets | Configuration rows | Distinct instances | Solver runs |
-| --- | --- | --- | ---: | ---: | ---: |
-| `Run70Percent.py` | leave | 4 | 4 | 400 | 800 |
-| `RunContinue.py` | continue | 2, 4, 6 | 48 | 4,800 | 9,600 |
-| `RunTable2Targets.py` | leave | 2, 6 | 32 | 3,200 | 6,400 |
+| Launcher | Retrieval mode | Targets | Configuration rows | Distinct instances | Integer runs | LP solves by default |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `Run70Percent.py` | leave | 4 | 4 | 400 | 800 | 0 |
+| `RunContinue.py` | continue | 2, 4, 6 | 48 | 4,800 | 9,600 | 0 |
+| `RunTable2Targets.py` | leave | 2, 6 | 28 | 2,800 | 5,600 | 5,600 |
 
 Counts assume all four layouts and seeds 1-100. Commands for the Linux box:
 
 ```bash
 python3 -u Run70Percent.py --threads 16
 python3 -u RunContinue.py --threads 16
-python3 -u RunTable2Targets.py --threads 16
+python3 -u RunTable2Targets.py --threads 16 --lp-workers 1 --lp-threads 16
 ```
 
 Run the campaigns separately so their processes do not compete for memory or
@@ -424,6 +431,48 @@ Merged files are `occupancy70_{escortflow,loadflow}.csv`,
 `continue_{escortflow,loadflow}.csv`, and
 `table2b_targets_{escortflow,loadflow}.csv`. Per-configuration files include
 the target and escort counts whenever these vary.
+
+After the current four-target run finishes, update the Linux checkout with
+`git pull --ff-only`, then run `RunTable2Targets.py` in tmux using the solver's
+Python environment. No new instance or model preparation is needed. To inspect
+the complete plan without solving, use `python3 RunTable2Targets.py --dry-run`.
+The result directory freezes the Python sources before any batch begins.
+
+For Tables 2 and 3, the merged integer CSVs contain the common greedy FT/MV,
+distance lower bound (`safe_movement_lower_bound`, also the naive FT bound),
+the 300-second incumbent and certified bound, first FT proof time, solver and
+CPU times, and final FT/MV/bound after any extension. Best-known FT/MV and
+improvement over the greedy heuristic can therefore use both models' final
+solutions, while the method comparison retains its initial 300-second cutoff.
+
+The LP stage reads these exact recorded coordinates, `R`, and matched physical
+horizons. It minimizes `FT + MV/R`, saves only `OPTIMAL` relaxations in
+`lp_results.csv`, and keeps the number of target loads in each output key.
+The model-specific LP gaps can then be calculated against the common best-known
+integer solution. It never substitutes the obsolete fixed `0.01` coefficient.
+See [LP_REPRODUCIBILITY.md](LP_REPRODUCIBILITY.md) for the gap formula.
+
+LP runs default to one process and one thread per process to limit memory use.
+`--lp-workers` and `--lp-threads` can change these independently of integer
+`--threads`. The LP limit is 300 seconds, followed by a 600-second barrier retry
+after a time limit; change these using `--lp-time-limit` and
+`--lp-retry-time-limit`. Add `--no-lp` for an integer-only pilot. The other two
+launchers can also calculate LPs if explicitly given `--lp`.
+
+An incomplete LP stage makes the launcher exit with an error and preserves all
+completed optimal values. After the integer stage has finished, restart only
+the LP stage with the saved command, without rerunning integer experiments:
+
+```bash
+RESULTS=/absolute/path/to/results_table2b_targets_...
+bash "$RESULTS/lp_commands.sh"
+```
+
+This script uses the frozen sources and `--resume`, which verifies input and
+source fingerprints before reusing results. The integer launcher requires a
+fresh output directory and does not resume interrupted integer batches. LP
+progress is in `logs/table2b_targets_lp.log` during the automatic stage, and
+`lp_results.csv.manifest.json` records the completed and total counts.
 
 In continue mode, a target is served when it reaches an output and immediately
 becomes an ordinary blocking load. It does not create an escort. An initially
@@ -857,6 +906,12 @@ python3 LoadFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8-16-4 -l
 ```
 
 To solve the LP relaxation for either static model, add `--lp`. Using a larger horizon can make the LP lower bound slightly weaker.
+
+Add `--flow-weight R` to either Gurobi LP runner to set the recorded objective
+`F+M/R` explicitly. Supply the correct `--horizon` for each formulation: the
+physical horizon is `T+1` in escort flow and `T` in load flow. For exact archived LP
+reproduction, use `RunStaticLP.py` and the frozen source snapshot as described
+in [LP_REPRODUCIBILITY.md](LP_REPRODUCIBILITY.md).
 
 ### DP helper modules
 

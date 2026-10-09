@@ -34,7 +34,9 @@ CAMPAIGNS = {
     "continue": dict(prefix="continue", directory="continue", mode="continue", loads=(2, 4, 6),
                      description="Continue-mode cases with 2, 4 and 6 targets, at every Table 2(b) escort count including approximately 70% occupancy."),
     "target_counts": dict(prefix="table2b_targets", directory="table2b_targets", mode="leave", loads=(2, 6),
-                         description="Table 2(b) leave-mode cases with 2 and 6 targets, including approximately 70% occupancy."),
+                         escorts_by_loads={2: (8, 12, 16), 6: (8, 12, 16, 20)}, lp=True,
+                         description="Tables 2 and 3 leave-mode cases: 2 targets with 8/12/16 escorts, "
+                                     "6 targets with 8/12/16/20 escorts, followed by matched LP relaxations."),
 }
 
 
@@ -42,9 +44,11 @@ def configurations(campaign, layouts):
     for lx, ly, occupancy_escorts, outputs in LAYOUTS:
         if "{}x{}".format(lx, ly) not in layouts:
             continue
-        escort_counts = ((occupancy_escorts,) if campaign == "occupancy70"
-                         else (8, 12, 16, occupancy_escorts))
         for loads in CAMPAIGNS[campaign]["loads"]:
+            escort_counts = CAMPAIGNS[campaign].get("escorts_by_loads", {}).get(loads)
+            if escort_counts is None:
+                escort_counts = ((occupancy_escorts,) if campaign == "occupancy70"
+                                 else (8, 12, 16, occupancy_escorts))
             for escorts in escort_counts:
                 yield dict(lx=lx, ly=ly, escorts=escorts, loads=loads, outputs=outputs,
                            occupancy=(lx * ly - escorts) / (lx * ly))
@@ -166,6 +170,18 @@ def commands(args, source_dir, result_dir):
             yield dict(config, formulation=formulation, stem=stem, command=command)
 
 
+def lp_command(args, source_dir, result_dir):
+    """Replay both merged integer CSVs with their recorded R and physical horizon."""
+    prefix = CAMPAIGNS[args.campaign]["prefix"]
+    return [args.python, "-u", str(source_dir / "RunStaticLP.py"),
+            "--input", *(str(result_dir / (prefix + "_" + method + ".csv"))
+                         for method in FORMULATIONS),
+            "--source-dir", str(source_dir), "--workers", str(args.lp_workers),
+            "--threads", str(args.lp_threads), "--time-limit", str(args.lp_time_limit),
+            "--retry-time-limit", str(args.lp_retry_time_limit),
+            "-f", str(result_dir / "lp_results.csv")]
+
+
 def validate_pairs(result_dir, seed_values, configs, prefix):
     """Require identical instances and settings across the two formulations."""
     shared = ("protocol", "threads", "warmstart", "retrieval_mode", "movement_mode",
@@ -223,6 +239,16 @@ def main(campaign, argv=None):
                         help="main comparison cutoff in solver seconds")
     parser.add_argument("--extension-time-limit", type=finite_number, default=300,
                         help="extra solver seconds only when cutoff flow is unproved")
+    parser.add_argument("--lp", action=argparse.BooleanOptionalAction,
+                        default=settings.get("lp", False),
+                        help="after the integer campaign, solve both matched LP relaxations")
+    parser.add_argument("--lp-workers", type=int, default=1,
+                        help="parallel LP processes; one limits memory use for multi-target models")
+    parser.add_argument("--lp-threads", type=int, default=1, help="solver threads per LP process")
+    parser.add_argument("--lp-time-limit", type=finite_number, default=300,
+                        help="initial LP solver seconds per instance")
+    parser.add_argument("--lp-retry-time-limit", type=finite_number, default=600,
+                        help="barrier retry seconds after an LP time limit")
     parser.add_argument("--output-dir", type=Path, help="new results directory")
     parser.add_argument("--dry-run", action="store_true",
                         help="print every batch command without creating files or solving")
@@ -230,6 +256,9 @@ def main(campaign, argv=None):
     args.campaign = campaign
     if args.threads <= 0 or args.weighted_time_limit <= 0:
         parser.error("Threads and the main time limit must be positive")
+    if (args.lp_workers <= 0 or args.lp_threads <= 0
+            or args.lp_time_limit <= 0 or args.lp_retry_time_limit <= 0):
+        parser.error("LP workers, threads, and time limits must be positive")
     if len(set(args.layouts)) != len(args.layouts):
         parser.error("Each layout may be selected only once")
     source_dir = Path(__file__).resolve().parent
@@ -239,6 +268,8 @@ def main(campaign, argv=None):
     if args.dry_run:
         for batch in commands(args, source_dir, result_dir):
             print(shlex.join(batch["command"]))
+        if args.lp:
+            print(shlex.join(lp_command(args, source_dir, result_dir)))
         return 0
     python_path = shutil.which(args.python)
     if python_path is None:
@@ -274,6 +305,10 @@ def main(campaign, argv=None):
                     retrieval_mode=settings["mode"], movement_mode="BM", target_loads=list(settings["loads"]),
                     warm_start="Common complete greedy plan in both formulations",
                     solver_runs=2 * len(configs) * len(metadata["seed_values"]),
+                    lp=dict(enabled=args.lp, workers=args.lp_workers, threads=args.lp_threads,
+                            time_limit=args.lp_time_limit, retry_time_limit=args.lp_retry_time_limit,
+                            objective="F+M/R, using each recorded R and horizon",
+                            solver_runs=2 * len(configs) * len(metadata["seed_values"]) if args.lp else 0),
                     configurations=[dict(c, outputs=list(zip(c["outputs"][::2], c["outputs"][1::2])))
                                     for c in configs])
     for option in (["rev-parse", "HEAD"], ["status", "--short"]):
@@ -298,6 +333,12 @@ def main(campaign, argv=None):
     batches = list(commands(args, runtime_dir, result_dir))
     (result_dir / "commands.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n" +
         "\n".join(shlex.join(batch["command"]) for batch in batches) + "\n")
+    if args.lp:
+        relaxation_command = lp_command(args, runtime_dir, result_dir)
+        # This separate script also retries only missing LP values after a failure
+        # or interruption, using the frozen solver modules and input fingerprints.
+        (result_dir / "lp_commands.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n" +
+            shlex.join(relaxation_command + ["--resume"]) + "\n")
     for batch in batches:
         lx, ly, escorts, outputs, loads, formulation, stem, command = (
             batch[k] for k in ("lx", "ly", "escorts", "outputs", "loads", "formulation", "stem", "command"))
@@ -315,6 +356,13 @@ def main(campaign, argv=None):
         print("[{}] {} {}x{}: completed".format(
             datetime.now().astimezone().isoformat(), formulation, lx, ly), flush=True)
     validate_pairs(result_dir, metadata["seed_values"], configs, settings["prefix"])
+    if args.lp:
+        log = result_dir / "logs" / (settings["prefix"] + "_lp.log")
+        print("Starting {} matched LP solves (log: {})".format(
+            metadata["lp"]["solver_runs"], log), flush=True)
+        with log.open("w") as handle:
+            subprocess.run(relaxation_command, stdout=handle, stderr=subprocess.STDOUT, check=True)
+        print("LP relaxations complete. Saved OPTIMAL values: " + str(result_dir / "lp_results.csv"), flush=True)
     print("Completed. Results: " + str(result_dir), flush=True)
     return 0
 
