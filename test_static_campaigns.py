@@ -50,6 +50,10 @@ class CampaignTests(unittest.TestCase):
                     self.assertEqual(option("--weighted-time-limit"), "300")
                     self.assertEqual(option("--extension-time-limit"), "300")
                     self.assertEqual(option("-r"), "1-100")
+                    self.assertEqual('--with-lp' in command, script == 'RunTable2Targets.py')
+                    if script == 'RunTable2Targets.py':
+                        self.assertEqual(option('--lp-threads'), '1')
+                        self.assertEqual(option('--lp-time-limit'), '300')
                     observed.add((option("-x"), option("-y"), option("-e"), int(option("-l")), option("--formulation")))
                     destinations.add(option("-f"))
                 self.assertEqual(len(observed), count)
@@ -73,6 +77,7 @@ class CampaignTests(unittest.TestCase):
         commands = [shlex.split(line) for line in output.getvalue().splitlines()]
         self.assertEqual(len(commands), 14)
         self.assertTrue(all(Path(command[2]).name == "RunSafeWeightedStatic.py" for command in commands))
+        self.assertTrue(all('--with-lp' not in command for command in commands))
 
     def test_exact_occupancy_is_recorded(self):
         layouts = ["{}x{}".format(x, y) for x, y, _, _ in campaign.LAYOUTS]

@@ -14,10 +14,12 @@ import itertools
 import math
 from pathlib import Path
 import platform
+import sys
 import time
 
 from PBSCom import GeneretaeRandomInstance
 import OneStepHeuristic_v2
+from static_integrated_lp import LP_FIELDS, attach_lp, embedded_value
 from RunWeightedStatic import parse_range, positive_number
 from static_weighted_certification import (
     CERTIFICATE_GAP_MARGIN, RELIABLE_FINISHED_STATUSES, gap_flow_certificate,
@@ -58,6 +60,7 @@ FIELDNAMES = [
     "first_flow_proof_node_count", "first_flow_proof_flowtime", "first_flow_proof_source",
     "first_flow_proof_scaled_bound", "first_flow_proof_work", "first_flow_proof_method",
     "flow_proof_invalidated", "flow_proof_invalidation_reason", "total_wall_time", "error",
+    *LP_FIELDS,
 ]
 
 
@@ -133,6 +136,7 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
         "extension_used": 0, "extension_runtime": 0, "optimization_calls": 0,
         "gap_flow_proven": 0, "flow_proven": 0, "counterexample": 0, "lexicographic_proven": 0,
         "final_flow_proven": 0, "final_lexicographic_proven": 0,
+        "lp_requested": 0, "lp_status": "NOT_RUN",
     })
     print(f"[{row['date']}] seed={seed} escorts={escort_count}: greedy and safe weighted search starting", flush=True)
     try:
@@ -335,6 +339,7 @@ def _validate_merge_rows(rows, path, weighted_limit, extension_limit):
             value = float(row[key])
             if not math.isfinite(value) or value < movement_lower or int(value) != value:
                 raise ValueError(f"Invalid {key} relative to distance lower bound: {path}")
+        embedded_value(row)
 
 
 def merge_batch(source, destination, seeds, escorts, weighted_limit, extension_limit):
@@ -400,6 +405,14 @@ def parse_args(argv=None):
                         type=nonnegative_number, default=300,
                         help="additional search budget only if first-phase flow is unproved (default: 300)")
     parser.add_argument("-f", "--output", type=Path, required=True)
+    parser.add_argument('--lp', action='store_true', help='Generate the same instances and solve their continuous relaxations without integer CSV inputs')
+    parser.add_argument('--with-lp', action='store_true', help='After each integer instance, save its continuous LP bound in the same CSV row')
+    parser.add_argument('--lp-threads', type=int, default=1, help='Threads for each integrated LP solve (default 1)')
+    parser.add_argument('--lp-time-limit', type=positive_number, default=300, help='Integrated LP budget, separate from integer budgets')
+    parser.add_argument('--lp-protocol', choices=['v4', 'v5'], default='v5', help='LP coefficient/horizon conventions: archived v4 or current v5')
+    parser.add_argument('--lp-workers', type=int, default=1)
+    parser.add_argument('--lp-retry-time-limit', type=positive_number, default=600)
+    parser.add_argument('--resume', action='store_true', help='Resume direct --lp results')
     args = parser.parse_args(argv)
     try:
         if args.Lx <= 0 or args.Ly <= 0 or args.loads <= 0 or args.threads <= 0:
@@ -414,7 +427,15 @@ def parse_args(argv=None):
         args.escort_values = parse_range(args.escorts, minimum=1)
         if max(args.escort_values) + args.loads > args.Lx * args.Ly:
             raise ValueError("Targets and escorts exceed the number of grid cells")
-        if args.output.exists():
+        if args.resume and not args.lp:
+            raise ValueError('--resume requires --lp')
+        if args.lp_protocol != 'v5' and not args.lp:
+            raise ValueError('--lp-protocol v4 requires --lp; integer runs use v5')
+        if args.with_lp and args.lp:
+            raise ValueError('Choose --with-lp for integer plus LP, or --lp for LP only')
+        if args.lp_threads <= 0:
+            raise ValueError('LP threads must be positive')
+        if args.output.exists() and not (args.lp and args.resume):
             raise ValueError(f"Output file already exists: {args.output}")
     except ValueError as exc:
         parser.error(str(exc))
@@ -423,19 +444,42 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.lp:
+        from static_generated_lp import run_standard
+        try:
+            return run_standard(args, args.formulation)
+        except (ValueError, OSError) as exc:
+            print(f'Direct LP error: {exc}', file=sys.stderr)
+            return 2
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("x", newline="") as handle:
+    lp_incomplete = False
+    with args.output.open("x+", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
         writer.writeheader()
         handle.flush()
         for escort_count in args.escort_values:
             for seed in args.seed_values:
                 row = run_instance(args, seed, escort_count)
+                if args.with_lp and not row['error']:
+                    row.update(lp_requested=1, lp_status='PENDING', lp_threads=args.lp_threads,
+                               lp_time_limit=args.lp_time_limit, lp_retry_time_limit=args.lp_retry_time_limit)
+                position = handle.tell()
                 writer.writerow(row)
                 handle.flush()
                 if row["error"]:
                     return 1
-    return 0
+                if args.with_lp:
+                    # The integer checkpoint is already durable if the LP is
+                    # interrupted. Only this last row is replaced after solving.
+                    attach_lp(row, args, Path(__file__).resolve().parent)
+                    handle.seek(position)
+                    writer.writerow(row)
+                    handle.flush()
+                    handle.truncate()
+                    handle.flush()
+                    lp_incomplete |= row['lp_status'] != 'OPTIMAL'
+    # Distinguish saved, valid integer rows with missing LPs from integer errors.
+    return 3 if lp_incomplete else 0
 
 
 if __name__ == "__main__":

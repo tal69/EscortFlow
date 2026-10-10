@@ -19,6 +19,8 @@ The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic 
 - `EscortFlowStatic.py`: static escort-flow experiment runner for single-load and multi-load instances, defaulting to the Gurobi Python backend and also supporting greedy-only and naive-lower-bound modes
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and the Gurobi Python API is the default backend
 - `RunStaticLP.py`: reproducible continuous LP replay from recorded coordinates, weights, and horizons, including archived Table 3 inputs
+- `RunTable2bLP.py`: Mac Studio LP-bound runner for four-target Table 2(b), with automatic resume and relative-gap summaries
+- `ReproducePaper.py`: one command for all revised formulation-paper numerical tables, including leave/continue retrieval, both formulations, LP relaxations, and CSV/LaTeX summaries
 - `EscortFlowStaticLex.py` and `LoadFlowStaticLex.py`: two-phase integer optimization, first flow time, then load movements at the best flow time found
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
 - `PBSAnimation.py`: animate PBS outputs from `EscortFlowStatic.py`, `LoadFlowStatic.py`, and `EscortFlowSim_v8.py`
@@ -88,6 +90,316 @@ The paper experiments were developed with Python 3.11, Gurobi 13.0, and NumPy. S
 
 ### Formulation paper: retrieval benchmark tables
 
+For the revised paper, use the complete runner below. The older shell scripts
+in the following historical guide are retained for earlier experiments.
+
+### Table 2(b): calculate LP bounds on the Mac Studio
+
+Set up once on the Mac Studio, from `Code/`:
+
+```bash
+bash RunTable2bLP.sh --setup python3.13
+```
+
+This creates a dedicated environment at `~/.venvs/escortflow-table2b`, installs
+`gurobipy==13.0.3`, checks your Gurobi license beyond the pip package's size limit,
+and remembers the exact interpreter in `~/.config/escortflow/table2b-python`
+(or `$XDG_CONFIG_HOME/escortflow/table2b-python`). It starts no paper experiments.
+If `python3.13` is not on PATH, pass its absolute path instead. The LP runner
+does not need NumPy or the older NumPy pin in `requirements.txt`.
+
+Alternatively, keep an existing working environment without installing anything:
+
+```bash
+bash RunTable2bLP.sh --set-python /absolute/path/to/licensed/python
+```
+
+Thereafter, in every new terminal or tmux window, start or resume with:
+
+```bash
+bash RunTable2bLP.sh
+```
+
+No activation is needed. The launcher uses the saved interpreter, including for
+worker processes and resumes that execute a frozen older runner. An installed
+Python 3.13 does not guarantee that a command named `python3` uses it. The runner
+now prints its actual interpreter path and version and distinguishes version,
+module-import, and license failures. Check only the environment with
+`bash RunTable2bLP.sh --check-environment`. A valid academic or commercial Gurobi
+license must already be configured; installing `gurobipy` alone supplies only a
+size-limited license. License failures must be resolved before setup is saved.
+
+The underlying `python3 -u RunTable2bLP.py` command remains supported when
+`python3` already names the correct environment. The script reads
+`Experiment Oct2026/` beside the
+script. It calculates both formulations' continuous LP relaxations for the
+four-target leave-mode runs, seeds 1-100, 8/12/16 escorts, and all four paper
+grids. A complete campaign has 2,400 LP solves. Missing load-flow files and
+unfinished groups can be supplied later. To generate all requested LP instances
+before those CSV rows arrive, use the parameter-based `--lp` commands in
+[Direct LP runs from parameters and seeds](#direct-lp-runs-from-parameters-and-seeds).
+
+Results go into the separate **`results_table2b_lp/`** folder. Each optimal LP
+is saved immediately. **Repeat the same command to resume**, retry failed cases,
+or process newly copied integer rows. Saved optimal values are reused. The
+output folder preserves model sources and input snapshots for reproducibility.
+Earlier instances must retain their recorded coordinates, coefficient, and
+horizon. Use a separate output folder for a different campaign or seed/layout/
+escort selection.
+
+Each relaxation uses the exact recorded `R` and each formulation's recorded
+horizon, including the archived four-target horizon difference. It minimizes
+`FT + MV/R`, equivalent to `(R*FT + MV)/R`, with all integer variables continuous
+and flow time free to optimize. Greedy solutions are read from the existing
+files. The historical movement weight of 0.01 is not used.
+
+The default runs **one LP at a time**, with the Mac's performance-core count as
+the solver thread count, to limit memory use for the large load-flow LPs. Each
+solve has a 300-second limit, followed by a barrier retry without crossover
+for up to 600 seconds if it reaches the time limit. Only `OPTIMAL` results enter
+the CSV. Settings can be changed on a resumed run:
+
+```bash
+bash RunTable2bLP.sh --threads 20 --time-limit 300 --retry-time-limit 600
+```
+
+Check the input coverage without solving or creating output files:
+
+```bash
+bash RunTable2bLP.sh --dry-run
+```
+
+For a two-LP pilot, one per formulation, use a separate output folder:
+
+```bash
+bash RunTable2bLP.sh --layouts 13x7 --escorts 16 --seeds 1 \
+  --output-dir results_table2b_lp_pilot
+```
+
+Use `--input-dir "/path/to/copied/results"` for a different input folder and
+`--output-dir "/path/to/LP/results"` for a different destination. The input
+filenames are `table2b_escortflow_13x7.csv`, `table2b_loadflow_13x7.csv`, and their
+counterparts for the other grids. Quote paths containing spaces.
+
+The output folder contains:
+
+- `lp_results.csv`: optimal LP objectives, fractional FT/MV, recorded `R` and
+  horizons, instance fingerprints, and solver versions.
+- `lp_gaps.csv`: per-instance percentages against the common lexicographically
+  best feasible FT/MV pair from both formulations, including their extensions.
+- `table2b_lp_summary.csv`: formulation-specific LP-gap means for Table 2(b).
+  Incomplete groups stay blank.
+- `table2b_lp_columns.tex`: a compact LaTeX fragment for the two LP-gap columns,
+  with the selected seed count stated in a comment.
+- `coverage.json`: available integer records, optimal LP records, and complete
+  groups. `source/`, `inputs/`, manifests, and worker logs preserve the audit.
+
+The gap is `100*(FT_BK + MV_BK/R - Z_LP)/(FT_BK + MV_BK/R)`. Percentages are
+computed per instance before averaging over all selected seeds, including zero
+gaps. A zero reference objective contributes zero. A summary cell requires all
+100 seeds by default, or the explicit smaller count in a pilot. Best-known
+references may improve as more integer results arrive. Run
+`bash RunTable2bLP.sh --summarize-only` to refresh summaries using saved LPs
+without further solves.
+
+Run the command inside a tmux window on the Mac Studio to keep it running
+through terminal disconnections. See [LP_REPRODUCIBILITY.md](LP_REPRODUCIBILITY.md)
+for the replay conventions. Validation:
+
+```bash
+python3 -m unittest test_table2b_lp test_static_lp.LPReplayTests
+```
+
+### Revised paper: reproduce all numerical tables with one command
+
+From the `Code/` directory, or an extracted reproducibility package containing
+the files listed below, run:
+
+```bash
+python3 -u ReproducePaper.py
+```
+
+There are no required arguments. This runs **seeds 1-100**, all four paper
+layouts, both load-flow and escort-flow, and all leave/continue experiments.
+It calculates the integer results, conditional extensions, both continuous LP
+relaxations, the method-comparison tables, and the bounds/solution/improvement
+tables. The literature-review table is editorial content and needs no solver
+experiment. No dynamic-paper experiments are included.
+
+To reproduce the same tables over an inclusive subset of seeds:
+
+```bash
+python3 -u ReproducePaper.py 1-10
+```
+
+The equivalent form is `python3 -u ReproducePaper.py --seeds 1-10`. A single
+seed, such as `1`, and a list, such as `1,7,20`, are also accepted. The script
+uses the selected number of instances as the denominator in every percentage
+and average, and records it in the output. It never assumes that a pilot has
+100 instances.
+
+**Requirements.** Use Python 3.10 or newer (3.11 recommended), NumPy, and
+`gurobipy` with a working Gurobi license large enough for these models. Install
+the packages in your solver environment with:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 -m pip install gurobipy
+```
+
+The launcher checks the environment and license before solving. The models
+use the Gurobi Python API; OPL, CPLEX, DP pickle files, and LaTeX are unnecessary
+for running or generating the table fragments. For a separate solver environment,
+use `--python /path/to/python`. The interpreter and solver versions are saved.
+
+**Experimental coverage.** The four layouts and outputs are:
+
+| Grid | Outputs | Escorts for approximately 70% occupancy |
+| --- | --- | ---: |
+| 13x7 | (6,0) | 27 |
+| 10x10 | (0,0) | 30 |
+| 16x10 | (4,0), (11,0) | 48 |
+| 27x10 | (4,0), (13,0), (22,0) | 81 |
+
+| Retrieval mode | Targets | Escort counts in each layout |
+| --- | ---: | --- |
+| leave | 1 | 3, 4, 5, 6, 7, 8 |
+| leave | 2 | 8, 12, 16 |
+| leave | 4 | 8, 12, 16, plus the approximately 70%-occupancy count |
+| leave | 6 | 8, 12, 16, 20 |
+| continue | 2, 4 | 8, 12, 16, plus the approximately 70%-occupancy count |
+| continue | 6 | 8, 12, 16, 20, plus the approximately 70%-occupancy count |
+
+This includes the existing leave benchmarks, `Run70Percent.py` and
+`RunTable2Targets.py` configurations, and `RunContinue.py` configurations.
+Six-target continue cases also include 20 escorts for comparison with leave
+mode. There are **120 configuration rows**, **12,000 paired instances**,
+**24,000 integer searches**, and **24,000 LP solves** at the default seed range.
+Each integer instance is followed immediately by its LP relaxation. Both results
+are saved in the same CSV row. All jobs run sequentially to avoid competing for memory.
+Run the full campaign inside tmux; it is a substantial computation.
+
+To inspect every command without creating files or requiring a solver license:
+
+```bash
+python3 ReproducePaper.py --dry-run
+```
+
+For a smaller pilot, use `python3 -u ReproducePaper.py 1 --layouts 13x7`.
+The integer search defaults to up to 16 threads on Linux and the performance
+core count on Apple Silicon. Set `--threads 16` explicitly for the Linux
+benchmark. LPs default to one thread; `--lp-threads 16` changes this. Both
+thread counts are recorded. Each integer search has a 300-second initial
+solver cutoff and a conditional 300-second continuation of the same search
+when FT remains unproved. Each LP has a 300-second limit and a 600-second
+barrier retry after a time limit. Only `OPTIMAL` LP values enter the tables.
+The integer CSV includes `lp_relaxation_lower_bound` in `FT+MV/R` units,
+`lp_status`, and `lp_elapsed_seconds`, plus LP settings and source/input
+fingerprints. Integer solver and CPU times exclude the separate LP solve;
+`total_wall_time` records the integer portion, including greedy preparation.
+The time-limit options shown by `--help` are intended for validation pilots;
+changing them changes the experimental protocol.
+
+**Results and restart.** Each launch creates a fresh
+`results_paper_<timestamp>_<pid>/` directory beside the script. You can choose
+its location with `--output-dir /path/to/new/results`. Existing directories
+are rejected for a fresh launch. The directory contains:
+
+- `source/`: the exact source files and documentation frozen before solving.
+- `manifest.json` and `preflight.log`: seeds, configurations, settings, source
+  hashes, environment, license check, run status, and restart sessions.
+- `leave/` and `continue/`: `loadflow.csv`, `escortflow.csv`, `lp_results.csv`,
+  per-configuration integer CSVs in `parts/`, solver logs, and LP manifests.
+- `tables/instance_metrics.csv`: auditable metrics for every instance and method.
+- `tables/method_comparison.csv`: the Table 2 metrics and new continue equivalents.
+- `tables/bounds_and_solutions.csv`: the Table 3 metrics and new continue equivalents.
+- `tables/table2_leave.tex` and `tables/table3_leave.tex`: single-target (a)
+  and four-target (b) panels together, each pair with one shared caption.
+- `tables/table{2,3}_{leave,continue}_{2,4,6}targets.tex` and single-target
+  fragments: individual panels for inserting into the revised paper.
+- `tables/audit.json`: input hashes, coverage checks, and exact metric definitions.
+
+The LaTeX fragments preserve portrait headings, spell out Load-flow and
+Escort-flow, use FT/MV and esc., omit utilization from the method comparison,
+and bold the lower displayed time for each method pair. The single-target
+Table 2 panel uses only 3-6 escorts; Table 3 retains 3-8 escorts. FT/MV gap
+cells are empty at 100% corresponding optimality. LP gaps remain displayed.
+Use `booktabs`, `makecell`, and `subfig` when inserting the fragments into LaTeX.
+The script does not edit or compile the manuscript.
+
+After interruption, resume with:
+
+```bash
+python3 -u ReproducePaper.py --resume /path/to/results_paper_...
+```
+
+Resume uses the saved seeds, settings, and source snapshot. It verifies their
+hashes, keeps complete integer rows, runs only missing seeds, rebuilds merged
+CSV inputs without duplicates, and skips previously saved optimal LPs. An
+error row or truncated CSV is reported for inspection instead of silently
+discarded. After a fully completed run, regenerate just the tables with:
+
+```bash
+python3 ReproducePaper.py --tables-only /path/to/results_paper_...
+```
+
+This last command uses only the recorded CSVs and Python's standard library;
+it needs neither Gurobi nor a solver license.
+
+**Objective and calculations.** New runs use the current sufficient integer
+coefficient `R = K*(F_g-D+d_max)-D+1` in `Q = R*FT+MV`, with `K=N-e` initial
+loads and the shared greedy warm start. Each LP reuses that run's actual
+coordinates, coefficient, and physical horizon and minimizes the equivalent
+scaled objective `FT+MV/R`.
+
+Method-specific optimality rates, integer bounds, and times use only the
+initial cutoff. Best-known FT and MV come from one lexicographically best
+feasible pair across the greedy plan, both formulations, and both initial and
+extension results. Component gaps are `100*(best-known - integer LB)/best-known`;
+the MV bound is conditional on best-known FT. LP gaps are
+`100*(FT_BK+MV_BK/R-LP)/(FT_BK+MV_BK/R)`. Shared FT/MV improvements are
+`100*(greedy-best-known)/greedy`. These percentages are calculated per
+instance and then averaged over **all** selected instances, including zeros.
+The movement improvement can be negative when attaining a smaller FT requires
+more movements. A zero reference contributes zero percent when the matching
+component/bound is also zero.
+
+To include previously recorded compatible integer runs in the best-known
+reference, supply their CSVs on a fresh launch:
+
+```bash
+python3 -u ReproducePaper.py --reference-input old_loadflow.csv old_escortflow.csv
+```
+
+References must be safe-weighted v4/v5 integer CSVs with explicit feasible
+FT/MV components. Their coordinates, target count, escorts, seed, retrieval
+mode, and movement regime must match. They are copied into the results folder
+and hashed. They affect shared best-known solutions and gap/improvement
+references; they do not replace the new method-specific cutoff measurements.
+Runs from another retrieval mode or target count are never pooled.
+
+This is a fresh reproduction with the current refined coefficient. The
+completed single-target tables used the earlier sufficient `R=K*H_g+1`;
+their archived LP replay must retain that recorded coefficient, as described
+in [LP_REPRODUCIBILITY.md](LP_REPRODUCIBILITY.md). Hardware, solver version,
+thread count, and time-limited search can change runtimes and best-known
+solutions, so a fresh run is not guaranteed to reproduce every printed digit
+of an earlier run. Retain the recorded raw CSVs and their frozen sources in
+the final reproducibility package for auditing the reported values.
+
+**Files for the reproducibility package.** Include `ReproducePaper.py`,
+`PaperTables.py`, `RunStaticCampaign.py`, `RunSafeWeightedStatic.py`,
+`RunWeightedStatic.py`, `RunStaticLP.py`, `static_generated_lp.py`, `static_integrated_lp.py`,
+`PBSCom.py`, `OneStepHeuristic_v2.py`,
+`static_lexicographic.py`, `static_weighted_certification.py`,
+`static_safe_weighted_search.py`, `escort_flow_static_gurobi.py`,
+`load_flow_static_gurobi.py`, `requirements.txt`, `README.md`, and
+`LP_REPRODUCIBILITY.md`. These exact files are collected automatically in
+each results directory's `source/` folder. Keep any archived reference CSVs
+with the pack when historical best-known solutions are used.
+
+### Historical formulation-paper runners
+
 The legacy weighted benchmark campaign in "Escort-Flow Formulation for Simultaneous Multi-Load Retrieval in Puzzle-Based Storage" is generated by `SingleLoadStatic.sh` and `FourLoadsStatic.sh`. These two scripts run both formulations and both ILP/LP-relaxation variants, so no separate LP-relaxation scripts are needed. These scripts retain an extra `9 x 5` layout that is not in the current manuscript's Table 2. Their scope is:
 
 - Single target: five layouts, 3--8 escorts, 100 random instances per row.
@@ -114,9 +426,10 @@ Reference outputs from previous runs are stored under:
 - `/Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Experiment_Static_May2026/`
 - `/Users/talraviv/Library/CloudStorage/Dropbox/research/PBS/EscrotsFlow/Experiment_Mar2026_take2/`
 
-The historical LP commands in these shell scripts use `F+0.01*M`. For the
-LP gaps in Table 2, use `RunStaticLP.py` with the recorded per-instance `R` and
-matched physical horizons. The separate
+The historical LP commands in these shell scripts explicitly select
+`--lp --legacy-lp` and use `F+0.01*M`. For the LP gaps in Table 2, use the
+direct parameter-based `--lp` commands below, or `RunStaticLP.py` with the
+recorded per-instance `R` and horizons. The separate
 [LP reproducibility guide](LP_REPRODUCIBILITY.md) gives the full command and the
 self-contained `reproducibility/table3_lp.zip` package.
 
@@ -405,7 +718,8 @@ the same source snapshots, pairing checks, integer objective, greedy warm starts
 uses escort counts **8, 12, 16**, plus the layout-specific approximately
 70%-occupancy counts **27, 30, 48, 81** above. `RunTable2Targets.py` uses
 **8, 12, 16** escorts for **2 targets**, and **8, 12, 16, 20** for **6 targets**.
-It also calculates both LP relaxations automatically after the integer runs.
+It calculates the matched LP relaxation immediately after each integer instance
+and writes the bound into that instance's CSV row. This is enabled by default.
 
 | Launcher | Retrieval mode | Targets | Configuration rows | Distinct instances | Integer runs | LP solves by default |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -418,7 +732,7 @@ Counts assume all four layouts and seeds 1-100. Commands for the Linux box:
 ```bash
 python3 -u Run70Percent.py --threads 16
 python3 -u RunContinue.py --threads 16
-python3 -u RunTable2Targets.py --threads 16 --lp-workers 1 --lp-threads 16
+python -u RunTable2Targets.py --threads 16 --lp-threads 16
 ```
 
 Run the campaigns separately so their processes do not compete for memory or
@@ -445,23 +759,36 @@ CPU times, and final FT/MV/bound after any extension. Best-known FT/MV and
 improvement over the greedy heuristic can therefore use both models' final
 solutions, while the method comparison retains its initial 300-second cutoff.
 
-The LP stage reads these exact recorded coordinates, `R`, and matched physical
-horizons. It minimizes `FT + MV/R`, saves only `OPTIMAL` relaxations in
-`lp_results.csv`, and keeps the number of target loads in each output key.
+For each instance, the sequence is greedy preparation, integer solve (including
+any conditional extension), and then a separate continuous LP solve with the
+same coordinates, `R`, and model horizon. The integer row is flushed before
+starting the LP. Its `lp_relaxation_lower_bound` column is the optimal value of
+`FT + MV/R`; `lp_status` and `lp_elapsed_seconds` record the LP outcome and time.
+Additional columns retain the LP components, threads, budgets, solver version,
+and input/source fingerprints. An unfinished or failed LP leaves the bound blank
+and preserves the integer result. Integer solver/CPU times and `total_wall_time`
+exclude LP computation. No LP bound is fed into the integer benchmark search.
+
+At the end, the replay tool collects these saved optimal values into
+`lp_results.csv` and only solves missing or failed cases. Completed relaxations
+are reused after checking the instance, coefficient, horizon, and model-source
+fingerprints. Successful retries fill missing LP columns in the new merged and
+per-configuration integer CSVs. Target-load count remains part of each output key.
 The model-specific LP gaps can then be calculated against the common best-known
 integer solution. It never substitutes the obsolete fixed `0.01` coefficient.
 See [LP_REPRODUCIBILITY.md](LP_REPRODUCIBILITY.md) for the gap formula.
 
-LP runs default to one process and one thread per process to limit memory use.
-`--lp-workers` and `--lp-threads` can change these independently of integer
-`--threads`. The LP limit is 300 seconds, followed by a 600-second barrier retry
+Integrated LPs run sequentially and default to one solver thread to limit memory use.
+`--lp-threads` changes this independently of integer `--threads`. `--lp-workers`
+controls only parallel recovery of missing LP bounds at the end. The LP limit
+is 300 seconds, followed by a 600-second barrier retry
 after a time limit; change these using `--lp-time-limit` and
 `--lp-retry-time-limit`. Add `--no-lp` for an integer-only pilot. The other two
 launchers can also calculate LPs if explicitly given `--lp`.
 
-An incomplete LP stage makes the launcher exit with an error and preserves all
-completed optimal values. After the integer stage has finished, restart only
-the LP stage with the saved command, without rerunning integer experiments:
+LP failures leave valid integer rows in place and do not stop later integer
+batches. The final recovery phase retries those LPs and reports an error if
+coverage remains incomplete. To retry LPs after the integer campaign finishes:
 
 ```bash
 RESULTS=/absolute/path/to/results_table2b_targets_...
@@ -470,9 +797,22 @@ bash "$RESULTS/lp_commands.sh"
 
 This script uses the frozen sources and `--resume`, which verifies input and
 source fingerprints before reusing results. The integer launcher requires a
-fresh output directory and does not resume interrupted integer batches. LP
-progress is in `logs/table2b_targets_lp.log` during the automatic stage, and
+fresh output directory and does not resume interrupted integer batches. Integrated
+LP progress is in the per-configuration log alongside integer progress. Recovery
+and collection are logged in `logs/table2b_targets_lp.log`, and
 `lp_results.csv.manifest.json` records the completed and total counts.
+
+For an individual integer-plus-LP batch, add `--with-lp` to the safe runner:
+
+```bash
+python -u RunSafeWeightedStatic.py --formulation loadflow \
+  -x 13 -y 7 -O 6 0 -l 2 -e 8,12,16 -r 1-100 -m leave \
+  --threads 16 --with-lp --lp-threads 16 -f two_targets_loadflow.csv
+```
+
+`--with-lp` means integer plus LP in one CSV. `--lp` still means an LP-only run.
+Both integer-plus-LP workflows use the current v5 rule. The currently running
+v4 campaign keeps its existing frozen code and can use the separate v4 replay.
 
 In continue mode, a target is served when it reaches an output and immediately
 becomes an ordinary blocking load. It does not create an escort. An initially
@@ -905,13 +1245,52 @@ Multi-load example:
 python3 LoadFlowStatic.py -x 16 -y 10 -O 4 0 11 0 -r 1-100 -m leave -e 8-16-4 -l 4
 ```
 
-To solve the LP relaxation for either static model, add `--lp`. Using a larger horizon can make the LP lower bound slightly weaker.
+### Direct LP runs from parameters and seeds
 
-Add `--flow-weight R` to either Gurobi LP runner to set the recorded objective
-`F+M/R` explicitly. Supply the correct `--horizon` for each formulation: the
-physical horizon is `T+1` in escort flow and `T` in load flow. For exact archived LP
-reproduction, use `RunStaticLP.py` and the frozen source snapshot as described
-in [LP_REPRODUCIBILITY.md](LP_REPRODUCIBILITY.md).
+Add `--lp` to either regular static runner, or to `RunSafeWeightedStatic.py`.
+The same dimensions, outputs, targets, escorts, seed, and retrieval mode
+generate the same initial instance as the integer run. Integer CSVs are not
+required. The runner obtains the greedy reference and calculates each
+instance's `R` and horizon before solving the continuous `F+M/R` relaxation.
+
+Use `--lp-protocol v4` for the archived single-/four-target experiment. For
+example, these commands cover all 300 instances of one four-target grid,
+including instances not yet present in the copied integer results:
+
+```bash
+python -u EscortFlowStatic.py -x 13 -y 7 -O 6 0 -l 4 -e 8,12,16 -r 1-100 \
+  -m leave --lp --lp-protocol v4 --num_threads 16 -t 300 \
+  -f lp_four_escortflow_13x7.csv
+
+python -u LoadFlowStatic.py -x 13 -y 7 -O 6 0 -l 4 -e 8,12,16 -r 1-100 \
+  -m leave --lp --lp-protocol v4 --num_threads 16 -t 300 \
+  -f lp_four_loadflow_13x7.csv
+```
+
+Run `python` from the Conda environment with NumPy, `gurobipy`, and the Gurobi
+license. To cover the other grids, use `10x10` with `-O 0 0`, `16x10` with
+`-O 4 0 11 0`, and `27x10` with `-O 4 0 13 0 22 0`. Use a different `-f`
+filename for each model and grid. To resume, repeat the same command with
+`--resume`. Completed optimal LPs are reused after checking the saved inputs
+and frozen sources. Instance parameters cannot be changed during a resume.
+
+The default `--lp-protocol v5` matches the current safe integer runner and the
+new two-/six-target campaigns. `-m continue` selects continue mode. The safe
+runner uses `--formulation escortflow` or `--formulation loadflow`, `--threads`
+for solver threads, and `--weighted-time-limit` for the LP budget. In all three
+runners, `--lp-workers` defaults to one and `--lp-retry-time-limit` defaults to
+600 seconds. LP outputs use the `RunStaticLP.py` schema and only contain
+`OPTIMAL` values. Coordinate/coefficient snapshots and frozen sources are saved
+beside the output CSV.
+
+The earlier v4 coefficient remains sufficient, but changing `R` or the horizon
+changes the LP being solved and can affect integer search performance. Keep
+the coefficient/horizon protocol matched to the integer campaign. For exact
+published-result replay, use the archived input CSVs and frozen model sources
+with `RunStaticLP.py`. The regular runners also accept explicit `--flow-weight R`
+and `--horizon T`; EF's physical horizon is `T+1` and LF's is `T`. Historical
+fixed-weight commands require `--lp --legacy-lp`. See
+[LP_REPRODUCIBILITY.md](LP_REPRODUCIBILITY.md) for formulas, files, and restart checks.
 
 ### DP helper modules
 

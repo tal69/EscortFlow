@@ -35,6 +35,15 @@ FIELDS = (
 )
 
 
+class LPNotOptimalError(RuntimeError):
+    def __init__(self, message, status='ERROR'):
+        super().__init__(message, status)
+        self.status = status
+
+    def __str__(self):
+        return self.args[0]
+
+
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -187,8 +196,9 @@ def solve_instance(problem, settings):
         if result["status_name"] != "TIME_LIMIT" or not settings["retry_time_limit"] or attempt:
             break
     if result["status_name"] != "OPTIMAL" or not result["has_solution"]:
-        raise RuntimeError(f"{problem['method']} {problem['layout']} e={problem['escorts']} "
-                           f"loads={problem['loads']} seed={problem['seed']}: LP status {result['status_name']}")
+        raise LPNotOptimalError(f"{problem['method']} {problem['layout']} e={problem['escorts']} "
+                                f"loads={problem['loads']} seed={problem['seed']}: LP status {result['status_name']}",
+                                result['status_name'])
     row = {key: problem[key] for key in ("layout", "escorts", "loads", "seed", "flow_weight", "method",
                                        "horizon", "physical_horizon", "retrieval_mode", "problem_sha256")}
     row.update(lp_objective=result["objective"], lp_flow=result["flowtime"],
@@ -250,11 +260,17 @@ def parse_args(argv=None):
     parser.add_argument("--escorts", help="optional filter, e.g., 3-8")
     parser.add_argument("--formulation", choices=("loadflow", "escortflow"))
     parser.add_argument("--resume", action="store_true", help="verify the manifest and skip saved OPTIMAL results")
+    parser.add_argument("--extend", action="store_true",
+                        help="with --resume, allow additional instances; all previous instances and model sources must remain unchanged")
     parser.add_argument("--check-against", type=Path, help="verify LP objectives against a reference LP CSV")
+    parser.add_argument('--fill-input-lp', action='store_true',
+                        help='fill missing LP columns in new integrated integer CSVs after retry; historical CSVs stay read-only')
     args = parser.parse_args(argv)
     try:
         if args.workers <= 0 or args.threads <= 0:
             raise ValueError("Workers and threads must be positive")
+        if args.extend and not args.resume:
+            raise ValueError("--extend requires --resume")
         paths = []
         for pattern in args.input:
             matches = sorted(glob.glob(pattern))
@@ -299,7 +315,16 @@ def run(args):
     completed = {}
     problems = {p["problem_sha256"]: p for p in instances}
     if args.output.exists():
-        if not manifest_path.exists() or json.loads(manifest_path.read_text())["identity"] != identity:
+        if not manifest_path.exists():
+            raise ValueError("Resume refused: model sources or selected instances changed, or manifest missing")
+        manifest = json.loads(manifest_path.read_text())
+        previous = manifest["identity"]
+        if args.extend:
+            if (previous["objective"] != identity["objective"]
+                    or previous["model_sources"] != identity["model_sources"]
+                    or not set(previous["problem_sha256"]) <= set(identity["problem_sha256"])):
+                raise ValueError("Resume refused: previous instances were removed/changed or model sources changed")
+        elif previous != identity:
             raise ValueError("Resume refused: model sources or selected instances changed, or manifest missing")
         with args.output.open(newline="") as handle:
             reader = csv.DictReader(handle)
@@ -320,12 +345,27 @@ def run(args):
                 if reference is not None:
                     check_reference(row, reference)
                 completed[key] = row
-        manifest = json.loads(manifest_path.read_text())
+        if args.extend:
+            manifest.update(identity=identity, inputs=[dict(file=p.name, sha256=sha256(p)) for p in args.paths])
     else:
         if manifest_path.exists():
             raise ValueError("Manifest already exists without its output; choose a fresh output")
         manifest = dict(identity=identity, inputs=[dict(file=p.name, sha256=sha256(p)) for p in args.paths],
                         python=platform.python_version(), platform=platform.platform(), sessions=[])
+    # Reuse the optimal relaxations already saved in each integer CSV row.
+    # The replay remains a recovery tool for older campaigns and failed LPs.
+    from static_integrated_lp import read_embedded
+    imported = []
+    for key, row in read_embedded(args.paths, problems, source_hash).items():
+        if reference is not None:
+            check_reference(row, reference)
+        if key in completed:
+            if not math.isclose(float(row['lp_objective']), float(completed[key]['lp_objective']),
+                                abs_tol=1e-6, rel_tol=1e-8):
+                raise ValueError('Embedded and cached LP objectives disagree')
+        else:
+            completed[key] = row
+            imported.append(row)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     settings = dict(threads=args.threads, time_limit=args.time_limit, retry_time_limit=args.retry_time_limit,
                     source_sha256=source_hash)
@@ -340,6 +380,14 @@ def run(args):
         temporary_manifest.replace(manifest_path)
 
     save_progress()
+    if imported:
+        with args.output.open('a' if args.output.exists() else 'x', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=FIELDS)
+            if handle.tell() == 0:
+                writer.writeheader()
+            writer.writerows(imported)
+            handle.flush()
+        print(f'Reused {len(imported)} optimal LP bounds from integer CSV rows.', flush=True)
     pending = [p for p in instances if p["problem_sha256"] not in completed]
     print(f"LP replay: {len(completed)}/{len(instances)} saved; {len(pending)} to solve.", flush=True)
     failures = []
@@ -377,6 +425,11 @@ def run(args):
                             futures[pool.submit(solve_instance, following, settings)] = following
                     save_progress()
                     print(f"LP replay: {len(completed)}/{len(instances)} OPTIMAL.", flush=True)
+    if getattr(args, 'fill_input_lp', False):
+        from static_integrated_lp import fill_inputs
+        filled = fill_inputs(args.paths, completed, source_hash, settings)
+        manifest['inputs'] = [dict(file=p.name, sha256=sha256(p)) for p in args.paths]
+        print(f'Filled {filled} missing LP values in integrated integer CSVs.', flush=True)
     session.update(finished_unix=time.time(), failures=failures)
     save_progress()
     if failures:

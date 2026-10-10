@@ -97,7 +97,7 @@ def main(argv=None):
             shutil.copyfile(path, stage / "inputs" / path.name)
         for name in MODEL_FILES:
             shutil.copyfile(ARCHIVE / "source" / name, stage / "source" / name)
-        for name in ("RunStaticLP.py", "LP_REPRODUCIBILITY.md"):
+        for name in ("RunStaticLP.py", "static_integrated_lp.py", "LP_REPRODUCIBILITY.md"):
             shutil.copyfile(HERE / name, stage / name)
         shutil.copyfile(ARCHIVE / "lp_results.csv", stage / "expected_lp_results.csv")
         (stage / "requirements.txt").write_text("gurobipy==13.0.3\n")

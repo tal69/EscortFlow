@@ -104,6 +104,11 @@ parser.add_argument("--lp", action="store_true",
                     help="Solve the continuous LP relaxation of the static model (default False)")
 parser.add_argument("--flow-weight", "--flow_weight", type=int, default=None,
                     help="With --lp, use the recorded positive integer R in F + M/R; requires Gurobi")
+parser.add_argument('--lp-protocol', choices=['v4', 'v5'], default='v5', help='Direct --lp: archived v4 or current v5 coefficient/horizon conventions')
+parser.add_argument('--lp-workers', type=int, default=1, help='Direct LP solves in parallel (default 1)')
+parser.add_argument('--lp-retry-time-limit', type=float, default=600, help='Direct LP barrier retry budget')
+parser.add_argument('--resume', action='store_true', help='Resume direct --lp results after checking saved inputs and sources')
+parser.add_argument('--legacy-lp', action='store_true', help='With --lp, retain historical weights and the old heuristic horizon')
 parser.add_argument("--gurobi", action="store_true",
                     help="Solve the static load-flow model with the Gurobi Python API (default)")
 parser.add_argument("--warmstart", action="store_true",
@@ -118,6 +123,18 @@ parser.add_argument("--no_cutoff", dest="cutoff", action="store_false", help=arg
 
 parser.set_defaults(cutoff=False)
 args = parser.parse_args()
+if args.legacy_lp and not args.lp:
+    parser.error('--legacy-lp requires --lp')
+if args.resume and (not args.lp or args.legacy_lp):
+    parser.error('--resume is supported for direct --lp runs only')
+if args.lp_protocol != 'v5' and (not args.lp or args.legacy_lp):
+    parser.error('--lp-protocol v4 requires direct --lp')
+if args.lp and not args.legacy_lp:
+    from static_generated_lp import run_standard
+    try:
+        sys.exit(run_standard(args, 'loadflow'))
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
 if args.flow_weight is not None:
     if not args.lp or args.opl or args.flow_weight <= 0:
         parser.error("--flow-weight requires --lp, Gurobi, and a positive integer R")

@@ -36,7 +36,7 @@ CAMPAIGNS = {
     "target_counts": dict(prefix="table2b_targets", directory="table2b_targets", mode="leave", loads=(2, 6),
                          escorts_by_loads={2: (8, 12, 16), 6: (8, 12, 16, 20)}, lp=True,
                          description="Tables 2 and 3 leave-mode cases: 2 targets with 8/12/16 escorts, "
-                                     "6 targets with 8/12/16/20 escorts, followed by matched LP relaxations."),
+                                     "6 targets with 8/12/16/20 escorts, with an LP bound in each instance row."),
 }
 
 
@@ -127,6 +127,17 @@ with open(source, newline="") as handle:
 merge_batch(source, destination, seeds, escorts, cutoff, extension)
 '''
 
+FILL_PARTS = r'''
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from static_integrated_lp import fill_inputs, source_fingerprint
+from RunStaticLP import read_reference
+completed = {r['problem_sha256']: r for r in read_reference(Path(sys.argv[2])).values()}
+fill_inputs(sys.argv[6:], completed, source_fingerprint(sys.argv[1]),
+            dict(threads=int(sys.argv[3]), time_limit=float(sys.argv[4]), retry_time_limit=float(sys.argv[5])))
+'''
+
 
 def automatic_threads():
     """Use Apple performance cores, or the Linux campaign's 16-thread setting."""
@@ -167,6 +178,10 @@ def commands(args, source_dir, result_dir):
                        "--weighted-time-limit", str(args.weighted_time_limit),
                        "--extension-time-limit", str(args.extension_time_limit),
                        "-f", str(result_dir / "parts" / (stem + ".csv"))]
+            if args.lp:
+                command += ['--with-lp', '--lp-threads', str(args.lp_threads),
+                            '--lp-time-limit', str(args.lp_time_limit),
+                            '--lp-retry-time-limit', str(args.lp_retry_time_limit)]
             yield dict(config, formulation=formulation, stem=stem, command=command)
 
 
@@ -179,7 +194,7 @@ def lp_command(args, source_dir, result_dir):
             "--source-dir", str(source_dir), "--workers", str(args.lp_workers),
             "--threads", str(args.lp_threads), "--time-limit", str(args.lp_time_limit),
             "--retry-time-limit", str(args.lp_retry_time_limit),
-            "-f", str(result_dir / "lp_results.csv")]
+            "-f", str(result_dir / "lp_results.csv"), '--fill-input-lp']
 
 
 def validate_pairs(result_dir, seed_values, configs, prefix):
@@ -241,9 +256,9 @@ def main(campaign, argv=None):
                         help="extra solver seconds only when cutoff flow is unproved")
     parser.add_argument("--lp", action=argparse.BooleanOptionalAction,
                         default=settings.get("lp", False),
-                        help="after the integer campaign, solve both matched LP relaxations")
+                        help="save the matched LP bound after each integer instance (default on for 2/6 targets)")
     parser.add_argument("--lp-workers", type=int, default=1,
-                        help="parallel LP processes; one limits memory use for multi-target models")
+                        help="parallel LP recovery processes for missing bounds; integrated LPs run sequentially")
     parser.add_argument("--lp-threads", type=int, default=1, help="solver threads per LP process")
     parser.add_argument("--lp-time-limit", type=finite_number, default=300,
                         help="initial LP solver seconds per instance")
@@ -305,7 +320,8 @@ def main(campaign, argv=None):
                     retrieval_mode=settings["mode"], movement_mode="BM", target_loads=list(settings["loads"]),
                     warm_start="Common complete greedy plan in both formulations",
                     solver_runs=2 * len(configs) * len(metadata["seed_values"]),
-                    lp=dict(enabled=args.lp, workers=args.lp_workers, threads=args.lp_threads,
+                    lp=dict(enabled=args.lp, schedule='after_each_integer_instance', workers=1,
+                            recovery_workers=args.lp_workers, threads=args.lp_threads,
                             time_limit=args.lp_time_limit, retry_time_limit=args.lp_retry_time_limit,
                             objective="F+M/R, using each recorded R and horizon",
                             solver_runs=2 * len(configs) * len(metadata["seed_values"]) if args.lp else 0),
@@ -335,10 +351,13 @@ def main(campaign, argv=None):
         "\n".join(shlex.join(batch["command"]) for batch in batches) + "\n")
     if args.lp:
         relaxation_command = lp_command(args, runtime_dir, result_dir)
+        fill_command = [args.python, '-u', '-c', FILL_PARTS, str(runtime_dir), str(result_dir/'lp_results.csv'),
+                        str(args.lp_threads), str(args.lp_time_limit), str(args.lp_retry_time_limit),
+                        *(str(result_dir/'parts'/(batch['stem']+'.csv')) for batch in batches)]
         # This separate script also retries only missing LP values after a failure
         # or interruption, using the frozen solver modules and input fingerprints.
         (result_dir / "lp_commands.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n" +
-            shlex.join(relaxation_command + ["--resume"]) + "\n")
+            shlex.join(relaxation_command + ["--resume"]) + "\n" + shlex.join(fill_command) + "\n")
     for batch in batches:
         lx, ly, escorts, outputs, loads, formulation, stem, command = (
             batch[k] for k in ("lx", "ly", "escorts", "outputs", "loads", "formulation", "stem", "command"))
@@ -346,7 +365,11 @@ def main(campaign, argv=None):
         print("[{}] {} {}x{}, {} targets, {} escorts, {}: starting (log: {})".format(
             datetime.now().astimezone().isoformat(), formulation, lx, ly, loads, escorts, settings["mode"], log), flush=True)
         with log.open("w") as handle:
-            subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=True)
+            result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT)
+        if result.returncode not in (0, 3):
+            result.check_returncode()
+        if result.returncode == 3:
+            print('Integer rows saved; missing LP bounds will be retried after the campaign.', flush=True)
         batch_csv = result_dir / "parts" / (stem + ".csv")
         merged_csv = result_dir / (settings["prefix"] + "_" + formulation + ".csv")
         subprocess.run([args.python, "-u", "-c", MERGE, str(runtime_dir), str(batch_csv),
@@ -358,10 +381,10 @@ def main(campaign, argv=None):
     validate_pairs(result_dir, metadata["seed_values"], configs, settings["prefix"])
     if args.lp:
         log = result_dir / "logs" / (settings["prefix"] + "_lp.log")
-        print("Starting {} matched LP solves (log: {})".format(
-            metadata["lp"]["solver_runs"], log), flush=True)
+        print("Collecting saved LP bounds; retrying only missing cases (log: {})".format(log), flush=True)
         with log.open("w") as handle:
             subprocess.run(relaxation_command, stdout=handle, stderr=subprocess.STDOUT, check=True)
+        subprocess.run(fill_command, check=True)
         print("LP relaxations complete. Saved OPTIMAL values: " + str(result_dir / "lp_results.csv"), flush=True)
     print("Completed. Results: " + str(result_dir), flush=True)
     return 0

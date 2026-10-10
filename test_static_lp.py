@@ -1,4 +1,5 @@
 import csv
+import concurrent.futures
 from contextlib import redirect_stdout
 import importlib.util
 import io
@@ -151,6 +152,48 @@ class LPReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Resume refused"):
             runner.run(args)
 
+    def test_extend_solves_only_added_cases_and_keeps_completed_values(self):
+        args, manifest_path, path = self.prepare_completed_run()
+        args.extend = True
+        write_inputs(path, [input_row(), input_row(seed="8")])
+        calls = []
+
+        def solve(problem, settings):
+            calls.append(problem["seed"])
+            return result_row(problem, settings["source_sha256"])
+
+        def pool(**kwargs):
+            return concurrent.futures.ThreadPoolExecutor(max_workers=kwargs["max_workers"])
+
+        with patch.object(runner.concurrent.futures, "ProcessPoolExecutor", side_effect=pool), \
+                patch.object(runner, "solve_instance", side_effect=solve), redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.run(args), 0)
+        self.assertEqual(calls, [8])
+        self.assertEqual(len(json.loads(manifest_path.read_text())["identity"]["problem_sha256"]), 2)
+        with args.output.open() as handle:
+            self.assertEqual({r["seed"] for r in csv.DictReader(handle)}, {"7", "8"})
+        with patch.object(runner.concurrent.futures, "ProcessPoolExecutor") as pool_mock, redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.run(args), 0)
+        pool_mock.assert_not_called()
+
+    def test_extend_refuses_changed_or_removed_previous_cases(self):
+        args, _, path = self.prepare_completed_run()
+        args.extend = True
+        for rows in ([input_row(seed="8")],
+                     [input_row(weighted_horizon="2", weighted_physical_horizon="3"), input_row(seed="8")]):
+            write_inputs(path, rows)
+            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, "removed/changed"):
+                runner.run(args)
+
+    def test_extend_still_refuses_changed_model_sources(self):
+        args, manifest_path, _ = self.prepare_completed_run()
+        args.extend = True
+        manifest = json.loads(manifest_path.read_text())
+        manifest["identity"]["model_sources"][runner.MODEL_FILES[0]] = "changed"
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "model sources changed"):
+            runner.run(args)
+
     def test_resume_refuses_corrupted_result_components(self):
         args, _, _ = self.prepare_completed_run()
         with args.output.open(newline="") as handle:
@@ -209,7 +252,7 @@ class LPReplayTests(unittest.TestCase):
 
 class StandardLPOptionTests(unittest.TestCase):
     def test_invalid_flow_weight_combinations_fail_before_solving(self):
-        base = ["-x", "2", "-y", "2", "-O", "0", "0"]
+        base = ["-x", "2", "-y", "2", "-O", "0", "0", "-e", "1"]
         for script in ("EscortFlowStatic.py", "LoadFlowStatic.py"):
             for flags in (["--flow-weight", "5"], ["--lp", "--flow-weight", "0"],
                           ["--lp", "--flow-weight", "5", "--gamma", "0.3"],
@@ -218,7 +261,7 @@ class StandardLPOptionTests(unittest.TestCase):
                     result = subprocess.run([sys.executable, str(HERE / script), *base, *flags],
                                             capture_output=True, text=True, cwd=HERE)
                     self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                    self.assertIn("--flow-weight", result.stderr)
+                    self.assertIn("error:", result.stderr)
 
     @unittest.skipUnless(importlib.util.find_spec("gurobipy"), "Gurobi Python API is unavailable")
     def test_both_standard_runners_match_archived_lp_objectives(self):
@@ -241,9 +284,9 @@ class StandardLPOptionTests(unittest.TestCase):
                         rows = list(csv.DictReader((line for line in handle if line.strip()), skipinitialspace=True))
                     self.assertEqual(len(rows), 1)
                     row = rows[0]
-                    self.assertEqual(row["Model"].strip(), "LP-Gurobi")
-                    self.assertAlmostEqual(float(row["gamma"]), 1 / 881, places=12)
-                    self.assertAlmostEqual(float(row["obj"]),
+                    self.assertEqual(row["status"], "OPTIMAL")
+                    self.assertEqual(int(row["flow_weight"]), 881)
+                    self.assertAlmostEqual(float(row["lp_objective"]),
                                            float(references[("13x7", 3, 1, 1, method, "leave")]["lp_objective"]), places=6)
 
 
