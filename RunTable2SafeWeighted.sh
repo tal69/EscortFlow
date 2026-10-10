@@ -9,6 +9,7 @@ seeds=1-100
 part=both
 weighted_limit=300
 extension_limit=300
+stop_at_flow_proof=0
 dry_run=0
 result_dir="${script_dir}/results_table2_safe_weighted_$(date +%Y%m%d_%H%M%S)_$$"
 
@@ -36,6 +37,7 @@ Options:
   --weighted-time-limit SECONDS   Initial reporting cutoff (default: 300)
   --extension-time-limit SECONDS  Conditional extra search budget (default: 300)
   --certification-time-limit SEC  Alias for --extension-time-limit
+  --stop-at-flow-proof            Stop as soon as flow time is proved; retain all KPIs
   --output-dir DIR                New results directory; existing paths rejected
   --dry-run                       Print commands without solving or creating files
   -h, --help                      Show this help
@@ -68,6 +70,7 @@ while (($#)); do
             esac
             shift 2 ;;
         --dry-run) dry_run=1; shift ;;
+        --stop-at-flow-proof) stop_at_flow_proof=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown argument: $1" ;;
     esac
@@ -81,7 +84,7 @@ if (( ! dry_run )); then
     [[ ! -e $result_dir ]] || die "Output directory already exists: $result_dir"
     mkdir -p -- "$result_dir/parts" "$result_dir/logs"
     result_dir=$(cd -- "$result_dir" && pwd)
-    if ! "$python_bin" - "$script_dir" "$threads" "$seeds" "$part" "$weighted_limit" "$extension_limit" <<'PY' > "$result_dir/environment.txt" 2>&1
+    if ! "$python_bin" - "$script_dir" "$threads" "$seeds" "$part" "$weighted_limit" "$extension_limit" "$stop_at_flow_proof" <<'PY' > "$result_dir/environment.txt" 2>&1
 import datetime
 import hashlib
 import os
@@ -110,6 +113,7 @@ from RunSafeWeightedStatic import PROTOCOL, parse_range, positive_number, nonneg
 seed_values = parse_range(sys.argv[3], minimum=0)
 weighted = positive_number(sys.argv[5])
 extension = nonnegative_number(sys.argv[6])
+stop_at_flow_proof = bool(int(sys.argv[7]))
 print("NumPy:", numpy.__version__)
 print("Gurobi:", ".".join(map(str, gp.gurobi.version())))
 print("Threads:", sys.argv[2])
@@ -122,12 +126,14 @@ print("Movement bounds: lower D=sum(d_i); upper U=(N-e)*H; coefficient R=U-D+1")
 print("Horizon: H=greedy_F-sum(d_i)+max(d_i), covering a global lexicographic optimum")
 print("Flow proof checks: improved lower bound or smaller candidate flow; mandatory cutoff and final checks")
 print("Cached flow criterion; unchanged bounds and movement-only improvements skip proof comparisons")
-print("Record the first observed flow proof; first phase attempts both objectives")
+print("stop_at_flow_proof:", stop_at_flow_proof)
+print("Record the first observed flow proof; retain flow, movements, bound, gap and timing KPIs")
 print("Extend only if the cutoff flow is unproved; stop on its proof, a lower-flow counterexample, or the total cap")
 print("Report first flow-proof time and total runtime, plus cutoff and final solutions separately")
 print("Mode: leave; movement: BM; sequential jobs")
 print("Warm start: common complete greedy plan; one continuous solve preserves all search state")
-print("MIPFocus: 0 throughout. Flow proof ends the extension, but does not end the first phase early.")
+print("MIPFocus: 0 throughout. " + ("Flow proof ends the search immediately at its supported callback."
+      if stop_at_flow_proof else "Flow proof ends the extension, but does not end the first phase early."))
 source = Path(sys.argv[1])
 for arguments in (["rev-parse", "HEAD"], ["status", "--short"]):
     try:
@@ -174,6 +180,9 @@ run_layout() {
         -e "$escorts" -l "$loads" -r "$seeds" --threads "$threads"
         --weighted-time-limit "$weighted_limit" --extension-time-limit "$extension_limit"
         -f "$batch_csv")
+    if (( stop_at_flow_proof )); then
+        command+=(--stop-at-flow-proof)
+    fi
     if (( dry_run )); then
         printf '%q ' "${command[@]}"
         printf '\n'
@@ -186,7 +195,7 @@ run_layout() {
     if ! "${command[@]}" > "$log_file" 2>&1; then
         die "Solver process failed; inspect $log_file"
     fi
-    "$python_bin" - "$script_dir" "$batch_csv" "$merged_csv" "$seeds" "$escorts" "$weighted_limit" "$extension_limit" <<'PY'
+    "$python_bin" - "$script_dir" "$batch_csv" "$merged_csv" "$seeds" "$escorts" "$weighted_limit" "$extension_limit" "$stop_at_flow_proof" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 from RunSafeWeightedStatic import merge_batch

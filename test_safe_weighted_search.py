@@ -655,6 +655,131 @@ class FlowProofTimingTests(unittest.TestCase):
                     self.assertEqual(method or "", authoritative["proof_source"])
 
 
+class StopAtFlowProofTests(unittest.TestCase):
+    CONTEXT = ContinuousSearchTests.CONTEXT
+    event = ContinuousSearchTests.event
+    seed_candidate = ContinuousSearchTests.seed_candidate
+    result = staticmethod(ContinuousSearchTests.result)
+
+    def setUp(self):
+        self.model = CallbackModel()
+        self.callback = SafeWeightedContinuation(
+            CallbackExpression([("flow", 1)]),
+            CallbackExpression([("movement", 1)]), 41,
+            dict(self.CONTEXT, stop_at_flow_proof=True))
+
+    def test_bound_improvement_stops_immediately_with_all_solution_metrics(self):
+        self.seed_candidate(bound=180)
+        self.model.solution_error = AssertionError("A bound callback must not read solution vectors")
+        self.event(GRB.Callback.MIP, 20.01, bound=195, nodes=7, work=2.5)
+        self.assertEqual(self.model.termination_count, 1)
+        extra = self.callback.finalize(self.result(runtime=20.02))
+        self.assertEqual(extra["stop_reason"], "FLOW_PROVEN_EARLY")
+        self.assertEqual(extra["first_flow_proof_runtime"], 20.01)
+        self.assertEqual(extra["first_flow_proof_node_count"], 7)
+        self.assertEqual(extra["first_flow_proof_work"], 2.5)
+        snapshot = extra["phase1_snapshot"]
+        self.assertEqual((snapshot["flowtime"], snapshot["movements"]), (5, 7))
+        self.assertEqual(snapshot["runtime"], 20.02)
+        self.assertFalse(snapshot["weighted_proven"])
+        self.assertTrue(snapshot["flow_proven"])
+        self.assertTrue(extra["final_flow_proven"])
+        self.assertFalse(extra["extension_used"])
+        self.assertEqual(extra["optimization_calls"], 1)
+
+    def test_distance_optimal_start_stops_without_any_solver_bound(self):
+        self.event(GRB.Callback.MIPSOL, .02, flow=3, movements=12, bound=-GRB.INFINITY)
+        self.assertEqual(self.model.termination_count, 1)
+        extra = self.callback.finalize(self.result(
+            flow=3, movements=12, runtime=.03, scaled_best_bound=None,
+            best_bound=None, scaled_absolute_gap=None, absolute_gap=None))
+        self.assertEqual(extra["first_flow_proof_method"], "distance_bound")
+        self.assertTrue(extra["flow_proven"])
+        self.assertEqual(extra["phase1_snapshot"]["movements"], 12)
+        self.assertFalse(extra["phase1_snapshot"]["weighted_proven"])
+
+    def test_lower_flow_mipsol_stops_using_retained_stronger_bound(self):
+        self.seed_candidate(bound=145, flow=5, movements=7)
+        self.event(GRB.Callback.MIPSOL, 21.1, flow=4, movements=4, bound=140)
+        self.assertEqual(self.model.termination_count, 1)
+        extra = self.callback.finalize(self.result(flow=4, movements=4, bound=145, runtime=21.2))
+        self.assertEqual(extra["first_flow_proof_source"], "CALLBACK_MIPSOL")
+        self.assertEqual(extra["first_flow_proof_runtime"], 21.1)
+        self.assertTrue(extra["flow_proven"])
+        self.assertEqual((extra["phase1_snapshot"]["flowtime"], extra["phase1_snapshot"]["movements"]), (4, 4))
+
+    def test_no_solution_or_unproved_bound_does_not_stop(self):
+        self.event(GRB.Callback.MIP, 10, bound=195)
+        self.assertEqual(self.model.termination_count, 0)
+        self.event(GRB.Callback.MIPSOL, 20, bound=130)
+        # The earlier bound was consistent with this candidate, so F=5 is
+        # now proved immediately once there is a feasible solution to report.
+        self.assertEqual(self.model.termination_count, 1)
+
+    def test_invalid_bound_does_not_trigger_early_stop(self):
+        for bound in (194.001, 194.0010005, math.nan, math.inf, 213):
+            with self.subTest(bound=bound):
+                self.setUp()
+                self.seed_candidate(bound=130)
+                self.event(GRB.Callback.MIP, 30, bound=bound)
+                self.assertEqual(self.model.termination_count, 0)
+
+    def test_nonincumbent_proof_does_not_stop_with_unproved_reported_flow(self):
+        self.seed_candidate(bound=130)
+        # This feasible F=3 witness proves the global minimum via D=3,
+        # but its weighted objective 223 is worse than the incumbent's 212.
+        self.event(GRB.Callback.MIPSOL, 30, flow=3, movements=100, bound=130)
+        self.assertEqual(self.callback.first_flow_proof["flowtime"], 3)
+        self.assertEqual(self.callback.best_live_incumbent["flowtime"], 5)
+        self.assertEqual(self.model.termination_count, 0)
+        self.event(GRB.Callback.MIPSOL, 31, flow=3, movements=12, bound=130)
+        self.assertEqual(self.model.termination_count, 1)
+
+    def test_proof_during_extension_preserves_cutoff_movement_count(self):
+        self.seed_candidate(bound=180)
+        self.event(GRB.Callback.MIPSOL, 301, flow=5, movements=3, bound=180)
+        self.assertEqual(self.model.termination_count, 0)
+        self.event(GRB.Callback.MIP, 302, bound=195)
+        self.assertEqual(self.model.termination_count, 1)
+        extra = self.callback.finalize(self.result(movements=3, runtime=302.1))
+        self.assertEqual(extra["phase1_snapshot"]["movements"], 7)
+        self.assertEqual(extra["phase1_snapshot"]["runtime"], 300)
+        self.assertTrue(extra["extension_used"])
+        self.assertEqual(extra["first_flow_proof_runtime"], 302)
+        self.assertEqual(extra["stop_reason"], "FLOW_PROVEN_EARLY")
+
+    def test_proved_lower_flow_after_cutoff_keeps_the_old_main_solution(self):
+        self.seed_candidate(bound=130)
+        self.event(GRB.Callback.MIPSOL, 301, flow=4, movements=4, bound=145)
+        self.assertEqual(self.model.termination_count, 1)
+        extra = self.callback.finalize(self.result(flow=4, movements=4, bound=145, runtime=301.1))
+        self.assertEqual((extra["phase1_snapshot"]["flowtime"], extra["phase1_snapshot"]["movements"]), (5, 7))
+        self.assertFalse(extra["flow_proven"])
+        self.assertTrue(extra["final_flow_proven"])
+        self.assertTrue(extra["counterexample"])
+        self.assertEqual(extra["first_flow_proof_flowtime"], 4)
+        self.assertEqual(extra["stop_reason"], "FLOW_PROVEN_EARLY")
+
+    def test_explicit_early_stop_overrides_full_budget_search(self):
+        self.callback.stop_on_flow_proof = False
+        self.seed_candidate(bound=195)
+        self.assertEqual(self.model.termination_count, 1)
+
+    def test_unreliable_final_status_invalidates_early_proof(self):
+        self.seed_candidate(bound=195)
+        extra = self.callback.finalize(self.result(runtime=20.1, status="NUMERIC"))
+        self.assertTrue(extra["flow_proof_invalidated"])
+        self.assertFalse(extra["flow_proven"])
+        self.assertFalse(extra["final_flow_proven"])
+        self.assertIsNone(extra["first_flow_proof_runtime"])
+
+    def test_nonboolean_early_stop_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "stop_at_flow_proof"):
+            SafeWeightedContinuation(
+                CallbackExpression([("flow", 1)]), CallbackExpression([("movement", 1)]),
+                41, dict(self.CONTEXT, stop_at_flow_proof=1))
+
+
 class TightenedCoefficientTests(unittest.TestCase):
     def callback(self, weight=38):
         return SafeWeightedContinuation(

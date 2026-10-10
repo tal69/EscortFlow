@@ -133,6 +133,30 @@ class SafeWeightedRunnerTests(unittest.TestCase):
         self.assertEqual(row["extension_used"], 0)
         self.assertEqual(len(calls), 1)
 
+    def test_early_flow_stop_reports_all_incumbent_kpis_for_both_formulations(self):
+        self.args.stop_at_flow_proof = True
+        stopped = self.solution(status_name="INTERRUPTED", scaled_best_bound=124,
+                                runtime=12.5, cpu_time=13.2, flow_proven=True)
+        for formulation in ("escortflow", "loadflow"):
+            with self.subTest(formulation=formulation):
+                self.args.formulation = formulation
+                row, _, _ = self.run_fake(initial=stopped, final=stopped,
+                    extension_used=False, extension_runtime=0, stop_reason="FLOW_PROVEN_EARLY",
+                    first_flow_proof_runtime=12.5, first_flow_proof_cpu_time=13.2,
+                    first_flow_proof_flowtime=4, first_flow_proof_method="weighted_gap")
+                self.assertEqual(row["error"], "")
+                self.assertEqual(row["stop_at_flow_proof"], 1)
+                self.assertEqual(row["search_stop_reason"], "FLOW_PROVEN_EARLY")
+                self.assertEqual((row["flowtime"], row["movements"], row["scaled_objective"]), (4, 10, 146))
+                self.assertEqual((row["final_flowtime"], row["final_movements"], row["final_scaled_objective"]), (4, 10, 146))
+                self.assertEqual(row["scaled_absolute_gap"], 22)
+                self.assertEqual(row["flow_proven"], 1)
+                self.assertEqual(row["lexicographic_proven"], 0)
+                self.assertEqual(row["final_lexicographic_proven"], 0)
+                self.assertEqual(row["weighted_runtime"], 12.5)
+                self.assertEqual(row["final_runtime"], 12.5)
+                self.assertEqual(row["first_flow_proof_runtime"], 12.5)
+
     def test_extension_bound_certifies_original_without_overwriting_original_gap(self):
         final = self.solution(status_name="INTERRUPTED", scaled_best_bound=124, runtime=320)
         row, solver, calls = self.run_fake(final=final, extension_runtime=20, stop_reason="FLOW_PROVEN")
@@ -348,9 +372,23 @@ class SafeWeightedRunnerTests(unittest.TestCase):
                 self.assertEqual(config.time_limit, 300)
                 self.assertEqual(config.flow_proof_extension_time_limit, 71)
                 self.assertTrue(config.stop_on_flow_proof)
+                self.assertFalse(config.stop_at_flow_proof)
                 self.assertFalse(hasattr(config, "flow_proof_check_seconds"))
                 self.assertFalse(hasattr(config, "flow_proof_check_nodes"))
                 self.assertEqual(config.threads, 16)
+
+    def test_early_stop_option_is_forwarded_to_both_solver_configs(self):
+        self.args.stop_at_flow_proof = True
+        for formulation, constructor in (
+                ("escortflow", "escort_flow_static_gurobi.StaticEscortFlowGurobiSolver"),
+                ("loadflow", "load_flow_static_gurobi.LoadFlowStaticGurobiSolver")):
+            with self.subTest(formulation=formulation), patch(constructor) as make:
+                self.args.formulation = formulation
+                runner.make_solver(self.args, flow_weight=34)
+                config = make.call_args.args[0]
+                self.assertTrue(config.stop_at_flow_proof)
+                self.assertTrue(config.stop_on_flow_proof)
+                self.assertEqual(config.flow_proof_extension_time_limit, 71)
 
     def test_merge_validates_coverage_coefficients_and_budgets(self):
         row, _, _ = self.run_fake()
@@ -436,12 +474,46 @@ class SafeWeightedRunnerTests(unittest.TestCase):
             runner.merge_batch(source, destination, "7", "2", 300, 71)
         self.assertEqual(destination.read_bytes(), before)
 
+    def test_merge_rejects_mixed_or_unexpected_flow_stop_settings(self):
+        row, _, _ = self.run_fake()
+        source = self.args.output
+        destination = source.with_name("merged.csv")
+
+        def write(path, records):
+            with path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=runner.FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(records)
+
+        self.assertEqual(row["stop_at_flow_proof"], 0)
+        write(source, [dict(row, stop_at_flow_proof=1)])
+        with self.assertRaisesRegex(ValueError, "Unexpected stop_at_flow_proof"):
+            runner.merge_batch(source, destination, "7", "2", 300, 71, False)
+        self.assertFalse(destination.exists())
+        with redirect_stdout(io.StringIO()):
+            runner.merge_batch(source, destination, "7", "2", 300, 71, True)
+        before = destination.read_bytes()
+        write(source, [dict(row, seed=8)])
+        with self.assertRaisesRegex(ValueError, "mixed flow-proof stopping"):
+            runner.merge_batch(source, destination, "8", "2", 300, 71)
+        self.assertEqual(destination.read_bytes(), before)
+        write(source, [row, dict(row, seed=8, stop_at_flow_proof=1)])
+        with self.assertRaisesRegex(ValueError, "mixed flow-proof stopping"):
+            runner.merge_batch(source, destination, "7-8", "2", 300, 71)
+        write(source, [dict(row, stop_at_flow_proof=2)])
+        with self.assertRaisesRegex(ValueError, "Invalid stop_at_flow_proof"):
+            runner.merge_batch(source, destination, "7", "2", 300, 71)
+
     def test_wrapper_dry_run_creates_no_results_and_existing_directory_is_protected(self):
         script = Path(runner.__file__).with_name("RunTable2SafeWeighted.sh")
         results = Path(self.temporary.name) / "new_results"
         dry = subprocess.run(["bash", str(script), "--dry-run", "--output-dir", str(results)],
                              capture_output=True, text=True, check=True)
         self.assertEqual(dry.stdout.count("RunSafeWeightedStatic.py"), 16)
+        self.assertNotIn("--stop-at-flow-proof", dry.stdout)
+        early = subprocess.run(["bash", str(script), "--dry-run", "--stop-at-flow-proof",
+                                "--output-dir", str(results)], capture_output=True, text=True, check=True)
+        self.assertEqual(early.stdout.count("--stop-at-flow-proof"), 16)
         self.assertFalse(results.exists())
         results.mkdir()
         sentinel = results / "existing.csv"
@@ -458,6 +530,10 @@ class SafeWeightedRunnerTests(unittest.TestCase):
                      "-e", "2", "-f", str(self.args.output)]
         args = runner.parse_args(arguments)
         self.assertEqual((args.threads, args.weighted_time_limit, args.extension_time_limit), (16, 300, 300))
+        self.assertFalse(args.stop_at_flow_proof)
+        self.assertTrue(runner.parse_args(arguments + ["--stop-at-flow-proof"]).stop_at_flow_proof)
+        with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
+            runner.parse_args(arguments + ["--stop-at-flow-proof", "--lp"])
         self.assertFalse(hasattr(args, "flow_proof_check_seconds"))
         self.assertFalse(hasattr(args, "flow_proof_check_nodes"))
         alias = runner.parse_args(arguments + ["--certification-time-limit", "71"])

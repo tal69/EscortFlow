@@ -29,6 +29,7 @@ class StaticGurobiConfig:
     weight_scale: int = 100
     flow_proof_extension_time_limit: float | None = None
     stop_on_flow_proof: bool = True
+    stop_at_flow_proof: bool = False
 
 
 class StaticEscortFlowGurobiSolver:
@@ -693,13 +694,15 @@ class StaticEscortFlowGurobiSolver:
             self._apply_warmstart(x_a, x_e, q, warmstart)
         if self.config.lexicographic or self.config.objective_mode != "legacy":
             flow_proof_context = None
-            if self.config.flow_proof_extension_time_limit is not None:
+            if (self.config.flow_proof_extension_time_limit is not None
+                    or self.config.stop_at_flow_proof):
                 flow_proof_context = dict(
                     targets=tuple(target_set), outputs=self.output_cells,
                     cell_count=self.config.Lx * self.config.Ly, escort_count=len(escort_set),
                     physical_horizon=T + 1, weighted_time_limit=self.config.time_limit,
-                    extension_time_limit=self.config.flow_proof_extension_time_limit,
-                    stop_on_flow_proof=self.config.stop_on_flow_proof)
+                    extension_time_limit=self.config.flow_proof_extension_time_limit or 0,
+                    stop_on_flow_proof=self.config.stop_on_flow_proof,
+                    stop_at_flow_proof=self.config.stop_at_flow_proof)
             return self._solve_lexicographic_model(
                 model, x_a, x_e, q, T, solve_start, flow_proof_context=flow_proof_context)
         model.optimize()

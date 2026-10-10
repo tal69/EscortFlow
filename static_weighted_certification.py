@@ -34,6 +34,14 @@ def validate_objective_mode(config):
     mode = config.objective_mode
     scale = _weight_scale(getattr(config, "weight_scale", WEIGHT_SCALE))
     extension = getattr(config, "flow_proof_extension_time_limit", None)
+    stop_at_flow_proof = getattr(config, "stop_at_flow_proof", False)
+    if not isinstance(stop_at_flow_proof, bool):
+        raise ValueError("stop_at_flow_proof must be a boolean")
+    if stop_at_flow_proof:
+        if mode != "weighted_integer":
+            raise ValueError("Stopping at flow proof requires weighted_integer mode")
+        if config.time_limit is None or not math.isfinite(config.time_limit) or config.time_limit <= 0:
+            raise ValueError("Stopping at flow proof requires a positive finite weighted time limit")
     if extension is not None:
         if mode != "weighted_integer":
             raise ValueError("A flow-proof extension requires weighted_integer mode")

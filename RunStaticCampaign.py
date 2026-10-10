@@ -117,6 +117,7 @@ sys.path.insert(0, sys.argv[1])
 from RunSafeWeightedStatic import merge_batch
 source, destination, seeds, escorts, cutoff, extension = sys.argv[2:8]
 formulation, grid, outputs, loads, retrieval_mode = sys.argv[8:13]
+stop_at_flow_proof = int(sys.argv[13])
 with open(source, newline="") as handle:
     for row in csv.DictReader(handle):
         if (row["formulation"] != formulation or row["Lx x Ly"] != grid
@@ -124,7 +125,7 @@ with open(source, newline="") as handle:
                 or sorted(ast.literal_eval(row["IOs"])) != sorted(ast.literal_eval(outputs))
                 or row["retrieval_mode"] != retrieval_mode or row["movement_mode"] != "BM"):
             raise SystemExit("Unexpected experiment configuration in " + source)
-merge_batch(source, destination, seeds, escorts, cutoff, extension)
+merge_batch(source, destination, seeds, escorts, cutoff, extension, stop_at_flow_proof)
 '''
 
 FILL_PARTS = r'''
@@ -178,6 +179,8 @@ def commands(args, source_dir, result_dir):
                        "--weighted-time-limit", str(args.weighted_time_limit),
                        "--extension-time-limit", str(args.extension_time_limit),
                        "-f", str(result_dir / "parts" / (stem + ".csv"))]
+            if args.stop_at_flow_proof:
+                command.append("--stop-at-flow-proof")
             if args.lp:
                 command += ['--with-lp', '--lp-threads', str(args.lp_threads),
                             '--lp-time-limit', str(args.lp_time_limit),
@@ -204,7 +207,7 @@ def validate_pairs(result_dir, seed_values, configs, prefix):
               "safe_movement_lower_bound", "safe_flow_horizon",
               "weighted_physical_horizon", "weighted_global_scope",
               "greedy_flowtime", "greedy_movements", "greedy_makespan",
-              "weighted_time_limit", "extension_time_limit", "flow_proof_check_mode")
+              "weighted_time_limit", "extension_time_limit", "flow_proof_check_mode", "stop_at_flow_proof")
     tables = {}
     for formulation in FORMULATIONS:
         with (result_dir / (prefix + "_" + formulation + ".csv")).open(newline="") as handle:
@@ -254,6 +257,8 @@ def main(campaign, argv=None):
                         help="main comparison cutoff in solver seconds")
     parser.add_argument("--extension-time-limit", type=finite_number, default=300,
                         help="extra solver seconds only when cutoff flow is unproved")
+    parser.add_argument("--stop-at-flow-proof", action="store_true",
+                        help="stop each integer solve as soon as flow time is proved, while retaining all KPIs")
     parser.add_argument("--lp", action=argparse.BooleanOptionalAction,
                         default=settings.get("lp", False),
                         help="save the matched LP bound after each integer instance (default on for 2/6 targets)")
@@ -315,6 +320,7 @@ def main(campaign, argv=None):
     metadata.update(started=datetime.now().astimezone().isoformat(), campaign=campaign,
                     threads=args.threads, weighted_time_limit=args.weighted_time_limit,
                     extension_time_limit=args.extension_time_limit,
+                    stop_at_flow_proof=args.stop_at_flow_proof,
                     objective="R*F+M with the sufficient coefficient recorded in each row",
                     comparison="Saved incumbent and bound by the initial cutoff; extensions separate",
                     retrieval_mode=settings["mode"], movement_mode="BM", target_loads=list(settings["loads"]),
@@ -345,6 +351,7 @@ def main(campaign, argv=None):
         settings["description"], metadata["solver_runs"]), flush=True)
     print("First-phase cap: {}s; conditional extension: {}s".format(
         args.weighted_time_limit, args.extension_time_limit), flush=True)
+    print("Stop at first flow-time proof: {}".format(args.stop_at_flow_proof), flush=True)
     print("Results: " + str(result_dir), flush=True)
     batches = list(commands(args, runtime_dir, result_dir))
     (result_dir / "commands.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n" +
@@ -375,7 +382,8 @@ def main(campaign, argv=None):
         subprocess.run([args.python, "-u", "-c", MERGE, str(runtime_dir), str(batch_csv),
                         str(merged_csv), args.seeds, str(escorts), str(args.weighted_time_limit),
                         str(args.extension_time_limit), formulation, "{}x{}".format(lx, ly),
-                        repr(list(zip(outputs[::2], outputs[1::2]))), str(loads), settings["mode"]], check=True)
+                        repr(list(zip(outputs[::2], outputs[1::2]))), str(loads), settings["mode"],
+                        str(int(args.stop_at_flow_proof))], check=True)
         print("[{}] {} {}x{}: completed".format(
             datetime.now().astimezone().isoformat(), formulation, lx, ly), flush=True)
     validate_pairs(result_dir, metadata["seed_values"], configs, settings["prefix"])

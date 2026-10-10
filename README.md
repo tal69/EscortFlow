@@ -597,6 +597,25 @@ greedy warm start. The solver records the first observed flow-time proof while
 the first phase continues toward proving both objectives. If flow time remains
 unproved at the cutoff, the extension attempts to certify that saved solution.
 
+Add `--stop-at-flow-proof` to stop each escort-flow or load-flow solve at its
+first established flow-time proof, even during the initial phase:
+
+```bash
+bash RunTable2SafeWeighted.sh --threads 16 --stop-at-flow-proof
+```
+
+The option is also available in `RunSafeWeightedStatic.py`, `Run70Percent.py`,
+`RunContinue.py`, and `RunTable2Targets.py`. It defaults to off, preserving the
+current search for movement optimality until the initial cutoff. When enabled,
+the saved result still reports movements, the weighted objective and gap, proof
+flags, and all existing timing KPIs. The movement count may remain unproved.
+If the search ends before the initial cutoff, the main and final columns report
+that early result. The CSV records `stop_at_flow_proof=1`; campaign metadata
+records the same setting, and merge and pairing checks reject mixed settings.
+Gurobi termination and final validation can add a small delay after the observed
+proof timestamp. Separate campaigns should be used when comparing this option
+with the default stopping policy.
+
 For each instance, let `F_g` be the greedy solution's flow time, `D=sum(d_i)`
 the sum of the targets' nearest-output Manhattan distances, `N` the number of
 cells, and `e` the initial number of escorts. The program sets
@@ -633,7 +652,7 @@ The weighted solve uses `MIPGap=0` and `MIPGapAbs=0.999`:
    optimality remains unresolved. A matching analytical distance bound also
    proves flow time.
 3. Save the first observed proof time, flow value, node count, bound, and proof
-   source. A flow proof alone does not stop the first phase. At the cutoff,
+   source. By default, a flow proof alone does not stop the first phase. At the cutoff,
    freeze the incumbent observed by that time. Continue only if its flow is
    unproved, stopping on its proof, a lower-flow counterexample, or the total
    600-second cap. `MIPFocus=0` remains unchanged throughout.

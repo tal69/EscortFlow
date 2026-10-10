@@ -289,6 +289,59 @@ class WeightedIntegrationTests(unittest.TestCase):
                                 time_limit=12, work_limit=30)
                 self.assertEqual(calls[-2:], [(15, 20, 0, .999), (12, 30, 0, .999)])
 
+    def test_flow_stop_retains_nonminimal_movement_start_in_both_modes(self):
+        # Both independent row shifts are feasible; the second is unnecessary.
+        # F=1 reaches the distance bound, but M=2 exceeds the optimum M=1.
+        targets, escorts = {(1, 0)}, {(0, 0), (0, 1)}
+        target_moves = [{0: ((1, 0), (0, 0))}]
+        escort_moves = [[(0, 0, 1, 0), (0, 1, 1, 1)]]
+        for backend in self.BACKENDS:
+            for retrieval_mode in ("leave", "continue"):
+                results = []
+                for enabled in (True, False):
+                    with self.subTest(backend=backend[0], mode=retrieval_mode, enabled=enabled):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            solver = backend[1](self.configuration(
+                                backend, retrieval_mode=retrieval_mode, weight_scale=4,
+                                gamma=.25, stop_at_flow_proof=enabled))
+                            try:
+                                horizon = 1 if backend[0] == "escort" else 2
+                                start = solver.build_warmstart_from_trace(
+                                    targets, escorts, horizon, target_moves, escort_moves)
+                                result = solver.solve(targets, escorts, horizon, warmstart=start)
+                            finally:
+                                solver.close()
+                        results.append(result)
+                stopped, complete = results
+                self.assertEqual((stopped["flowtime"], stopped["movements"], stopped["makespan"]), (1, 2, 1))
+                self.assertTrue(stopped["has_solution"])
+                self.assertTrue(stopped["flow_proven"])
+                self.assertTrue(stopped["final_flow_proven"])
+                self.assertFalse(stopped["weighted_proven"])
+                self.assertEqual(stopped["stop_reason"], "FLOW_PROVEN_EARLY")
+                self.assertEqual(stopped["status_name"], "INTERRUPTED")
+                self.assertFalse(stopped["extension_used"])
+                self.assertEqual(stopped["optimization_calls"], 1)
+                self.assertEqual(stopped["phase1_snapshot"]["movements"], 2)
+                self.assertEqual(stopped["phase1_snapshot"]["runtime"], stopped["runtime"])
+                self.assertIsNotNone(stopped["first_flow_proof_runtime"])
+                self.assertIsNotNone(stopped["first_flow_proof_cpu_time"])
+                self.assertIsNotNone(stopped["animation_moves"])
+                self.assertIn("solution_warmstart", stopped)
+                self.assertEqual((complete["flowtime"], complete["movements"]), (1, 1))
+                self.assertTrue(complete["weighted_proven"])
+
+    def test_invalid_early_stop_options_fail_before_solver_creation(self):
+        for backend in self.BACKENDS:
+            for overrides in (dict(stop_at_flow_proof=1),
+                              dict(stop_at_flow_proof=True, objective_mode="legacy"),
+                              dict(stop_at_flow_proof=True, objective_mode="flow_certificate", certification_target=8),
+                              dict(stop_at_flow_proof=True, time_limit=None),
+                              dict(stop_at_flow_proof=True, time_limit=0),
+                              dict(stop_at_flow_proof=True, time_limit=math.inf)):
+                with self.subTest(backend=backend[0], overrides=overrides), self.assertRaises(ValueError):
+                    backend[1](self.configuration(backend, **overrides))
+
     def test_unsupported_modes_weights_and_targets_fail_before_solver_creation(self):
         invalid = [dict(lp=True), dict(lexicographic=True), dict(beta=2),
                    dict(gamma=.1), dict(certification_target=10),

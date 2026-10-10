@@ -41,7 +41,7 @@ FIELDNAMES = [
     "weighted_horizon", "weighted_physical_horizon", "weighted_global_scope", "greedy_makespan",
     "greedy_flowtime", "greedy_movements", "greedy_objective", "greedy_scaled_objective", "greedy_time",
     "weighted_time_limit", "extension_time_limit", "total_time_limit", "Solver Status",
-    "flow_proof_check_mode",
+    "flow_proof_check_mode", "stop_at_flow_proof",
     *SOLUTION_FIELDS, "weighted_bound_consistent", "weighted_runtime", "weighted_cpu_time",
     "weighted_cpu_time_is_estimate", "weighted_work", "phase1_flow_proven", "phase1_flow_proof_source",
     "phase1_incumbent_runtime", "phase1_snapshot_source", "phase1_snapshot_missing",
@@ -71,7 +71,7 @@ def make_solver(args, *, flow_weight):
         beta=1, gamma=1 / flow_weight, weight_scale=flow_weight,
         time_limit=args.weighted_time_limit, threads=args.threads, mip_focus=0,
         objective_mode="weighted_integer", flow_proof_extension_time_limit=args.extension_time_limit,
-        stop_on_flow_proof=True,
+        stop_on_flow_proof=True, stop_at_flow_proof=getattr(args, "stop_at_flow_proof", False),
     )
     if args.formulation == "escortflow":
         from escort_flow_static_gurobi import StaticGurobiConfig, StaticEscortFlowGurobiSolver
@@ -133,6 +133,7 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
         "weighted_time_limit": args.weighted_time_limit, "extension_time_limit": args.extension_time_limit,
         "total_time_limit": args.weighted_time_limit + args.extension_time_limit,
         "flow_proof_check_mode": FLOW_PROOF_CHECK_MODE,
+        "stop_at_flow_proof": int(bool(getattr(args, "stop_at_flow_proof", False))),
         "extension_used": 0, "extension_runtime": 0, "optimization_calls": 0,
         "gap_flow_proven": 0, "flow_proven": 0, "counterexample": 0, "lexicographic_proven": 0,
         "final_flow_proven": 0, "final_lexicographic_proven": 0,
@@ -173,7 +174,8 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
         )
         print(f"seed={seed} escorts={escort_count}: R={coefficient}, T={horizon}, "
               f"weighted budget={args.weighted_time_limit:g}s, conditional same-tree extension="
-              f"{args.extension_time_limit:g}s, warm start=greedy", flush=True)
+              f"{args.extension_time_limit:g}s, warm start=greedy, "
+              f"stop at flow proof={bool(row['stop_at_flow_proof'])}", flush=True)
         solver = solver_factory(args, flow_weight=coefficient)
         try:
             warmstart = solver.build_warmstart_from_trace(targets, escorts, horizon, target_history, escort_history)
@@ -304,7 +306,7 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
     return row
 
 
-def _validate_merge_rows(rows, path, weighted_limit, extension_limit):
+def _validate_merge_rows(rows, path, weighted_limit, extension_limit, stop_at_flow_proof=None):
     """Reject incompatible protocols and unsafe coefficients on either side."""
     for row in rows:
         if None in row or any(value is None for value in row.values()):
@@ -315,6 +317,11 @@ def _validate_merge_rows(rows, path, weighted_limit, extension_limit):
             raise ValueError(f"Solver error at seed {row['seed']}, escorts {row['# Escorts']}: {path}")
         if row["protocol"] != PROTOCOL:
             raise ValueError(f"Incompatible CSV protocol: {path}")
+        if row["stop_at_flow_proof"] not in {"0", "1"}:
+            raise ValueError(f"Invalid stop_at_flow_proof setting: {path}")
+        if (stop_at_flow_proof is not None
+                and row["stop_at_flow_proof"] != str(int(stop_at_flow_proof))):
+            raise ValueError(f"Unexpected stop_at_flow_proof setting: {path}")
         for key, expected_value in (("weighted_time_limit", weighted_limit),
                                     ("extension_time_limit", extension_limit),
                                     ("total_time_limit", float(weighted_limit) + float(extension_limit))):
@@ -342,7 +349,8 @@ def _validate_merge_rows(rows, path, weighted_limit, extension_limit):
         embedded_value(row)
 
 
-def merge_batch(source, destination, seeds, escorts, weighted_limit, extension_limit):
+def merge_batch(source, destination, seeds, escorts, weighted_limit, extension_limit,
+                stop_at_flow_proof=None):
     """Validate complete instance coverage and continuation protocol before append."""
     source, destination = Path(source), Path(destination)
     with source.open(newline="") as handle:
@@ -350,10 +358,13 @@ def merge_batch(source, destination, seeds, escorts, weighted_limit, extension_l
         if reader.fieldnames != FIELDNAMES:
             raise ValueError(f"Unexpected CSV schema: {source}")
         rows = list(reader)
-    _validate_merge_rows(rows, source, weighted_limit, extension_limit)
+    _validate_merge_rows(rows, source, weighted_limit, extension_limit, stop_at_flow_proof)
     modes = {row["retrieval_mode"] for row in rows}
     if len(modes) != 1:
         raise ValueError(f"Cannot merge mixed retrieval modes: {source}")
+    stop_settings = {row["stop_at_flow_proof"] for row in rows}
+    if len(stop_settings) != 1:
+        raise ValueError(f"Cannot merge mixed flow-proof stopping settings: {source}")
     expected = {(seed, count) for seed in parse_range(seeds, minimum=0)
                 for count in parse_range(escorts, minimum=1)}
     actual = [(int(row["seed"]), int(row["# Escorts"])) for row in rows]
@@ -366,9 +377,11 @@ def merge_batch(source, destination, seeds, escorts, weighted_limit, extension_l
             if reader.fieldnames != FIELDNAMES:
                 raise ValueError(f"Cannot merge incompatible CSV schemas: {destination}")
             existing = list(reader)
-        _validate_merge_rows(existing, destination, weighted_limit, extension_limit)
+        _validate_merge_rows(existing, destination, weighted_limit, extension_limit, stop_at_flow_proof)
         if existing and {row["retrieval_mode"] for row in existing} != modes:
             raise ValueError(f"Cannot merge mixed retrieval modes: {destination}")
+        if existing and {row["stop_at_flow_proof"] for row in existing} != stop_settings:
+            raise ValueError(f"Cannot merge mixed flow-proof stopping settings: {destination}")
         key_fields = ("formulation", "Lx x Ly", "IOs", "# Escorts", "#Loads", "seed")
         keys = [tuple(row[key] for key in key_fields) for row in existing + rows]
         if len(set(keys)) != len(keys):
@@ -404,6 +417,9 @@ def parse_args(argv=None):
     parser.add_argument("--extension-time-limit", "--certification-time-limit", dest="extension_time_limit",
                         type=nonnegative_number, default=300,
                         help="additional search budget only if first-phase flow is unproved (default: 300)")
+    parser.add_argument("--stop-at-flow-proof", action="store_true",
+                        help="stop at the first established flow-time proof, including before the initial cutoff; "
+                             "report the incumbent's movements and all existing KPIs")
     parser.add_argument("-f", "--output", type=Path, required=True)
     parser.add_argument('--lp', action='store_true', help='Generate the same instances and solve their continuous relaxations without integer CSV inputs')
     parser.add_argument('--with-lp', action='store_true', help='After each integer instance, save its continuous LP bound in the same CSV row')
@@ -433,6 +449,8 @@ def parse_args(argv=None):
             raise ValueError('--lp-protocol v4 requires --lp; integer runs use v5')
         if args.with_lp and args.lp:
             raise ValueError('Choose --with-lp for integer plus LP, or --lp for LP only')
+        if args.stop_at_flow_proof and args.lp:
+            raise ValueError('--stop-at-flow-proof applies to integer solves, not --lp')
         if args.lp_threads <= 0:
             raise ValueError('LP threads must be positive')
         if args.output.exists() and not (args.lp and args.resume):

@@ -26,6 +26,9 @@ class SafeWeightedContinuation:
         self.stop_on_flow_proof = context.get("stop_on_flow_proof", True)
         if not isinstance(self.stop_on_flow_proof, bool):
             raise ValueError("stop_on_flow_proof must be boolean")
+        self.stop_at_flow_proof = context.get("stop_at_flow_proof", False)
+        if not isinstance(self.stop_at_flow_proof, bool):
+            raise ValueError("stop_at_flow_proof must be boolean")
         self.load_count, self.distance_sum, self.distance_max = _safe_weight_instance(
             self.context["targets"], self.context["outputs"],
             self.context["cell_count"], self.context["escort_count"])
@@ -38,6 +41,7 @@ class SafeWeightedContinuation:
         self.movement_constant = movement_expr.getConstant()
         self.extract_callback_metrics = extract_callback_metrics
         self.best_incumbent = None
+        self.best_live_incumbent = None
         self.best_flow_candidate = None
         self.best_observed_weighted_objective = None
         self.last_checkpoint = None
@@ -88,6 +92,9 @@ class SafeWeightedContinuation:
             self.best_observed_weighted_objective = objective
         if self.extract_callback_metrics is not None:
             candidate.update(self.extract_callback_metrics(model))
+        if (self.best_live_incumbent is None
+                or objective < self.best_live_incumbent["scaled_objective"]):
+            self.best_live_incumbent = candidate
         if self.best_flow_candidate is None or flow < self.best_flow_candidate["flowtime"]:
             self.best_flow_candidate = candidate.copy()
         return candidate
@@ -256,6 +263,17 @@ class SafeWeightedContinuation:
         self.stop_reason = reason
         model.terminate()
 
+    def _stop_at_proved_flow(self, model):
+        # Reuse the recorded event-driven proof. A nonimproving MIPSOL can
+        # prove a witness's F without making it the weighted incumbent, so
+        # only stop when the solution that will be reported has that same F.
+        if (self.stop_at_flow_proof and self.first_flow_proof is not None
+                and self.best_live_incumbent is not None
+                and self.best_live_incumbent["flowtime"] == self.first_flow_proof["flowtime"]):
+            self._stop(model, "FLOW_PROVEN_EARLY")
+            return True
+        return False
+
     def __call__(self, model, where):
         if self.error is not None or self.stop_reason or where not in (GRB.Callback.MIP, GRB.Callback.MIPSOL):
             return
@@ -284,6 +302,9 @@ class SafeWeightedContinuation:
                 if candidate is not None and (self.best_incumbent is None or
                         candidate["scaled_objective"] < self.best_incumbent["scaled_objective"]):
                     self.best_incumbent = candidate
+                self._stop_at_proved_flow(model)
+                return
+            if self._stop_at_proved_flow(model):
                 return
             if not self.phase1_snapshot["has_solution"]:
                 if self.stop_on_flow_proof:

@@ -101,8 +101,29 @@ is no model rebuild, second optimization call, or change to a pure-flow
 objective. The initial complete greedy warm start is applied once.
 
 The solver retains the same weighted objective, `MIPGap=0`, and
-`MIPGapAbs=0.999`. Flow optimality does not stop the first phase early, but ends
-the extension when it certifies the saved first-phase candidate.
+`MIPGapAbs=0.999`. By default, flow optimality does not stop the first phase
+early, but ends the extension when it certifies the saved first-phase candidate.
+The optional `--stop-at-flow-proof` setting requests termination at the first
+observed flow proof in either phase. It uses the same cached, event-driven
+criterion and does not change the objective, coefficient, horizon, or proof
+requirements. The completed solve still reports its movement count, weighted
+gap, all proof flags, and all existing timing KPIs. Movement optimality is
+claimed only if its separate certificate also succeeds. An early result fills
+both main and final result columns when the initial cutoff has not been reached.
+Callback-requested termination is labeled `FLOW_PROVEN_EARLY`; final validation
+and Gurobi termination overhead can make total runtime slightly exceed the
+recorded first-proof time.
+
+The option defaults to false in both solver configurations and all campaign
+launchers. Direct Python callers set `stop_at_flow_proof=True` in either
+configuration with `objective_mode="weighted_integer"` and a positive finite
+`time_limit`; omitting an extension limit gives a single-budget search.
+Each integer CSV records `stop_at_flow_proof` as 0 or 1; campaign
+metadata records the Boolean setting. Merge checks reject mixed settings within
+or across batches, and pairing requires the same setting in both formulations.
+Existing results without this schema field remain separate. Direct continuous
+LP runs do not accept this integer flow-proof stopping option; integrated LP
+bounds can still be computed after an integer solve stops early.
 The reporting and stopping rules are:
 
 1. A reliable, consistent weighted lower bound with reconstructed integer gap

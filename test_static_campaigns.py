@@ -49,6 +49,7 @@ class CampaignTests(unittest.TestCase):
                     self.assertEqual(option("--threads"), "16")
                     self.assertEqual(option("--weighted-time-limit"), "300")
                     self.assertEqual(option("--extension-time-limit"), "300")
+                    self.assertNotIn("--stop-at-flow-proof", command)
                     self.assertEqual(option("-r"), "1-100")
                     self.assertEqual('--with-lp' in command, script == 'RunTable2Targets.py')
                     if script == 'RunTable2Targets.py':
@@ -79,6 +80,20 @@ class CampaignTests(unittest.TestCase):
         self.assertTrue(all(Path(command[2]).name == "RunSafeWeightedStatic.py" for command in commands))
         self.assertTrue(all('--with-lp' not in command for command in commands))
 
+    def test_flow_stop_option_reaches_every_integer_batch_and_preserves_lp(self):
+        for name in campaign.CAMPAIGNS:
+            with self.subTest(campaign=name), redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(campaign.main(name, ["--dry-run", "--stop-at-flow-proof",
+                                                     "--layouts", "13x7", "--seeds", "1"]), 0)
+            commands = [shlex.split(line) for line in output.getvalue().splitlines()]
+            integer = [c for c in commands if Path(c[2]).name == "RunSafeWeightedStatic.py"]
+            self.assertTrue(integer)
+            self.assertTrue(all(c.count("--stop-at-flow-proof") == 1 for c in integer))
+            relaxation = [c for c in commands if Path(c[2]).name == "RunStaticLP.py"]
+            self.assertEqual(len(relaxation), int(name == "target_counts"))
+            self.assertTrue(all("--stop-at-flow-proof" not in c for c in relaxation))
+            self.assertTrue(all("--with-lp" in c for c in integer) if name == "target_counts" else True)
+
     def test_exact_occupancy_is_recorded(self):
         layouts = ["{}x{}".format(x, y) for x, y, _, _ in campaign.LAYOUTS]
         configs = list(campaign.configurations("occupancy70", layouts))
@@ -93,7 +108,7 @@ class CampaignTests(unittest.TestCase):
             "movement_integer_weight", "safe_movement_bound", "safe_movement_lower_bound",
             "safe_flow_horizon", "weighted_physical_horizon", "weighted_global_scope",
             "greedy_flowtime", "greedy_movements", "greedy_makespan", "weighted_time_limit",
-            "extension_time_limit", "flow_proof_check_mode")}
+            "extension_time_limit", "flow_proof_check_mode", "stop_at_flow_proof")}
         row.update({"Lx x Ly": "3x2", "# Escorts": "1", "#Loads": "2", "seed": "1",
                     "IOs": "[(0, 0)]", "Escorts": "[(0, 1)]", "Target Loads": "[(1, 0), (2, 0)]"})
         with tempfile.TemporaryDirectory() as directory:
@@ -109,6 +124,9 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(json.loads((p / "pairing.json").read_text())["matched_instances"], 1)
             write("loadflow", [dict(row, weighted_physical_horizon="different")])
             with self.assertRaisesRegex(ValueError, "Different paired"):
+                campaign.validate_pairs(p, [1], [config], "continue")
+            write("loadflow", [dict(row, stop_at_flow_proof="different")])
+            with self.assertRaisesRegex(ValueError, "Different paired stop_at_flow_proof"):
                 campaign.validate_pairs(p, [1], [config], "continue")
             write("loadflow", [])
             with self.assertRaisesRegex(ValueError, "Missing or unexpected"):
