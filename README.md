@@ -18,6 +18,7 @@ The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic 
 - `EscortFlowSim_v8.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
 - `EscortFlowStatic.py`: static escort-flow experiment runner for single-load and multi-load instances, defaulting to the Gurobi Python backend and also supporting greedy-only and naive-lower-bound modes
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and the Gurobi Python API is the default backend
+- `RunSafeWeightedStatic.py`: shared escort-flow/load-flow runner for revised integer-weighted experiments, default greedy warm starts, flow-proof timing, optional stopping at flow optimality, and optional LP bounds
 - `RunStaticLP.py`: reproducible continuous LP replay from recorded coordinates, weights, and horizons, including archived Table 3 inputs
 - `RunTable2bLP.py`: Mac Studio LP-bound runner for four-target Table 2(b), with automatic resume and relative-gap summaries
 - `RunFourTargetLP.py`: all eight four-target LP batches directly from seeds, independently of unfinished integer results
@@ -1122,7 +1123,7 @@ In static `leave` mode, `SolveGreedy` removes a request on arrival, blocks that 
 
 In the static `leave` results, flow time is the sum of target arrival times, makespan is the last arrival time, and movements count all individual one-cell load shifts, including blocking loads. The `Greedy UB` column in `EscortFlowStatic.py` is `beta * total_flowtime + gamma * movements`. It is an objective upper bound, not a mean flow time. The weights affect the reported objective, not the heuristic's move choices. `OneStep`'s returned `moves` list also includes blocking-load shifts; use `return_escort_moves=True` for escort paths or `return_target_moves=True` for the target-ID movement map.
 
-Without `--greedy`, the normal static BM workflow still runs this heuristic in `leave` and `continue` modes. Unless a DP horizon is supplied, the runners choose their horizon from its makespan, with backend-specific time indexing. In the standard `EscortFlowStatic.py --gurobi` backend, `--warmstart` supplies its trace before optimization, and `--cutoff` enables its objective cutoff. `LoadFlowStatic.py --warmstart` now supplies the same physical plan for Gurobi integer BM leave runs. The standalone greedy benchmark performs no MILP solve.
+Without `--greedy`, the normal static BM workflow still runs this heuristic in `leave` and `continue` modes. Unless a DP horizon is supplied, the runners choose their horizon from its makespan, with backend-specific time indexing. In the standard `EscortFlowStatic.py --gurobi` backend, `--warmstart` supplies its trace before optimization, and `--cutoff` enables its objective cutoff. `LoadFlowStatic.py --warmstart` supplies the same physical plan for Gurobi integer BM leave or continue runs. The standalone greedy benchmark performs no MILP solve.
 
 The main paper's horizon theorem gives the sufficient horizon bound `sum(f_i) - sum(d_i) + max(d_i)`, where `f_i` are feasible arrival times and `d_i` are initial distances to the closest outputs, under lexicographic minimization of flow time and movements. The current runners use the greedy makespan instead of that expression. A feasible greedy makespan supplies a horizon containing a feasible plan; by itself it does not establish that the horizon contains an unrestricted flow-time optimum.
 
@@ -1133,7 +1134,151 @@ The repository contains two static experiment runners:
 - `EscortFlowStatic.py`: escort-flow formulation
 - `LoadFlowStatic.py`: load-flow formulation
 
-These scripts are the main entry points for the static benchmark experiments in this repository.
+These standalone scripts expose formulation-specific and historical benchmark
+options. For revised integer-weighted experiments, use
+`RunSafeWeightedStatic.py --formulation escortflow` or
+`RunSafeWeightedStatic.py --formulation loadflow`. Its separate argument table
+below includes the new `--stop-at-flow-proof` option. The modules
+`escort_flow_static_gurobi.py` and `load_flow_static_gurobi.py` implement the
+solvers as Python APIs; launch experiments through these runners.
+
+### Complete CLI reference for the standalone solvers
+
+The following table covers every argument accepted by `EscortFlowStatic.py`
+and `LoadFlowStatic.py`, including short names, aliases, and hidden legacy
+options. Defaults describe the effective behavior when an argument is omitted.
+`Off` means a Boolean option is disabled; `Unsupported` means the argument is
+not accepted by that script. Coordinates are zero-based.
+
+| Argument(s) | Escort-flow default | Load-flow default | Purpose and applicability |
+|---|---|---|---|
+| `-h`, `--help` | Not requested | Not requested | Show help and exit. |
+| `-x`, `--Lx N` | Required | Required | Horizontal grid dimension. |
+| `-y`, `--Ly N` | Required | Required | Vertical grid dimension. |
+| `-O`, `--output_cells X Y [X Y ...]` | Required | Required | Output locations as coordinate pairs, for example `-O 4 0 11 0`. |
+| `-e`, `--escorts_range RANGE` | `5` | `5` | Number of escorts, or a range/list of counts. |
+| `-r`, `--reps_range RANGE` | `1` | `1` | Instance seed, or a range/list of seeds. |
+| `-l`, `--load_num N` | `1` | `1` | Number of target loads. |
+| `-m`, `--retrieval_mode MODE` | `leave` | `leave` | Choices: `leave`, `continue`, `stay`. Leave removes served targets; continue retains them as ordinary blocking loads. Load-flow Gurobi implements leave/continue and rejects stay; see the historical OPL restriction below. Stay requires at least one output per target. |
+| `-f`, `--csv PATH` | `res_escort_flow.csv` | `res_load_flow.csv` | Result CSV filename. Ordinary integer runs append; direct LP runs require a new file or `--resume`. |
+| `--alpha VALUE` | Unsupported | `0` | **Load flow only:** makespan weight in the ordinary objective. |
+| `--beta VALUE` | `1.0` | `1.0` | Flow-time weight in the ordinary objective. |
+| `--gamma VALUE` | `0.01` | `0.01` | Load-movement weight in the ordinary objective. |
+| `-T`, `--T_factor VALUE` | `1.6` | `2.0` | Multiplier for the fallback horizon estimate. It does not scale an explicit, DP, or greedy-derived horizon; see the horizon notes below. |
+| `--horizon T` | Automatic | Automatic | Explicit model horizon. Escort flow uses last decision index `T`, with physical horizon `T+1`; load flow uses physical horizon `T`. Direct LP requires sufficient coverage. |
+| `-t`, `--time_limit`, `--total_time_limit SECONDS` | `300`, unless using only `--work_limit` | `300`, unless using only `--work_limit` | Solver wall-time limit. Lexicographic phases share this total budget. Supplying only a Gurobi work limit leaves the wall-time limit unset. |
+| `--lexicographic` | Off | Off | Run flow-time minimization followed by movement minimization at the attained flow time. Requires Gurobi MILP, default weights, and no cutoff. |
+| `--phase1_time_limit SECONDS` | No separate phase cap | No separate phase cap | With `--lexicographic`, cap phase one; phase two receives the total time budget minus actual phase-one solver runtime. |
+| `--num_threads N` | Linux `12`; macOS `8`; other platforms `0` | Linux `12`; macOS `8`; other platforms `0` | Solver thread count. `0` selects the solver default in ordinary runs; generated direct LPs instead choose the campaign's automatic count. Direct LP uses this count per worker. |
+| `--work_limit UNITS` | No work limit | No work limit | Gurobi work-unit budget, shared across lexicographic phases. Not supported by the generated direct-LP path. |
+| `--mip_emphasis MODE` | `balanced` | `balanced` | Gurobi MILP focus: `balanced`, `feasibility`, `optimality`, or `bound`, mapping to `MIPFocus` 0, 1, 2, or 3. |
+| `--dp_file PATH` | Empty; no DP file | Empty; no DP file | DP table for a single-target heuristic upper bound and horizon. Incompatible with the greedy `--warmstart` option and generated direct LPs. |
+| `-k`, `--k_prime N` | `0` | `0` | The `k'` parameter for the single-target DP heuristic; use with `--dp_file`. |
+| `-a`, `--export_animation` | Off | Off | Export an animation trace for each solved instance. |
+| `--lm`, `--LM` | Unsupported | Off; BM is selected | **Load flow only:** select single-load movement (LM) instead of block movement (BM). Not supported by greedy warm starts or the generated paper-LP path. |
+| `--lp` | Off | Off | Solve continuous relaxations. By default, delegate to generated paper LPs with an automatic sufficient integer coefficient and horizon. Use `--legacy-lp` for historical weights/horizons. |
+| `--flow-weight`, `--flow_weight R` | Not set | Not set | With `--lp`, override the positive integer coefficient in `F+M/R`; requires Gurobi. The generated LP path checks that `R` is sufficient. |
+| `--lp-protocol {v4,v5}` | `v5` | `v5` | Generated direct-LP coefficient/horizon conventions. Archived `v4` requires `--lp` without `--legacy-lp`. |
+| `--lp-workers N` | `1` | `1` | Number of parallel workers for generated direct LPs. |
+| `--lp-retry-time-limit SECONDS` | `600` | `600` | Retry budget for a generated direct LP that needs a barrier retry. |
+| `--resume` | Off | Off | Resume generated direct `--lp` results after checking saved inputs and frozen sources. Incompatible with `--legacy-lp`. |
+| `--legacy-lp` | Off | Off | With `--lp`, retain the historical objective weights and horizon selection instead of the generated paper-LP workflow. |
+| `--greedy` | Off | Unsupported | **Escort flow only:** run the greedy heuristic without a MILP solve; supports leave/continue. |
+| `--gurobi` | Gurobi selected | Gurobi selected | Explicitly select the default Python API backend. Cannot combine with `--opl`/`--cplex`. |
+| `--opl`, `--cplex` | Off | Off | Select the legacy OPL/CPLEX backend; `--cplex` is a hidden alias. |
+| `--warmstart` | Off | Off | Supply the complete common greedy plan to a Gurobi integer BM solve in leave/continue mode. Incompatible with `--dp_file`, LP, and OPL. |
+| `--cutoff`, `--no_cutoff` | Cutoff off | Cutoff off | Enable or disable a heuristic objective cutoff. `--no_cutoff` is a hidden disabling option. Cutoffs are incompatible with lexicographic, generated direct-LP, lazy, and BnC solves. |
+| `--naive` | Off | Unsupported | **Escort flow only:** report the naive lower bound without solving; writes reduced CSV rows. |
+| `--lazy [N]` | Off; bare flag uses `0` | Unsupported | **Escort flow only:** lazy-constraint Gurobi MILP backend. `N` is the number of initial decision periods whose coupling constraints remain explicit. |
+| `--bnc [N]` | Off; bare flag uses `2*T` | Unsupported | **Escort flow only:** branch-and-cut Gurobi MILP backend. `N` caps user cuts at each separated non-root node; the root is uncapped. |
+
+Ranges accept `n`, comma-separated values, inclusive `start-end` or
+`start:end`, and stepped `start-end-step` or `start:step:end`.
+For example, `-e 8-16-4` selects 8, 12, and 16 escorts.
+
+The ordinary integer objective is `beta*F+gamma*M` in escort flow and
+`alpha*Cmax+beta*F+gamma*M` in load flow. The two-phase lexicographic option
+uses unweighted integer objectives. The `EscortFlowStaticLex.py` and
+`LoadFlowStaticLex.py` wrappers inherit this argument set, enable
+`--lexicographic`, and change the default CSV names to
+`res_escort_flow_lex.csv` and `res_load_flow_lex.csv`.
+
+For normal Gurobi leave/continue escort-flow runs, the greedy horizon replaces
+the fallback estimate. Load-flow BM leave/continue runs also use the greedy
+horizon, including with OPL. `--T_factor` still applies on fallback paths such
+as load-flow LM or stay, and escort-flow OPL runs without a DP or explicit
+horizon. The same numeric `--horizon` therefore does not represent the same
+physical time horizon in the two formulations.
+
+Generated direct `--lp` runs require Gurobi BM leave/continue mode and default
+objective weights. They reject MIP warm starts, work limits, phase-one limits,
+DP files, cutoffs, greedy/naive modes, lazy/BnC backends, and lexicographic
+optimization. They use `-t` for the first LP budget, even though its parser
+default is unset. `--lp-protocol`, `--lp-workers`, `--lp-retry-time-limit`,
+and `--resume` configure this generated path rather than the historical
+`--legacy-lp` path. `--flow-weight` also works with `--legacy-lp`, setting
+`gamma=1/R` when the other objective weights retain their defaults.
+
+The historical load-flow OPL files remove served targets and do not receive a
+retrieval-mode parameter. Although the legacy CLI accepts other mode labels
+with `--opl`, those files implement leave behavior. Use the Gurobi load-flow
+backend for continue-mode experiments.
+
+### Complete CLI reference for the revised weighted runner
+
+`RunSafeWeightedStatic.py` selects either formulation using `--formulation`.
+Every argument below is available for **both escort flow and load flow**;
+mode-specific restrictions are listed in the last column. For integer solves,
+this runner uses Gurobi, BM movement, a complete greedy warm start, an automatic sufficient
+coefficient and horizon, balanced MIP focus, `MIPGap=0`, and `MIPGapAbs=0.999`.
+These fixed settings are not extra CLI arguments.
+
+| Argument(s) | Default | Purpose and applicability to both formulations |
+|---|---|---|
+| `-h`, `--help` | Not requested | Show help and exit. |
+| `--formulation {escortflow,loadflow}` | Required | Choose escort-flow or load-flow formulation. |
+| `-x N` | Required | Positive horizontal grid dimension. |
+| `-y N` | Required | Positive vertical grid dimension. |
+| `-O`, `--outputs X Y [X Y ...]` | Required | Distinct output-cell coordinate pairs inside the grid. |
+| `-e`, `--escorts RANGE` | `3-8` | Positive escort counts to run. |
+| `-l`, `--loads N` | `1` | Positive number of target loads. |
+| `-r`, `--seeds RANGE` | `1-100` | Nonnegative instance seeds. |
+| `-m`, `--retrieval-mode {leave,continue}` | `leave` | Remove retrieved targets or retain them as ordinary blocking loads. |
+| `--threads N` | `16` | Positive integer-search thread count. Also controls threads per worker in direct `--lp` mode. |
+| `--weighted-time-limit SECONDS` | `300` | Initial integer-search budget. In direct `--lp` mode, the first LP budget. Must be positive. |
+| `--extension-time-limit`, `--certification-time-limit SECONDS` | `300` | Integer solves only: nonnegative extra budget on the same search tree if the initial incumbent's flow remains unproved. `0` disables extension. |
+| `--stop-at-flow-proof` | Off | Integer solves only: stop when flow optimality is established, including before the initial cutoff. Retain movements and all KPIs; movement optimality may remain unproved. |
+| `-f`, `--output PATH` | Required | Result CSV. An existing file is refused unless resuming direct LP results. |
+| `--lp` | Off | Generate instances and solve only their continuous relaxations, without prior integer CSV inputs. Incompatible with `--with-lp` and `--stop-at-flow-proof`. |
+| `--with-lp` | Off | After each integer instance, save its separate continuous LP bound in the same CSV row. |
+| `--lp-threads N` | `1` | With `--with-lp`, positive thread count for each LP solve. Direct `--lp` instead uses `--threads`. |
+| `--lp-time-limit SECONDS` | `300` | With `--with-lp`, positive LP budget separate from integer budgets. Direct `--lp` instead uses `--weighted-time-limit`. |
+| `--lp-protocol {v4,v5}` | `v5` | Direct `--lp`: archived `v4` or current `v5` coefficient/horizon conventions. Integer runs always use `v5`. |
+| `--lp-workers N` | `1` | Direct `--lp`: positive number of parallel LP workers. Does not parallelize integer or `--with-lp` instances. |
+| `--lp-retry-time-limit SECONDS` | `600` | Positive LP retry budget, if needed, for either LP mode. |
+| `--resume` | Off | Direct `--lp` only: resume after checking saved inputs and frozen sources. |
+
+The shared runner uses the same range syntax described above. Its integer warm
+start is always enabled, whereas the standalone scripts require `--warmstart`.
+Its `--certification-time-limit` alias extends the same weighted search; it
+does not launch a separate certification model. Initial-cutoff and final
+results remain separate when an extension is used.
+
+The flag names differ between entry points: the shared runner uses
+`--threads`, `--outputs`, and `--output`, while the standalone scripts use
+`--num_threads`, `--output_cells`, and `--csv`. In particular,
+`--stop-at-flow-proof` is available through the shared runner and current
+campaign launchers, not through the two standalone parsers. For example:
+
+```bash
+python -u RunSafeWeightedStatic.py --formulation escortflow \
+  -x 13 -y 7 -O 6 0 -e 3-8 -l 1 -r 1-100 --threads 16 \
+  --stop-at-flow-proof -f escortflow_flow_stop.csv
+
+python -u RunSafeWeightedStatic.py --formulation loadflow \
+  -x 13 -y 7 -O 6 0 -e 3-8 -l 1 -r 1-100 --threads 16 \
+  --stop-at-flow-proof -f loadflow_flow_stop.csv
+```
 
 ### `EscortFlowStatic.py`
 
@@ -1152,45 +1297,15 @@ Key dependencies:
 - `escort_flow_static_gurobi.py`, `escort_flow_static_lazy.py`, and `escort_flow_static_bnc.py`
 - escort-flow OPL model files and `oplrun` only for the legacy `--opl` path
 
-Common arguments:
-
-- `-x`, `-y`: PBS dimensions, required
-- `-O`: output cells as coordinate pairs, required
-- `-e`: escort-count range, default `5`
-- `-r`: replication/seed range, default `1`
-- `-l`: number of target loads, default `1`
-- `-m`: retrieval mode, one of `stay`, `leave`, `continue`, default `leave`
-- `-f`: CSV result file, default `res_escort_flow.csv`
-- `--beta`: flowtime weight, default `1.0`
-- `--gamma`: movement weight, default `0.01`
-- `-T`: legacy horizon scaling factor, default `1.6`; retained in the CLI but retired from the normal static workflow
-- `-t`: solver time limit, default `300`
-- `--num_threads`: solver thread count, default `8` on macOS and `12` on Linux
-- `--work_limit`: Gurobi work limit in work units, default none
-- `--mip_emphasis`: Gurobi MIP emphasis, one of `balanced`, `feasibility`, `optimality`, or `bound`, default `balanced`
-- `--dp_file`: DP table file for the single-load case, default empty
-- `-k`: `k'` parameter used with the DP heuristic, default `0`
-- `--lp`: LP relaxation option, default off
-- `--greedy`: solve the static instance with the greedy heuristic instead of a MILP backend, default off; supported for `continue` and `leave` modes. In static `leave` mode, an arrived target occupies its output for one further takt before the cell becomes an available escort. See [One-step heuristic for static retrieval](#one-step-heuristic-for-static-retrieval) for the algorithm, priority settings, and examples
-- `--gurobi`: explicitly select the Gurobi Python backend; accepted for clarity but now redundant because Gurobi is the default
-- `--opl`: switch to the legacy `oplrun` / CPLEX path instead of the default Gurobi backend
-- `--warmstart`: enable heuristic MIP start with the static Gurobi backend, default off
-- `--naive`: skip optimization entirely, compute only the naive lower bound for each generated instance, and write a reduced CSV row
-- `--lazy` or `--lazy N`: use the lazy-constraint Gurobi backend, default off; a bare `--lazy` means `0`, and `N` is the number of initial time steps kept in the master problem
-- `--bnc` or `--bnc N`: use the branch-and-cut Gurobi backend, default off; a bare `--bnc` means a per-separated-node user-cut cap of `2*T`, and `N` sets that cap explicitly
-- `-a`: export animation trace, default off
-
-Range syntax:
-
-- ranges accept `n`, `n1,n2,...`, `start-end`, `start:end`, `start-end-step`, and `start:step:end`
-- example: `-e 8-16-4` means `8, 12, 16`
+All arguments and defaults are listed in the
+[complete CLI comparison](#complete-cli-reference-for-the-standalone-solvers).
 
 Notes:
 
 - the default solver path is the Gurobi Python backend; `--opl` switches to the legacy `oplrun` / CPLEX path
 - for `stay` mode, the number of output cells must be at least the number of target loads
 - the DP-based upper bound currently applies only to the single-load case
-- without `--dp_file`, the static horizon upper bound is taken from the greedy heuristic
+- Gurobi leave/continue runs without `--dp_file` or `--horizon` use the greedy horizon; fallback paths use `--T_factor`
 - on the standard `--gurobi` path, the full static escort-flow model is built explicitly in the master problem
 - with the standard Gurobi backend, `--warmstart` supplies a complete greedy start before optimization; legacy weighted lazy/BnC backends retain their fallback-restart behavior
 - `--lazy` selects a separate Gurobi backend that keeps the flow/supply structure in the master and enforces the target-movement coupling constraints lazily; if you pass `--lazy N`, the first `N` time steps of that coupling family stay in the master
@@ -1273,34 +1388,13 @@ Key dependencies:
 - `load_flow_static_gurobi.py`
 - `pbs_load_flow_multi.mod`, `pbs_load_flow_multi_lp.mod`, and `oplrun` only for the legacy `--opl` path
 
-Common arguments:
-
-- `-x`, `-y`: PBS dimensions, required
-- `-O`: output cells as coordinate pairs, required
-- `-e`: escort-count range, default `5`
-- `-r`: replication/seed range, default `1`
-- `-l`: number of target loads, default `1`
-- `-m`: retrieval mode, default `leave`
-- `-f`: CSV result file, default `res_load_flow.csv`
-- `--alpha`: makespan weight, default `0.0`
-- `--warmstart`: supply a complete greedy MIP start in Gurobi integer BM leave mode, default off; unsupported mode combinations are rejected
-- `--beta`: flowtime weight, default `1.0`
-- `--gamma`: movement weight, default `0.01`
-- `-T`: legacy horizon scaling factor, default `2.0`; retained in the CLI but retired from the documented BM workflow
-- `-t`: solver time limit, default `300`
-- `--num_threads`: solver thread count, default `8` on macOS and `12` on Linux
-- `--mip_emphasis`: Gurobi MIP emphasis, one of `balanced`, `feasibility`, `optimality`, or `bound`, default `balanced`
-- `--lm` or `--LM`: run LM instead of the default BM mode, default off
-- `--dp_file`: DP table file for single-load upper bounds, default empty
-- `-k`: `k'` parameter for the DP heuristic, default `0`
-- `--lp`: solve the LP relaxation instead of the ILP, default off
-- `--gurobi`: explicitly select the Gurobi Python backend; accepted for clarity but now redundant because Gurobi is the default
-- `-a`: export animation trace, default off
+All arguments and defaults are listed in the
+[complete CLI comparison](#complete-cli-reference-for-the-standalone-solvers).
 
 Notes:
 
 - the default solver path is the Gurobi Python backend; `--opl` switches to the legacy `oplrun` / CPLEX path
-- the script header says only `leave` is supported at present; that is the safe mode to use
+- Gurobi implements `leave` and `continue`, and rejects `stay`; the historical load-flow OPL files implement leave behavior even when the CLI accepts a different mode label
 - as in `EscortFlowStatic.py`, the DP table route is for the single-load case
 - without `--dp_file`, BM runs in `leave` and `continue` mode use `OneStepHeuristic_v2` to get an upper bound on `T`
 
