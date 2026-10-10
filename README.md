@@ -20,6 +20,7 @@ The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic 
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and the Gurobi Python API is the default backend
 - `RunStaticLP.py`: reproducible continuous LP replay from recorded coordinates, weights, and horizons, including archived Table 3 inputs
 - `RunTable2bLP.py`: Mac Studio LP-bound runner for four-target Table 2(b), with automatic resume and relative-gap summaries
+- `RunFourTargetLP.py`: all eight four-target LP batches directly from seeds, independently of unfinished integer results
 - `ReproducePaper.py`: one command for all revised formulation-paper numerical tables, including leave/continue retrieval, both formulations, LP relaxations, and CSV/LaTeX summaries
 - `EscortFlowStaticLex.py` and `LoadFlowStaticLex.py`: two-phase integer optimization, first flow time, then load movements at the best flow time found
 - `CI_Calculation.py`: post-process one or more raw pickle files and compute steady-state means and confidence intervals using MSER-5 warmup deletion and batch selection
@@ -93,7 +94,63 @@ The paper experiments were developed with Python 3.11, Gurobi 13.0, and NumPy. S
 For the revised paper, use the complete runner below. The older shell scripts
 in the following historical guide are retained for earlier experiments.
 
-### Table 2(b): calculate LP bounds on the Mac Studio
+### Four-target LPs from seeds on the Mac Studio, while Linux is still running
+
+For the currently running four-target campaign, activate your working Conda
+environment and use **`python`**, which names its interpreter on your Mac Studio:
+
+```bash
+python -u RunFourTargetLP.py
+```
+
+Run this from `Code/`, including in a tmux window. No arguments are needed. It
+runs **all eight parts** (13x7, 10x10, 16x10, 27x10, each with escort-flow and
+load-flow), four target loads, 8/12/16 escorts, seeds 1-100, leave mode. That is
+**2,400 LPs for 1,200 matched physical instances**. It uses the same seed and
+greedy generator as the main runners' `--lp` option. It explicitly preserves
+the current four-target campaign's **v4 coefficient and formulation-specific
+horizons**, rather than the v5 settings of the next two-/six-target campaign.
+
+Copied files in `Experiment Oct2026/table2b_*.csv` are optional verification
+inputs. The script checks every available selected row's coordinates, R and
+horizon against the generated instance before launching LPs. Missing files and
+missing seeds do **not** reduce the run. It never writes to the integer CSVs.
+Use `--input-dir /path/to/copied/results` to check another copied folder.
+
+Results go into a separate **`results_four_target_lp/`** folder. It contains
+`lp_results.csv` with all available optimal LP values, eight individual CSVs in
+`parts/`, `coverage.json`, frozen generated inputs in `instances/`, and a frozen
+`source/` tree with checksums in `campaign.json`. Each successful LP is saved
+immediately. **Repeat the identical command to resume** completed parts and
+retry missing LPs. Source updates do not change an existing run: it resumes
+using its original frozen generator and models. Changing the seed/layout/escort
+selection requires a separate `--output-dir`.
+
+To check the plan, check the environment, or run a two-LP pilot:
+
+```bash
+python RunFourTargetLP.py --dry-run
+python RunFourTargetLP.py --check-environment
+python -u RunFourTargetLP.py --layouts 13x7 --escorts 16 --seeds 1 \
+    --output-dir results_four_target_lp_pilot
+```
+
+For a seed range or explicit solver settings:
+
+```bash
+python -u RunFourTargetLP.py --seeds 1-100 --workers 1 --threads 16
+```
+
+The defaults run one LP at a time with the Mac's performance-core count for
+threads, a 300-second solver limit, and a 600-second barrier retry after a time
+limit. Only `OPTIMAL` results supply an LP lower bound. Python 3.10+, NumPy,
+`gurobipy` and your full Gurobi license are required. The script prints the
+actual Python path/version and uses that same interpreter for every child and
+worker process. If NumPy is missing, install it with `python -m pip install numpy`
+in this environment. LP values are generated now; percentage-gap table summaries
+can be calculated when the complete integer results have been copied.
+
+### Table 2(b): replay only the available copied integer results
 
 Set up once on the Mac Studio, from `Code/`:
 
@@ -136,7 +193,8 @@ script. It calculates both formulations' continuous LP relaxations for the
 four-target leave-mode runs, seeds 1-100, 8/12/16 escorts, and all four paper
 grids. A complete campaign has 2,400 LP solves. Missing load-flow files and
 unfinished groups can be supplied later. To generate all requested LP instances
-before those CSV rows arrive, use the parameter-based `--lp` commands in
+before those CSV rows arrive, use **`python -u RunFourTargetLP.py`** as described
+above, or the individual parameter-based `--lp` commands in
 [Direct LP runs from parameters and seeds](#direct-lp-runs-from-parameters-and-seeds).
 
 Results go into the separate **`results_table2b_lp/`** folder. Each optimal LP

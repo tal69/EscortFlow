@@ -28,7 +28,8 @@ from RunStaticCampaign import LAYOUTS, automatic_threads
 HERE = Path(__file__).resolve().parent
 METHODS = ('loadflow', 'escortflow')
 OUTPUTS = {f'{x}x{y}': sorted(zip(outs[::2], outs[1::2])) for x, y, _, outs in LAYOUTS}
-SOURCE_FILES = ('RunTable2bLP.py', 'RunStaticLP.py', 'RunStaticCampaign.py', *lp.MODEL_FILES)
+SOURCE_FILES = ('RunTable2bLP.py', 'RunStaticLP.py', 'RunStaticCampaign.py',
+                'static_integrated_lp.py', *lp.MODEL_FILES)
 ENVIRONMENT_CHECK = '''import json,platform,shlex,sys
 version=platform.python_version()
 if sys.version_info < (3,10):

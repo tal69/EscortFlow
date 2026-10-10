@@ -23,7 +23,52 @@ The physical horizon is `T+1` for escort flow and `T` for load flow. The frozen
 single-target inputs match these physical horizons across formulations. Supplying the
 same numerical `T` to both formulations would change the comparison.
 
-## Four-target Table 2(b) on the Mac Studio
+## All eight four-target LP parts from seeds on the Mac Studio
+
+The four-target integer campaign on Linux can continue while its LP relaxations
+run separately on the Mac Studio. From `Code/`, in your licensed Conda environment:
+
+```bash
+python -u RunFourTargetLP.py
+```
+
+No arguments selects the four layouts (13x7, 10x10, 16x10, 27x10), both
+formulations, four targets, 8/12/16 escorts, seeds 1-100, leave mode: eight parts
+with 300 LPs each. It calls the **same `static_generated_lp.generated_row`
+function used by the standard runners' `--lp` path**, including the original
+seed generator and greedy heuristic. It fixes the **v4** coefficient and each
+formulation's archived horizon to match the currently running integer campaign.
+The future two-/six-target campaign remains v5.
+
+Every available selected row in `Experiment Oct2026/table2b_*.csv` is checked
+for identical coordinates, R and horizon. Those files may be missing or partial;
+they do not select the LPs. `--input-dir` changes the verification folder. The
+integer files are read-only.
+
+Results and immutable source/instance snapshots go into `results_four_target_lp/`.
+The combined `lp_results.csv` uses the standard replay schema, so it retains
+fractional FT/MV, objective, status, timing, R, both horizon conventions and
+source/problem fingerprints. The eight part CSVs, manifests and worker logs
+are in `parts/`; `coverage.json` reports complete and missing LPs. Only optimal
+LPs are recorded. Repeating the same command resumes with the original frozen
+sources and retries missing cases. A changed selection needs a new output folder.
+
+```bash
+python RunFourTargetLP.py --dry-run
+python RunFourTargetLP.py --check-environment
+python -u RunFourTargetLP.py --layouts 13x7 --escorts 16 --seeds 1 \
+    --output-dir results_four_target_lp_pilot
+```
+
+Use `--seeds 1-100` or another inclusive range, `--workers 1`, `--threads 16`,
+`--time-limit 300`, and `--retry-time-limit 600` as needed. Defaults use one LP
+at a time and the Mac's performance-core count for threads. Seed generation
+requires NumPy in addition to Python 3.10+, Gurobi and a full license. Prefer
+`python` on the Mac Studio where `python3` resolves to Apple's older interpreter.
+This runner computes LP bounds independently; complete relative-gap means are
+aggregated after the missing integer results arrive.
+
+## Four-target Table 2(b) from available CSV rows on the Mac Studio
 
 From `Code/`, set up the Mac's interpreter once, then start the LP campaign:
 
