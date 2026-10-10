@@ -269,7 +269,10 @@ def solve_weighted_or_certificate(model, flow_expr, movement_expr, extract_solut
             model.optimize()
         result.update(status_name=status_name(model.Status), runtime=model.Runtime,
                       work=model.Work, cpu_time=time.perf_counter() - solve_start,
-                      node_count=getattr(model, "NodeCount", None))
+                      node_count=getattr(model, "NodeCount", None),
+                      model_num_variables=getattr(model, "NumVars", None),
+                      model_num_constraints=getattr(model, "NumConstrs", None),
+                      model_num_nonzeros=getattr(model, "NumNZs", None))
         bound = getattr(model, "ObjBound", None)
         valid_bound = bound is not None and math.isfinite(bound)
         reliable = result["status_name"] in RELIABLE_FINISHED_STATUSES

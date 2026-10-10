@@ -39,10 +39,8 @@ def paper_configurations(layouts):
         for mode in ("leave", "continue"):
             for loads in ((1, 2, 4, 6) if mode == "leave" else (2, 4, 6)):
                 escorts = list(range(3, 9)) if loads == 1 else [8, 12, 16]
-                if loads == 6:
+                if loads == 6 and mode == "leave":
                     escorts.append(20)
-                if loads == 4 or mode == "continue":
-                    escorts.append(occupancy_escorts)
                 for count in sorted(set(escorts)):
                     yield dict(lx=lx, ly=ly, escorts=count, loads=loads, outputs=list(outputs), mode=mode)
 

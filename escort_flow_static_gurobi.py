@@ -629,6 +629,10 @@ class StaticEscortFlowGurobiSolver:
                 model.addConstr(
                     gp.quicksum(x_a[(move, t)] for move in nonstay_output_moves) == 0
                 )
+                if self.config.retrieval_mode == "continue":
+                    # An arrived target becomes an implicit blocker immediately.
+                    # The target commodity has no output-service idle in this mode.
+                    model.addConstr(x_a[(self.network["stay_move"][output], t)] == 0)
 
         # (4) and (5) in the paper: supply at the initial locations of target loads and escorts.
         for loc in self.network["locations"]:

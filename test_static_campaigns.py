@@ -25,7 +25,7 @@ class CampaignTests(unittest.TestCase):
 
     def test_all_campaigns_have_exact_configurations_and_budgets(self):
         for script, count, mode, loads in [("Run70Percent.py", 8, "leave", {4}),
-                                           ("RunContinue.py", 96, "continue", {2, 4, 6}),
+                                           ("RunContinue.py", 72, "continue", {2, 4, 6}),
                                            ("RunTable2Targets.py", 56, "leave", {2, 6})]:
             with self.subTest(script=script):
                 commands = self.dry_run(script)
@@ -68,7 +68,7 @@ class CampaignTests(unittest.TestCase):
                         if script == "RunTable2Targets.py":
                             expected = {8, 12, 16} if load_count == 2 else {8, 12, 16, 20}
                         else:
-                            expected = {occupancy_escorts} if script == "Run70Percent.py" else {8, 12, 16, occupancy_escorts}
+                            expected = {occupancy_escorts} if script == "Run70Percent.py" else {8, 12, 16}
                         self.assertEqual(counts, expected)
 
     def test_target_campaign_can_skip_lp_for_an_integer_only_pilot(self):

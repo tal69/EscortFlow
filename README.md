@@ -1,5 +1,28 @@
 # Escort Flow Optimization and Simulation
 
+## Current output rules and corrected protocol (October 10, 2026)
+
+The active LF model absorbs target flow at the first output reached in both
+retrieval modes. In leave mode, that arrival reserves the output during the next
+service step, after which the target departs and creates an escort. No incoming
+load movement is permitted during service. Continue mode immediately converts
+target flow into blocking flow. The LF terminal layer is idle bookkeeping.
+The former equality (A.13) is implied by conservation under these rules and
+has been removed from the appendix and active models.
+
+New integer runs use `safe_integer_flow_timing_v6`, retaining v5 coefficient and
+common-horizon arithmetic. Start fresh result directories. Merge/resume rejects
+v4/v5 rows; preserve their frozen sources and recorded values. The direct LP
+option `--lp-protocol v5` selects coefficient/horizon arithmetic, not the old
+output rules: an LP using the active sources uses the corrected rules.
+Do not label a fresh active-source LP as a reproduction of the old model merely
+because it uses an archived coefficient. Historical-source replay must select
+its frozen source tree explicitly. Retain the single-target integer tables for
+this output issue; LP bounds and historical timing claims require separate
+assessment, and multi-target leave-mode results need reconciliation. No full
+single-target integer rerun or large campaign was launched for this correction.
+
+
 This repository accompanies two working papers by Tal Raviv and Yossi Bukchin:
 
 - "Escort-Flow Formulation for Simultaneous Multi-Load Retrieval in Puzzle-Based Storage"
@@ -7,14 +30,107 @@ This repository accompanies two working papers by Tal Raviv and Yossi Bukchin:
 
 This repository contains optimization and simulation code for retrieval control in a puzzle-based storage (PBS) system with escorts. The main workflow is:
 
-1. run a formulation-paper benchmark instance with `EscortFlowStatic.py` or `LoadFlowStatic.py`
+1. run a formulation-paper benchmark instance with `SolveStatic.py`, selecting either formulation
 2. run a dynamic rolling-horizon simulation with `EscortFlowSim_v8.py` and collect steady-state statistics directly into a CSV row
 3. optionally save a raw simulation trace with `-a/--save_raw` and inspect it with `CI_Calculation.py` or `PBSAnimation.py`
 
 The project currently uses `EscortFlowSim_v8.py` as its rolling-horizon dynamic simulator, with Gurobi accessed through the Python API.
 
+## Reproduce the corrected static experiments
+
+Use **`SolveStatic.py` as the common entry point for LF and EF**. It selects the
+actual solver in the current process and automatically supplies the common greedy
+warm start, sufficient objective coefficient, and matched physical horizon.
+The Bash campaign below contains the configuration loops and direct solver calls.
+
+Run from the directory containing the scripts (`Code` in the research project,
+or the repository root in a standalone clone) with Python, NumPy, `gurobipy`,
+and a Gurobi license large enough for the models. Activate that Python environment first. To solve the same
+four-target continue-mode instance with both formulations:
+
+```bash
+python3 SolveStatic.py --formulation loadflow \
+  -x 13 -y 7 -O 6 0 -l 4 -e 8 -r 1 -m continue -f lf_seed1.csv
+python3 SolveStatic.py --formulation escortflow \
+  -x 13 -y 7 -O 6 0 -l 4 -e 8 -r 1 -m continue -f ef_seed1.csv
+```
+
+Change `-m continue` to `-m leave` for leave retrieval. `-O` contains output
+coordinate pairs; `-l` is the target count, `-e` the escort count, and `-r` the
+random seed or seed range. For example, `-e 8,12,16 -r 1-100` runs 300 instances.
+Both models use SBM. See all options with `python3 SolveStatic.py --help`.
+
+**Corrected defaults:** 16 integer threads, 300 solver seconds initially, and a
+conditional continuation of up to 300 more seconds only if flow time is still
+unproved. The initial search attempts to prove both flow time and movements.
+The first observed flow-time proof is recorded separately. Results at the initial
+cutoff and after continuation occupy separate CSV fields. Use `--threads`,
+`--weighted-time-limit`, and `--extension-time-limit` to change these settings.
+Add `--with-lp` for a separate continuous relaxation after each integer solve;
+LPs default to one thread, 300 seconds, and a 600-second retry after a time limit.
+LP computation is excluded from the integer timing metrics.
+
+Let `F_g` and `C_g` be the common greedy plan's flow time and makespan, `d_i`
+each target's nearest-output Manhattan distance, `D=sum(d_i)`, `N` the number of
+cells, and `e` the initial escort count. Both formulations calculate:
+
+```text
+H_g = F_g-D+max(d_i)
+R   = (N-e)*H_g-D+1
+H   = max(H_g, C_g+1)
+minimize R*F+M
+```
+
+This gives flow time priority over movements and includes every plan whose flow
+time is at most the feasible greedy bound. The same physical horizon `H` uses
+last index `H-1` in EF and `H` in LF because of the backend indexing conventions.
+Every result records the actual coefficient, physical horizon, backend index,
+warm-start values, coordinates, proof flags, and original model size. The
+reported objective is also available in `F+M/R` units. Coefficients, horizons,
+and warm starts require no additional flags or manual calculation.
+
+### Continue-mode campaign
+
+`RunContinue.sh` is the recommended launcher. It is a Bash script with explicit
+LF and EF calls through `SolveStatic.py`, using the corrected
+`safe_integer_flow_timing_v6` protocol. It runs four layouts, 2/4/6 targets,
+8/12/16 escorts, and seeds 1-100: **36 configurations, 3,600 paired instances,
+7,200 integer runs**, and their LP bounds. Four-target cases run first.
+There is no added 70%-occupancy sweep. In continue mode a served target becomes
+a movable blocking load, without creating an escort or adding a service step.
+
+```bash
+# Inspect every batch command without running solvers or writing results.
+bash RunContinue.sh --dry-run
+
+# Pilot: 15 pairs at the production budgets, on the study machine.
+SEEDS=1-5 LAYOUTS=13x7 TARGET_COUNTS=4 bash RunContinue.sh pilot_continue_v6
+
+# Full campaign, preferably inside an existing tmux session.
+bash RunContinue.sh results_continue_v6
+```
+
+Use `PYTHON=/path/to/licensed/python` before a command if `python3` does not
+select the intended environment. Run the methods sequentially on the same
+machine, with no competing campaign. The driver freezes sources, records exact
+commands and software/hardware settings, and writes per-configuration CSVs and
+logs. It refuses existing output directories. Saved rows survive interruption;
+there is no automatic integer resume. See [RunContinue.md](RunContinue.md) for
+the layout/output specification, parameter overrides, interruption handling,
+LP recovery, and analysis plan. The current v4 process is not changed by the
+launcher. Its results remain historical until the implementation audit is complete.
+
+`RunSafeWeightedStatic.py` remains an equivalent name for the shared runner.
+The older `EscortFlowStatic.py` and `LoadFlowStatic.py` also accept
+`--safe-weighted` to use this exact protocol with their familiar option names.
+Their ordinary historical modes retain their original objective/horizon options;
+use `SolveStatic.py` for the corrected paper experiments. Use fresh CSVs and
+preserve frozen sources when reproducing older v4/v5 data.
+
 ## Main entry points
 
+- `SolveStatic.py`: recommended common static SBM entry point for LF or EF, with automatic sufficient weights/horizons, common greedy starts, proof timing, and optional LP bounds
+- `RunContinue.sh`: readable Bash driver for the corrected multi-target continue-mode campaign; design and recovery instructions in `RunContinue.md`
 - `EscortFlowSim_v8.py`: primary simulator for dynamic request arrivals, rolling-horizon control, hybrid MILP/greedy policy, CSV reporting, and optional raw pickle export, using Gurobi directly from Python
 - `EscortFlowStatic.py`: static escort-flow experiment runner for single-load and multi-load instances, defaulting to the Gurobi Python backend and also supporting greedy-only and naive-lower-bound modes
 - `LoadFlowStatic.py`: static load-flow experiment runner; BM is the default, `--lm` switches to LM, and the Gurobi Python API is the default backend
@@ -313,27 +429,27 @@ use `--python /path/to/python`. The interpreter and solver versions are saved.
 
 **Experimental coverage.** The four layouts and outputs are:
 
-| Grid | Outputs | Escorts for approximately 70% occupancy |
-| --- | --- | ---: |
-| 13x7 | (6,0) | 27 |
-| 10x10 | (0,0) | 30 |
-| 16x10 | (4,0), (11,0) | 48 |
-| 27x10 | (4,0), (13,0), (22,0) | 81 |
+| Grid | Outputs |
+| --- | --- |
+| 13x7 | (6,0) |
+| 10x10 | (0,0) |
+| 16x10 | (4,0), (11,0) |
+| 27x10 | (4,0), (13,0), (22,0) |
 
 | Retrieval mode | Targets | Escort counts in each layout |
 | --- | ---: | --- |
 | leave | 1 | 3, 4, 5, 6, 7, 8 |
 | leave | 2 | 8, 12, 16 |
-| leave | 4 | 8, 12, 16, plus the approximately 70%-occupancy count |
+| leave | 4 | 8, 12, 16 |
 | leave | 6 | 8, 12, 16, 20 |
-| continue | 2, 4 | 8, 12, 16, plus the approximately 70%-occupancy count |
-| continue | 6 | 8, 12, 16, 20, plus the approximately 70%-occupancy count |
+| continue | 2, 4, 6 | 8, 12, 16 |
 
-This includes the existing leave benchmarks, `Run70Percent.py` and
-`RunTable2Targets.py` configurations, and `RunContinue.py` configurations.
-Six-target continue cases also include 20 escorts for comparison with leave
-mode. There are **120 configuration rows**, **12,000 paired instances**,
-**24,000 integer searches**, and **24,000 LP solves** at the default seed range.
+This includes the existing leave benchmarks, `RunTable2Targets.py`
+configurations, and the current continue-mode configurations. The withdrawn
+70%-occupancy sweep is excluded. There are **100 configuration rows**,
+**10,000 paired instances**, **20,000 integer searches**, and **20,000 LP solves**
+at the default seed range. For the current priority, run `RunContinue.sh` first
+rather than starting this complete leave/continue reproduction campaign.
 Each integer instance is followed immediately by its LP relaxation. Both results
 are saved in the same CSV row. All jobs run sequentially to avoid competing for memory.
 Run the full campaign inside tmux; it is a substantial computation.
@@ -722,7 +838,11 @@ use the saved candidate and strongest observed bound, without additional
 solution-vector reads. Once flow is proved, routine proof checks stop; cutoff
 handling, contradictory-solution detection, and final validation remain active.
 
-### Targeted 70%-occupancy experiment
+### Historical 70%-occupancy experiment (withdrawn)
+
+Tal withdrew this experiment on October 10, 2026. Its launcher and the
+instructions below are retained for historical reproduction. It is excluded
+from the current continue-mode and full-paper campaign plans.
 
 `Run70Percent.py` runs four-target, leave-mode SBM cases on all four
 Table 2 layouts and output locations. It compares EF and LF on the same 100
@@ -790,11 +910,14 @@ effect of occupancy.
 
 ### Continue-mode and additional target-count campaigns
 
-All three launchers share `RunStaticCampaign.py`, use both EF and LF, and retain
+For continue mode, prefer the simple Bash launcher documented above:
+`bash RunContinue.sh results_continue_v6`. The Python launchers below remain
+available and share `RunStaticCampaign.py`, use both EF and LF, and retain
 the same source snapshots, pairing checks, integer objective, greedy warm starts,
 300-second main budget, and conditional 300-second extension. `RunContinue.py`
-uses escort counts **8, 12, 16**, plus the layout-specific approximately
-70%-occupancy counts **27, 30, 48, 81** above. `RunTable2Targets.py` uses
+uses escort counts **8, 12, 16** at each target count. `Run70Percent.py` is
+preserved for historical reproduction and is outside the current revision scope.
+`RunTable2Targets.py` uses
 **8, 12, 16** escorts for **2 targets**, and **8, 12, 16, 20** for **6 targets**.
 It calculates the matched LP relaxation immediately after each integer instance
 and writes the bound into that instance's CSV row. This is enabled by default.
@@ -802,19 +925,20 @@ and writes the bound into that instance's CSV row. This is enabled by default.
 | Launcher | Retrieval mode | Targets | Configuration rows | Distinct instances | Integer runs | LP solves by default |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
 | `Run70Percent.py` | leave | 4 | 4 | 400 | 800 | 0 |
-| `RunContinue.py` | continue | 2, 4, 6 | 48 | 4,800 | 9,600 | 0 |
+| `RunContinue.sh` | continue | 2, 4, 6 | 36 | 3,600 | 7,200 | 7,200 |
+| `RunContinue.py` | continue | 2, 4, 6 | 36 | 3,600 | 7,200 | 0 |
 | `RunTable2Targets.py` | leave | 2, 6 | 28 | 2,800 | 5,600 | 5,600 |
 
 Counts assume all four layouts and seeds 1-100. Commands for the Linux box:
 
 ```bash
-python3 -u Run70Percent.py --threads 16
-python3 -u RunContinue.py --threads 16
+bash RunContinue.sh results_continue_v6
 python -u RunTable2Targets.py --threads 16 --lp-threads 16
 ```
 
 Run the campaigns separately so their processes do not compete for memory or
-solver threads. Add `--dry-run` to inspect commands, `--seeds 1-3` for a pilot,
+solver threads. The Bash overrides and output layout are documented in
+`RunContinue.md`. For the Python alternatives, add `--dry-run` to inspect commands, `--seeds 1-3` for a pilot,
 or `--layouts 13x7` to select one layout. All launchers accept `--python`,
 `--weighted-time-limit`, `--extension-time-limit`, and `--output-dir`. In tmux,
 no `nohup` is necessary. Fresh result directories are respectively
@@ -824,9 +948,9 @@ Merged files are `occupancy70_{escortflow,loadflow}.csv`,
 `table2b_targets_{escortflow,loadflow}.csv`. Per-configuration files include
 the target and escort counts whenever these vary.
 
-After the current four-target run finishes, update the Linux checkout with
-`git pull --ff-only`, then run `RunTable2Targets.py` in tmux using the solver's
-Python environment. No new instance or model preparation is needed. To inspect
+The current priority is the corrected continue-mode campaign, followed by the
+multi-target leave-mode rerun. Use the numerical-study machine's licensed
+Python environment. To inspect
 the complete plan without solving, use `python3 RunTable2Targets.py --dry-run`.
 The result directory freezes the Python sources before any batch begins.
 
@@ -889,7 +1013,7 @@ python -u RunSafeWeightedStatic.py --formulation loadflow \
 ```
 
 `--with-lp` means integer plus LP in one CSV. `--lp` still means an LP-only run.
-Both integer-plus-LP workflows use the current v5 rule. The currently running
+Both integer-plus-LP workflows use v5 coefficient/horizon arithmetic with the corrected v6 models. The currently running
 v4 campaign keeps its existing frozen code and can use the separate v4 replay.
 
 In continue mode, a target is served when it reaches an output and immediately
@@ -1224,7 +1348,11 @@ retrieval-mode parameter. Although the legacy CLI accepts other mode labels
 with `--opl`, those files implement leave behavior. Use the Gurobi load-flow
 backend for continue-mode experiments.
 
-### Complete CLI reference for the revised weighted runner
+### Complete CLI reference for the common static entry point
+
+`SolveStatic.py` exposes this interface and is the recommended command for both
+formulations. `RunSafeWeightedStatic.py` exposes the same interface for existing
+scripts. The older standalone solvers select it with `--safe-weighted`.
 
 `RunSafeWeightedStatic.py` selects either formulation using `--formulation`.
 Every argument below is available for **both escort flow and load flow**;
@@ -1253,7 +1381,7 @@ These fixed settings are not extra CLI arguments.
 | `--with-lp` | Off | After each integer instance, save its separate continuous LP bound in the same CSV row. |
 | `--lp-threads N` | `1` | With `--with-lp`, positive thread count for each LP solve. Direct `--lp` instead uses `--threads`. |
 | `--lp-time-limit SECONDS` | `300` | With `--with-lp`, positive LP budget separate from integer budgets. Direct `--lp` instead uses `--weighted-time-limit`. |
-| `--lp-protocol {v4,v5}` | `v5` | Direct `--lp`: archived `v4` or current `v5` coefficient/horizon conventions. Integer runs always use `v5`. |
+| `--lp-protocol {v4,v5}` | `v5` | Direct `--lp`: archived `v4` or current `v5` coefficient/horizon conventions. Integer runs use protocol `v6` with `v5` coefficient/horizon arithmetic. |
 | `--lp-workers N` | `1` | Direct `--lp`: positive number of parallel LP workers. Does not parallelize integer or `--with-lp` instances. |
 | `--lp-retry-time-limit SECONDS` | `600` | Positive LP retry budget, if needed, for either LP mode. |
 | `--resume` | Off | Direct `--lp` only: resume after checking saved inputs and frozen sources. |

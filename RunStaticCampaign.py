@@ -32,7 +32,8 @@ CAMPAIGNS = {
     "occupancy70": dict(prefix="occupancy70", directory="70percent", mode="leave", loads=(4,),
                         description="Four-target leave-mode cases at approximately 70% occupancy."),
     "continue": dict(prefix="continue", directory="continue", mode="continue", loads=(2, 4, 6),
-                     description="Continue-mode cases with 2, 4 and 6 targets, at every Table 2(b) escort count including approximately 70% occupancy."),
+                     escorts_by_loads={2: (8, 12, 16), 4: (8, 12, 16), 6: (8, 12, 16)},
+                     description="Continue-mode cases with 2, 4 and 6 targets and 8/12/16 escorts; the 70% occupancy experiment is outside the revision scope."),
     "target_counts": dict(prefix="table2b_targets", directory="table2b_targets", mode="leave", loads=(2, 6),
                          escorts_by_loads={2: (8, 12, 16), 6: (8, 12, 16, 20)}, lp=True,
                          description="Tables 2 and 3 leave-mode cases: 2 targets with 8/12/16 escorts, "

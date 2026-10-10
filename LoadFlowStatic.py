@@ -9,6 +9,13 @@
 # Licence:     Free but please let me know that you are using it
 # -------------------------------------------------------------------------------
 
+# Current benchmark path: sufficient objective/horizon, matched warm start,
+# first-cutoff records, conditional continuation, and optional LP bounds.
+import sys
+if "--safe-weighted" in sys.argv[1:]:
+    from static_safe_cli import run
+    raise SystemExit(run("loadflow", sys.argv[1:]))
+
 # import os
 import random
 import sys
@@ -26,6 +33,9 @@ import PBS_DPHeuristic_bm
 import OneStepHeuristic_v2
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--safe-weighted', action='store_true',
+                    help='Use the current benchmark protocol with automatic sufficient weights/horizon; '
+                         'combine --safe-weighted --help to see its options')
 
 
 def solver_thread_count():

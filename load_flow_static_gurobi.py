@@ -368,12 +368,12 @@ class LoadFlowStaticGurobiSolver:
 
         for output in self.output_cells:
             for t in tr:
-                if self.config.retrieval_mode == "continue":
-                    # Retire on arrival. q converts target flow into blocker
-                    # flow without freeing a cell or imposing a service takt.
-                    model.addConstr(gp.quicksum(
-                        x[(move, t, 1)] for move in self.network["outgoing"][output]) == 0)
-                else:
+                # Both modes retire target flow at its first output arrival.
+                # In leave mode q reserves the following service interval;
+                # in continue mode q converts the target into blocking flow.
+                model.addConstr(gp.quicksum(
+                    x[(move, t, 1)] for move in self.network["outgoing"][output]) == 0)
+                if self.config.retrieval_mode == "leave":
                     model.addConstr(
                         gp.quicksum(
                             x[(move, t, commodity)]
@@ -404,6 +404,10 @@ class LoadFlowStaticGurobiSolver:
             )
 
         model.addConstr(gp.quicksum(q.values()) == len(target_set))
+
+        # t=T is an idle bookkeeping layer, not an extra physical movement step.
+        for move in self.network["nonstay_moves"]:
+            model.addConstr(x[(move, T, 2)] == 0)
 
         for loc in self.network["locations"]:
             for t in range(1, T + 1):

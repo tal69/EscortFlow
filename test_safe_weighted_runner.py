@@ -105,7 +105,7 @@ class SafeWeightedRunnerTests(unittest.TestCase):
         self.assertEqual(row["error"], "")
         self.assertEqual((row["flow_weight"], row["safe_movement_bound"], row["safe_flow_horizon"]), (34, 35, 5))
         self.assertEqual(row["safe_movement_lower_bound"], 2)
-        self.assertEqual(row["protocol"], "safe_integer_flow_timing_v5")
+        self.assertEqual(row["protocol"], "safe_integer_flow_timing_v6")
         self.assertEqual(row["weighted_horizon"], 5)
         self.assertEqual(row["weighted_global_scope"], 1)
         self.assertEqual(row["flow_proven"], 1)
@@ -433,6 +433,7 @@ class SafeWeightedRunnerTests(unittest.TestCase):
 
         old_fields = [key for key in runner.FIELDNAMES if key != "safe_movement_lower_bound"]
         incompatible = ((dict(row, protocol="safe_integer_flow_timing_v4"), runner.FIELDNAMES, "protocol"),
+                        (dict(row, protocol="safe_integer_flow_timing_v5"), runner.FIELDNAMES, "protocol"),
                         (row, old_fields, "schema"),
                         (dict(row, flow_weight=36, movement_weight=1/36), runner.FIELDNAMES, "safe objective"))
         for side in ("source", "destination"):

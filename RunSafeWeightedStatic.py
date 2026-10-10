@@ -26,7 +26,7 @@ from static_weighted_certification import (
     safe_weight_parameters,
 )
 
-PROTOCOL = "safe_integer_flow_timing_v5"
+PROTOCOL = "safe_integer_flow_timing_v6"
 FLOW_PROOF_CHECK_MODE = "bound_or_flow_change"
 SOLUTION_FIELDS = (
     "has_solution", "makespan", "flowtime", "movements", "objective", "best_bound",
@@ -38,6 +38,7 @@ FIELDNAMES = [
     "flow_weight", "movement_integer_weight", "movement_weight", "objective_units",
     "scaled_objective_units", "safe_movement_bound", "safe_movement_lower_bound",
     "safe_flow_horizon", "warmstart", "threads",
+    "model_num_variables", "model_num_constraints", "model_num_nonzeros",
     "weighted_horizon", "weighted_physical_horizon", "weighted_global_scope", "greedy_makespan",
     "greedy_flowtime", "greedy_movements", "greedy_objective", "greedy_scaled_objective", "greedy_time",
     "weighted_time_limit", "extension_time_limit", "total_time_limit", "Solver Status",
@@ -182,6 +183,8 @@ def run_instance(args, seed, escort_count, solver_factory=make_solver):
             search = solver.solve(targets, escorts, horizon, warmstart=warmstart)
         finally:
             solver.close()
+        for key in ("model_num_variables", "model_num_constraints", "model_num_nonzeros"):
+            row[key] = search.get(key)
         final = search
         snapshot = search["phase1_snapshot"]
         weighted = dict(snapshot)
@@ -402,14 +405,19 @@ def nonnegative_number(value):
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--formulation", choices=("escortflow", "loadflow"), required=True)
-    parser.add_argument("-x", dest="Lx", type=int, required=True)
-    parser.add_argument("-y", dest="Ly", type=int, required=True)
-    parser.add_argument("-O", "--outputs", type=int, nargs="+", required=True)
-    parser.add_argument("-e", "--escorts", default="3-8")
-    parser.add_argument("-l", "--loads", type=int, default=1)
-    parser.add_argument("-r", "--seeds", default="1-100")
+    parser = argparse.ArgumentParser(description=(
+        "Solve static SBM retrieval with the corrected v6 protocol. Both formulations "
+        "automatically receive the same greedy warm start, sufficient integer "
+        "objective weight, and sufficient physical horizon. See README.md."))
+    parser.add_argument("--formulation", choices=("escortflow", "loadflow"), required=True,
+                        help="select the EF or LF Gurobi model")
+    parser.add_argument("-x", dest="Lx", type=int, required=True, help="grid width")
+    parser.add_argument("-y", dest="Ly", type=int, required=True, help="grid height")
+    parser.add_argument("-O", "--outputs", type=int, nargs="+", required=True,
+                        help="output coordinates: x1 y1 [x2 y2 ...]")
+    parser.add_argument("-e", "--escorts", default="3-8", help="escort count or range (default: 3-8)")
+    parser.add_argument("-l", "--loads", type=int, default=1, help="target count (default: 1)")
+    parser.add_argument("-r", "--seeds", default="1-100", help="seed or range, e.g., 1 or 1-100 (default: 1-100)")
     parser.add_argument("-m", "--retrieval-mode", choices=("leave", "continue"), default="leave")
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--weighted-time-limit", type=positive_number, default=300,
@@ -425,7 +433,7 @@ def parse_args(argv=None):
     parser.add_argument('--with-lp', action='store_true', help='After each integer instance, save its continuous LP bound in the same CSV row')
     parser.add_argument('--lp-threads', type=int, default=1, help='Threads for each integrated LP solve (default 1)')
     parser.add_argument('--lp-time-limit', type=positive_number, default=300, help='Integrated LP budget, separate from integer budgets')
-    parser.add_argument('--lp-protocol', choices=['v4', 'v5'], default='v5', help='LP coefficient/horizon conventions: archived v4 or current v5')
+    parser.add_argument('--lp-protocol', choices=['v4', 'v5'], default='v5', help='LP coefficient/horizon conventions: archived v4 or v5 (also used by corrected v6 models)')
     parser.add_argument('--lp-workers', type=int, default=1)
     parser.add_argument('--lp-retry-time-limit', type=positive_number, default=600)
     parser.add_argument('--resume', action='store_true', help='Resume direct --lp results')
@@ -446,7 +454,7 @@ def parse_args(argv=None):
         if args.resume and not args.lp:
             raise ValueError('--resume requires --lp')
         if args.lp_protocol != 'v5' and not args.lp:
-            raise ValueError('--lp-protocol v4 requires --lp; integer runs use v5')
+            raise ValueError('--lp-protocol v4 requires --lp; integer runs use v6')
         if args.with_lp and args.lp:
             raise ValueError('Choose --with-lp for integer plus LP, or --lp for LP only')
         if args.stop_at_flow_proof and args.lp:

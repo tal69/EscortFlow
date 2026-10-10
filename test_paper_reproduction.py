@@ -30,9 +30,9 @@ def example_row(method="loadflow"):
         "has_solution": "1", "flowtime": "6", "movements": "8", "scaled_objective": "230",
         "scaled_best_bound": "179", "weighted_bound_consistent": "1", "phase1_flow_proven": "0",
         "weighted_proven": "0", "weighted_cpu_time": "12", "weighted_cpu_time_is_estimate": "1",
-        "weighted_time_limit": "300", "extension_time_limit": "300", "threads": "16", "warmstart": "1",
+        "weighted_time_limit": "300", "extension_time_limit": "300", "threads": "16", "warmstart": "1", "stop_at_flow_proof": "0",
         "final_has_solution": "1", "final_flowtime": "5", "final_movements": "7",
-        "final_lexicographic_proven": "0", "protocol": "safe_integer_flow_timing_v5", "error": ""}
+        "final_lexicographic_proven": "0", "protocol": "safe_integer_flow_timing_v6", "error": ""}
 
 
 def example_lp(row):
@@ -43,19 +43,19 @@ def example_lp(row):
 class ReproductionTests(unittest.TestCase):
     def test_default_plan_covers_both_models_modes_and_all_requested_rows(self):
         configs = list(paper.paper_configurations([f"{x}x{y}" for x, y, _, _ in paper.LAYOUTS]))
-        self.assertEqual(len(configs), 120)
-        self.assertEqual(len({(c["mode"], c["lx"], c["ly"], c["loads"], c["escorts"]) for c in configs}), 120)
+        self.assertEqual(len(configs), 100)
+        self.assertEqual(len({(c["mode"], c["lx"], c["ly"], c["loads"], c["escorts"]) for c in configs}), 100)
         for lx, ly, occupancy, _ in paper.LAYOUTS:
             counts = lambda mode, loads: {c["escorts"] for c in configs if
                 (c["lx"], c["ly"], c["mode"], c["loads"]) == (lx, ly, mode, loads)}
             self.assertEqual(counts("leave", 1), set(range(3,9)))
             self.assertEqual(counts("leave", 2), {8,12,16})
-            self.assertEqual(counts("leave", 4), {8,12,16,occupancy})
+            self.assertEqual(counts("leave", 4), {8,12,16})
             self.assertEqual(counts("leave", 6), {8,12,16,20})
             self.assertEqual(counts("continue", 1), set())
-            self.assertEqual(counts("continue", 2), {8,12,16,occupancy})
-            self.assertEqual(counts("continue", 4), {8,12,16,occupancy})
-            self.assertEqual(counts("continue", 6), {8,12,16,20,occupancy})
+            self.assertEqual(counts("continue", 2), {8,12,16})
+            self.assertEqual(counts("continue", 4), {8,12,16})
+            self.assertEqual(counts("continue", 6), {8,12,16})
 
     def test_parameter_free_and_seed_subset_dry_runs_require_no_solver(self):
         for seed_args, expected in (([], "1-100"), (["5-7"], "5-7"), (["--seeds", "2-4"], "2-4")):
@@ -65,7 +65,7 @@ class ReproductionTests(unittest.TestCase):
                     "--dry-run", "--output-dir", str(destination)], text=True, capture_output=True, check=True)
                 self.assertFalse(destination.exists())
                 commands = [shlex.split(line) for line in result.stdout.splitlines() if "RunSafeWeightedStatic.py" in line]
-                self.assertEqual(len(commands), 240)
+                self.assertEqual(len(commands), 200)
                 self.assertTrue(all(c[c.index("--seeds")+1] == expected for c in commands))
                 self.assertEqual(sum("RunStaticLP.py" in line for line in result.stdout.splitlines()), 2)
 

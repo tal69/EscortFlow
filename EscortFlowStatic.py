@@ -20,6 +20,13 @@
 # Depends on   PBSCom.py, PBS_DPHeuristic_lm.py, pbs_escorts3.mod, , pbs_escorts_bm.mod
 #              Assumes oplrun is installed and on the path
 # -------------------------------------------------------------------------------
+# Current benchmark path: sufficient objective/horizon, matched warm start,
+# first-cutoff records, conditional continuation, and optional LP bounds.
+import sys
+if "--safe-weighted" in sys.argv[1:]:
+    from static_safe_cli import run
+    raise SystemExit(run("escortflow", sys.argv[1:]))
+
 import copy
 import random
 import sys
@@ -40,6 +47,9 @@ import OneStepHeuristic_v2
 import argparse
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--safe-weighted', action='store_true',
+                    help='Use the current benchmark protocol with automatic sufficient weights/horizon; '
+                         'combine --safe-weighted --help to see its options')
 
 
 def solver_thread_count():
