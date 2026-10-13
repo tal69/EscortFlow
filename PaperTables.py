@@ -1,8 +1,10 @@
 """Validated, solver-independent aggregation of revised PBS paper experiments.
 
-Called automatically by ReproducePaper.py. All percentages are calculated per
-instance before averaging. Initial-cutoff bounds/times remain method-specific;
-best-known solutions include both models and their conditional extensions.
+Called automatically by ReproducePaper.py. Gap percentages use ratios of lower
+and upper bound totals; FT/MV improvements use unrounded component averages.
+Initial-cutoff bounds/times remain method-specific;
+integer gaps use each method's own cutoff incumbent. LP gaps and solution
+improvements use best-known solutions from both models and their extensions.
 """
 
 import ast
@@ -63,11 +65,22 @@ def feasible_pairs(row):
 
 
 def percentage_gap(upper, lower):
-    if not math.isfinite(lower) or lower < -1e-6 or lower > upper + 1e-6:
+    if (not math.isfinite(upper) or upper < 0 or not math.isfinite(lower)
+            or lower < -1e-6 or lower > upper + 1e-6):
         raise ValueError(f"Lower bound {lower} is incompatible with upper bound {upper}")
     if upper == 0:
         return 0.0
     return 100 * (upper - min(upper, max(0, lower))) / upper
+
+
+def gap_from_totals(pairs):
+    """Weight instance gaps by their unrounded upper bounds, including zeros."""
+    pairs = list(pairs)
+    for upper, lower in pairs:
+        percentage_gap(upper, lower)  # Reject invalid individual bounds.
+    upper = math.fsum(up for up, _ in pairs)
+    lower = math.fsum(min(up, max(0, lb)) for up, lb in pairs)
+    return percentage_gap(upper, lower)
 
 
 def improvement(greedy, best):
@@ -102,7 +115,8 @@ def component_metrics(row, best, lp):
     # Thus L_Q <= (R+K)*F - K*(D-d_max). Both components are integers.
     flow_lb = max(distance, math.ceil((bound + load_count * (distance - maximum_distance)
                                      - EPSILON) / (coefficient + load_count)))
-    movement_lb = max(distance, math.ceil(bound - coefficient * best[0] - EPSILON))
+    # The movement gap is conditional on this method's own cutoff flow time.
+    movement_lb = max(distance, math.ceil(bound - coefficient * flow - EPSILON))
     flow_opt = row["phase1_flow_proven"] == "1"
     move_opt = row["weighted_proven"] == "1"
     if flow_opt:
@@ -112,7 +126,7 @@ def component_metrics(row, best, lp):
     if move_opt:
         if (flow, moves) != best or not flow_opt:
             raise ValueError("A best-known pair contradicts the initial lexicographic proof")
-        flow_lb, movement_lb = best
+        flow_lb, movement_lb = flow, moves
     total_cpu = float(row["weighted_cpu_time"])
     flow_cpu = float(row["first_flow_proof_cpu_time"]) if flow_opt else total_cpu
     if (not math.isfinite(total_cpu) or not math.isfinite(flow_cpu)
@@ -133,9 +147,11 @@ def component_metrics(row, best, lp):
                 utilization=load_count / (lx * ly), naive_ft=distance,
                 greedy_ft=integer(row, "greedy_flowtime"), greedy_mv=integer(row, "greedy_movements"),
                 best_ft=best[0], best_mv=best[1], flow_weight=coefficient,
-                ft_lower_bound=flow_lb, mv_lower_bound_at_best_ft=movement_lb,
+                incumbent_ft=flow, incumbent_mv=moves,
+                ft_lower_bound=flow_lb, mv_lower_bound_at_incumbent_ft=movement_lb,
+                lp_upper_bound=reference, lp_lower_bound=float(lp["lp_objective"]),
                 ft_opt=int(flow_opt), mv_opt=int(move_opt),
-                ft_gap_pct=percentage_gap(best[0], flow_lb), mv_gap_pct=percentage_gap(best[1], movement_lb),
+                ft_gap_pct=percentage_gap(flow, flow_lb), mv_gap_pct=percentage_gap(moves, movement_lb),
                 lp_gap_pct=percentage_gap(reference, float(lp["lp_objective"])),
                 ft_cpu_seconds=flow_cpu, total_cpu_seconds=total_cpu,
                 ft_improvement_pct=improvement(integer(row, "greedy_flowtime"), best[0]),
@@ -153,13 +169,22 @@ def aggregate(records):
         common = {field: rows[0][field] for field in ("mode", "layout", "outputs", "loads", "escorts", "utilization")}
         common["instances"] = len(rows)
         comparisons.append(dict(**common, method=key[-1],
+            ft_opt_count=sum(r["ft_opt"] for r in rows),
+            mv_opt_count=sum(r["mv_opt"] for r in rows),
             ft_opt_pct=100 * statistics.mean(r["ft_opt"] for r in rows),
             mv_opt_pct=100 * statistics.mean(r["mv_opt"] for r in rows),
+            ft_gap_pct=gap_from_totals((r["incumbent_ft"], r["ft_lower_bound"]) for r in rows),
+            mv_gap_pct=gap_from_totals((r["incumbent_mv"], r["mv_lower_bound_at_incumbent_ft"]) for r in rows),
+            lp_gap_pct=gap_from_totals((r["lp_upper_bound"], r["lp_lower_bound"]) for r in rows),
             **{field: statistics.mean(r[field] for r in rows) for field in
-               ("ft_gap_pct", "mv_gap_pct", "lp_gap_pct", "ft_cpu_seconds", "total_cpu_seconds")}))
+               ("ft_cpu_seconds", "total_cpu_seconds")}))
         if key[-1] == "loadflow":
             solutions.append(dict(**common, **{field: statistics.mean(r[field] for r in rows) for field in
-                ("naive_ft", "greedy_ft", "greedy_mv", "best_ft", "best_mv", "ft_improvement_pct", "mv_improvement_pct")}))
+                ("naive_ft", "greedy_ft", "greedy_mv", "best_ft", "best_mv")},
+                # Ratios of sums equal ratios of unrounded means and weight
+                # each instance by its corresponding greedy component.
+                ft_improvement_pct=improvement(sum(r["greedy_ft"] for r in rows), sum(r["best_ft"] for r in rows)),
+                mv_improvement_pct=improvement(sum(r["greedy_mv"] for r in rows), sum(r["best_mv"] for r in rows))))
     return comparisons, solutions
 
 
@@ -170,7 +195,7 @@ def tabular_header(kind):
                   r"\midrule"]
         columns = [r"\makecell{PBS dim.\\(\# outs)}", r"\makecell{\#\\esc.}"]
         columns += [r"\makecell{" + title + "}" for _ in METHODS for title in
-                    (r"FT\\opt.\\(\%)", r"MV\\opt.\\(\%)", r"FT\\gap\\(\%)", r"MV\\gap\\(\%)",
+                    (r"FT\\opt.\\(\#)", r"MV\\opt.\\(\#)", r"FT\\gap\\(\%)", r"MV\\gap\\(\%)",
                      r"LP\\gap\\(\%)", r"FT\\CPU\\(s)", r"Total\\CPU\\(s)")]
     else:
         alignment = "lrr|rrrrrrr"
@@ -203,8 +228,7 @@ def render_fragment(kind, rows):
                 raise ValueError("Incomplete method comparison")
             for method in METHODS:
                 row = methods[method]
-                cells += [f"{row['ft_opt_pct']:.2f}".rstrip("0").rstrip("."),
-                          f"{row['mv_opt_pct']:.2f}".rstrip("0").rstrip("."),
+                cells += [str(row["ft_opt_count"]), str(row["mv_opt_count"]),
                           "" if row["ft_opt_pct"] == 100 else f"{row['ft_gap_pct']:.2f}",
                           "" if row["mv_opt_pct"] == 100 else f"{row['mv_gap_pct']:.2f}", f"{row['lp_gap_pct']:.2f}"]
                 for field in ("ft_cpu_seconds", "total_cpu_seconds"):
@@ -236,11 +260,13 @@ def render_tables(directory, comparisons, solutions, seed_count):
         for loads, title in ((1, "Single target load"), (4, "Four target loads")):
             panels += [r"\subfloat[" + title + "]{%\n" + fragments[kind, "leave", loads] + "}"]
         caption = (f"Warm-started load-flow and escort-flow comparison over {seed_count} matched instances per row. "
-                   "Optimality rates, integer bounds, and times use the initial cutoff. Component and LP gaps use "
-                   "the common best-known solution, including extensions. Bold marks the lower time."
+                   "Optimality counts, integer bounds, and times use each method's initial cutoff. FT/MV gaps use "
+                   "that method's own cutoff incumbent; MV bounds are conditional on its cutoff FT. LP gaps use "
+                   "the common best-known solution including extensions. Gaps use ratios of bound totals. Bold marks the lower time."
                    if kind == 2 else
                    f"Solution components and improvements over the greedy heuristic, averaged over {seed_count} "
-                   "matched instances per row. OPT is the common best-known feasible pair over both formulations, including extensions.")
+                   "matched instances per row. OPT is the common best-known feasible pair over both formulations, including extensions. "
+                   "FT/MV improvements are calculated from the unrounded component means.")
         (directory / f"table{kind}_leave.tex").write_text("\n".join([
             r"\begin{table}[p]", r"\centering", panels[0], r"\par\medskip", panels[1],
             r"\caption{" + caption + "}", r"\end{table}"]) + "\n")
@@ -326,11 +352,11 @@ def build_tables(root, manifest):
     audit = dict(passed=True, matched_instances=len(expected), integer_records=len(indexed), optimal_lp_records=len(lp_values),
                  seed_values=manifest["seed_values"], reference_records_used=references_used, inputs=inputs,
                  initial_cutoff_seconds=manifest["settings"]["weighted_time_limit"],
-                 gap_population="All selected instances, including zero gaps; average instance percentages",
+                 gap_population="All selected instances, including zero gaps; 100*(1-sum(lower)/sum(upper)) from unrounded bounds; FT/MV upper bounds are the method's own initial-cutoff incumbent components",
                  ft_lower_bound="max(D, ceil((L_Q + K*(D-d_max) - 0.001)/(R+K))); cutoff proof overrides",
-                 mv_lower_bound="max(D, ceil(L_Q - R*F_BK - 0.001)); conditional on best-known FT",
-                 lp_gap="100*(F_BK+M_BK/R-LP)/(F_BK+M_BK/R); only OPTIMAL LP values",
-                 improvement="100*(greedy_component-best_known_component)/greedy_component; same best pair for both components",
+                 mv_lower_bound="max(D, ceil(L_Q - R*F_incumbent - 0.001)); conditional on the method's own initial-cutoff FT",
+                 lp_gap="100*(1-sum(LP)/sum(F_BK+M_BK/R)); normalized objective units; only OPTIMAL LP values",
+                 improvement="100*(sum(greedy_component)-sum(best_known_component))/sum(greedy_component); ratio of unrounded means; same best pair for both components",
                  zero_reference_policy="Zero reference contributes zero percent only when its bound/component is also zero",
                  best_known="Common lexicographically smallest feasible (FT,MV) over greedy, both models, initial/final records, and supplied references",
                  timing="Initial-cutoff elapsed wall-clock time including model construction; unproved FT censored at cutoff",

@@ -81,9 +81,10 @@ class ReproductionTests(unittest.TestCase):
         metrics = tables.component_metrics(row, (5,7), example_lp(row))
         # ceil((179 + 10*(4-2)) / (37+10)) = 5, whereas single-target formula gives 4.
         self.assertEqual(metrics["ft_lower_bound"], 5)
-        self.assertEqual(metrics["mv_lower_bound_at_best_ft"], 4)
-        self.assertEqual(metrics["ft_gap_pct"], 0)
-        self.assertAlmostEqual(metrics["mv_gap_pct"], 100*3/7)
+        self.assertEqual(metrics["mv_lower_bound_at_incumbent_ft"], 4)
+        self.assertEqual((metrics["incumbent_ft"], metrics["incumbent_mv"]), (6,8))
+        self.assertAlmostEqual(metrics["ft_gap_pct"], 100/6)
+        self.assertAlmostEqual(metrics["mv_gap_pct"], 50)
         self.assertAlmostEqual(metrics["ft_improvement_pct"], 100/6)
         self.assertEqual(metrics["mv_improvement_pct"], 30)
         self.assertEqual(metrics["ft_cpu_seconds"], 12)
@@ -102,17 +103,58 @@ class ReproductionTests(unittest.TestCase):
         data = next(line for line in rendered.splitlines() if "4$\\times$3" in line).split(" & ")
         self.assertEqual(len(data), 16)
         for offset in (2,9):
-            self.assertEqual(data[offset:offset+4], ["100","100","",""])
+            self.assertEqual(data[offset:offset+4], ["1","1","",""])
             self.assertNotEqual(data[offset+4], "")
         self.assertEqual(rendered.count(r"\textbf{"), 4)  # both timing ties are bold
         self.assertNotIn("landscape", rendered)
 
-    def test_instance_percentages_are_averaged_not_ratios_of_means(self):
+    def test_gaps_use_lower_and_upper_bound_totals(self):
         first = tables.component_metrics(example_row(), (5,7), example_lp(example_row()))
-        second = dict(first, seed=2, ft_gap_pct=50, best_ft=100)
+        second = dict(first, seed=2, incumbent_ft=100, ft_lower_bound=50,
+                      incumbent_mv=200, mv_lower_bound_at_incumbent_ft=100,
+                      lp_upper_bound=100, lp_lower_bound=50,
+                      ft_gap_pct=50, mv_gap_pct=50, lp_gap_pct=50)
         comparisons, _ = tables.aggregate([first, second])
-        self.assertEqual(comparisons[0]["ft_gap_pct"], 25)
+        self.assertAlmostEqual(comparisons[0]["ft_gap_pct"], 100*(1-55/106))
+        self.assertAlmostEqual(comparisons[0]["mv_gap_pct"], 100*(1-104/208))
+        self.assertAlmostEqual(comparisons[0]["lp_gap_pct"],
+                               100*(1-(first["lp_lower_bound"]+50)/(first["lp_upper_bound"]+100)))
+        self.assertNotAlmostEqual(comparisons[0]["ft_gap_pct"], (first["ft_gap_pct"]+50)/2)
+        self.assertNotAlmostEqual(comparisons[0]["lp_gap_pct"], (first["lp_gap_pct"]+50)/2)
         self.assertEqual(comparisons[0]["instances"], 2)
+
+    def test_integer_gaps_ignore_shared_extension_pair_but_lp_uses_it(self):
+        row = dict(example_row(), scaled_best_bound="200", final_movements="20")
+        first = tables.component_metrics(row, (5,20), example_lp(row))
+        second = tables.component_metrics(row, (5,7), example_lp(row))
+        for field in ("incumbent_ft", "incumbent_mv", "ft_lower_bound",
+                      "mv_lower_bound_at_incumbent_ft", "ft_gap_pct", "mv_gap_pct"):
+            self.assertEqual(first[field], second[field])
+        # At incumbent FT=6, L_Q-R*FT is negative, so MV LB is D=4.
+        # At shared FT=5 it would instead be 15, an incompatible reference.
+        self.assertEqual(first["mv_lower_bound_at_incumbent_ft"], 4)
+        self.assertEqual(first["mv_gap_pct"], 50)
+        self.assertNotEqual(first["lp_upper_bound"], second["lp_upper_bound"])
+        self.assertNotEqual(first["lp_gap_pct"], second["lp_gap_pct"])
+
+    def test_gap_totals_validate_individual_bounds_and_zero_totals(self):
+        self.assertEqual(tables.gap_from_totals([(0,0), (0,0)]), 0)
+        self.assertEqual(tables.gap_from_totals([(0,0), (10,5)]), 50)
+        with self.assertRaises(ValueError):
+            tables.gap_from_totals([(1,2), (100,50)])
+
+    def test_improvement_uses_unrounded_means_and_greedy_component_weights(self):
+        first = tables.component_metrics(example_row(), (5,7), example_lp(example_row()))
+        second = dict(first, seed=2, greedy_ft=100, best_ft=50, greedy_mv=200, best_mv=100,
+                      ft_improvement_pct=50, mv_improvement_pct=50)
+        _, solutions = tables.aggregate([first, second])
+        row = solutions[0]
+        self.assertEqual(row["greedy_ft"], 53)
+        self.assertEqual(row["best_ft"], 27.5)
+        self.assertAlmostEqual(row["ft_improvement_pct"], 100*(106-55)/106)
+        self.assertAlmostEqual(row["mv_improvement_pct"], 100*(210-107)/210)
+        self.assertNotAlmostEqual(row["ft_improvement_pct"], (100/6+50)/2)
+        self.assertNotAlmostEqual(row["mv_improvement_pct"], (30+50)/2)
 
     def test_lp_replay_cannot_mix_modes_horizons_or_nonoptimal_values(self):
         row = example_row()

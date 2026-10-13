@@ -154,3 +154,17 @@ winner colors. A runtime pattern alone does not establish the cause of hardness.
 The driver and a short local pilot are validated. Full Linux execution,
 aggregation, insertion of tables/figures, and revision of numerical claims
 remain pending in `tasks.md`.
+
+## Revised six-target continuation (October 13, 2026)
+
+The completed two-/four-target outputs remain in the original campaign. The
+replacement six-target campaign uses 12/16/20 escorts, with LF 300 seconds and
+no extension, and EF 300 seconds plus its conditional 300-second extension.
+Use `RunContinueSixTargets.sh`; see `RunContinueSixTargets.md` for the verified
+launch command, source snapshot checks, new output root, and execution records.
+The initial 300-second comparisons remain matched. Do not combine the original
+six-target/eight-escort data into the revised rows.
+
+Local monitoring can use `inspect_continue_v6.py --campaign continue_v6` or
+`--campaign continue_v6_six_targets`, with a fresh `--output-dir`. The sync helper
+accepts the same campaign selector. Both use the enrolled lab-linux-access skill.
